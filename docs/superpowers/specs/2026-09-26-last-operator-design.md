@@ -1012,13 +1012,31 @@ sensitive (§17.3).
   last checkpoint and every entry after it, and then writes
   `gateway.start`, linked to the head. If verification fails, the
   gateway refuses to start.
-- A signed `checkpoint` entry (containing the current seq and hash) is
-  written every 1,000 entries or 10 minutes, whichever comes first.
+- A signed `checkpoint` entry (containing the previous entry's seq and
+  hash) is written every 1,000 entries or 10 minutes, whichever comes
+  first. Each checkpoint also writes an index object
+  `checkpoints/<chainId>/<seq>.json` (`{seq, hash}`, compliance-locked),
+  so startup and verification can find the latest checkpoint without
+  listing the whole chain. The verifier checks each index object
+  against the chain.
+- **Chain start:** the first entry has seq 0 and `prevHash` set to
+  `sha256:` followed by 64 zeros.
+- **Unclear write failures.** If a write fails in a way that leaves it
+  unclear whether it succeeded, the gateway retries the same bytes. A
+  412 (key exists) counts as success only if the stored bytes are
+  identical; otherwise the chain has diverged and the gateway stops.
+  After repeated failures the writer stops accepting writes until the
+  gateway restarts and re-reads the chain, so all actions are refused
+  in the meantime (fail-closed).
 
 ### 14.4 Storage backends
 
 **Bundled RustFS** (Apache 2.0, S3-compatible, supports Object Lock;
-Helm subchart, `last-audit` namespace, enabled by default). MinIO was
+`last-audit` namespace, enabled by default). The chart deploys a
+single-node RustFS StatefulSet with its own templates rather than a
+subchart, because Helm subcharts can only install into the parent
+release's namespace. Users and policies are created through RustFS's
+native admin API (`/rustfs/admin/v3/*`, plain JSON, SigV4-signed). MinIO was
 considered, but its community edition was archived in 2026 and no
 longer ships images.
 
@@ -1047,14 +1065,21 @@ configuration.
 
 **WORM conformance check.** `kubectl last audit conformance` (and a CI
 job against the bundled store) writes a probe object with short
-compliance retention to a `conformance/` prefix. It then asserts that
-each of these is **refused**:
+compliance retention to a `conformance/` prefix. It then asserts
+that:
 
-- deleting the object version;
-- overwriting the key (with and without `If-None-Match`);
-- shortening retention;
-- switching the object to governance mode;
-- deleting the bucket.
+- **These are refused:**
+  - deleting the object version;
+  - writing the key with `If-None-Match: *`;
+  - shortening retention;
+  - switching the object to governance mode;
+  - deleting the bucket.
+- **These leave the original version intact:**
+  - writing the key without `If-None-Match`, which S3 semantics allow
+    to create a *new* version;
+  - a plain `DELETE`, which creates a delete marker.
+
+  The verifier flags both of these separately (§14.5).
 
 It runs every check twice, once with the gateway's credentials and
 once with credentials supplied by an admin (e.g. root), and reports
@@ -1066,8 +1091,13 @@ intended for CI, for evaluating a new backend, and for periodic audits.
 
 - `kubectl last audit verify [--from-checkpoint N]` checks signatures,
   hash links, sequence continuity, that each seq has exactly one
-  object version, and checkpoint consistency. It exits non-zero on any
-  failure and names the first bad seq.
+  object version and no delete markers, and checkpoint consistency.
+  It reads each entry by version ID. It exits non-zero on any failure
+  and names the first bad seq.
+- **Truncation detection.** Compliance mode prevents deleting the end of
+  the chain, but `verify --expect-head N` also fails if the chain ends
+  before seq N. N can come from any external record, for example the
+  gateway's `last_audit_chain_seq` metric history.
 - `kubectl last audit log --intent ns/name [--follow]` prints a
   readable timeline.
 - The `internal/audit` package is shared by the gateway and the CLI.
