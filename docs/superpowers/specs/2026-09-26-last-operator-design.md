@@ -121,7 +121,7 @@ sysadmins (approvers, policy and rule authors).
                        │           image@digest ◄── Registry (last-registry, bundled; or external)
                        │                               ▲ push (build pods, no provider creds)
                     ┌──▼────────────────────────┐
-                    │ Audit sink (WORM)         │  bundled MinIO (last-audit ns)
+                    │ Audit sink (WORM)         │  bundled RustFS (last-audit ns)
                     │ S3 Object Lock, compliance│  or external S3-compatible
                     └───────────────────────────┘
 ```
@@ -138,7 +138,7 @@ Cluster admins are trusted (see §17.2 for what that implies).
 | `last-system` | Operator; cluster-scoped rule suggestions | none beyond its CRs | none |
 | `last-gateway` | Gateway, credential Secrets, signing key, Kubernetes provider ServiceAccounts | **none** | full within ns (incl. `serviceaccounts/token`) |
 | `last-sandbox` | Sandbox and build pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
-| `last-audit` | Bundled MinIO + root credentials | **none** | **none** (S3 API only) |
+| `last-audit` | Bundled RustFS + root credentials | **none** | **none** (S3 API only) |
 | `last-registry` | Bundled Distribution registry + GC sidecar, nginx front proxy, node-local pull proxy DaemonSet, registry credentials | **none** | **none** (registry API only) |
 
 ## 4. Components
@@ -212,7 +212,7 @@ command the system runs executes in one. See §11.
 ### 4.4 Audit sink
 
 WORM object storage via the S3 Object Lock API. The Helm chart bundles
-MinIO; external S3-compatible storage is also supported. See §14.
+RustFS; external S3-compatible storage is also supported. See §14.
 
 ### 4.5 Image registry
 
@@ -1017,23 +1017,50 @@ sensitive (§17.3).
 
 ### 14.4 Storage backends
 
-**Bundled MinIO** (Helm subchart, `last-audit` namespace, enabled by
-default):
+**Bundled RustFS** (Apache 2.0, S3-compatible, supports Object Lock;
+Helm subchart, `last-audit` namespace, enabled by default). MinIO was
+considered, but its community edition was archived in 2026 and no
+longer ships images.
 
 - An install Job creates the bucket with Object Lock enabled and sets
   default compliance-mode retention.
-- The gateway receives a MinIO user whose policy allows only
+- The gateway receives a RustFS user whose policy allows only
   `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`, and
   `s3:GetBucketObjectLockConfiguration`.
 - A separate read-only user is created for `kubectl last audit`.
-- MinIO root credentials exist only in `last-audit`. Neither the
+- RustFS root credentials exist only in `last-audit`. Neither the
   operator nor the gateway has RBAC there.
+- **The restricted users are defense in depth.** The integrity
+  guarantee comes from compliance mode, which stops even the root user
+  from deleting objects or shortening retention. The conformance check
+  (below) verifies this with root credentials.
+- **Production guidance:** the docs recommend external S3 (or Ceph RGW)
+  for production compliance use. RustFS is young (v1.x), and the bundled
+  store is the easy default.
 
 **External S3-compatible storage:** the admin supplies a bucket that
 already has Object Lock in compliance mode, plus credentials limited to
 the same permissions. At startup the gateway **refuses to start** if the
 lock is missing, not in compliance mode, or has a shorter retention
-than configured.
+than configured. This startup check only reads the bucket's lock
+configuration.
+
+**WORM conformance check.** `kubectl last audit conformance` (and a CI
+job against the bundled store) writes a probe object with short
+compliance retention to a `conformance/` prefix. It then asserts that
+each of these is **refused**:
+
+- deleting the object version;
+- overwriting the key (with and without `If-None-Match`);
+- shortening retention;
+- switching the object to governance mode;
+- deleting the bucket.
+
+It runs every check twice, once with the gateway's credentials and
+once with credentials supplied by an admin (e.g. root), and reports
+each result. It never runs automatically at gateway startup, so it
+doesn't write objects to production buckets unexpectedly. It is
+intended for CI, for evaluating a new backend, and for periodic audits.
 
 ### 14.5 Verification and reading
 
@@ -1166,7 +1193,7 @@ restricted to the same level as admin access.
 - **envtest:** Intent, ManagedResource, and suggestion flows against a
   real API server, using a **scripted fake LLM** (deterministic
   request → response fixtures) and a fake gateway.
-- **Gateway integration tests:** against MinIO via testcontainers,
+- **Gateway integration tests:** against RustFS via testcontainers,
   covering fail-closed behavior, refusal to start without compliance
   lock, and denial of unauthorized or mismatched commands; against
   Distribution + the nginx front proxy via testcontainers, covering
@@ -1179,7 +1206,7 @@ restricted to the same level as admin access.
   `decidedBy` spoofing is rejected; rule constraints are enforced
   (literal `argv[0]`, `...` last only).
 - **End-to-end tests on kind** (with Calico for NetworkPolicy): full
-  Helm install with bundled MinIO and registry; a command whose image
+  Helm install with bundled RustFS and registry, `kubectl last audit conformance` passing; a command whose image
   requires a build, then runs from the node-local proxy; the web server
   demo driven by the
   scripted LLM through discovery, approval with `--always-allow`,
@@ -1207,7 +1234,7 @@ internal/audit/          chain, signing, S3 sink, verifier (shared with CLI)
 internal/sandbox/        pod, credential, and NetworkPolicy builders; scheduler + queue
 internal/images/         image spec hashing, Containerfile generation, builds, registry client, GC
 images/sandbox-base/     base sandbox image
-charts/last-operator/    Helm chart (+ MinIO subchart; Distribution, front proxy, pull proxy; admission policies)
+charts/last-operator/    Helm chart (+ RustFS subchart; Distribution, front proxy, pull proxy; admission policies)
 images/registry-gc/      GC sidecar (wraps `registry garbage-collect`)
 docs/
 ```
@@ -1217,7 +1244,7 @@ docs/
 | # | Milestone | Scope | Done when |
 |---|---|---|---|
 | M0 | Scaffolding | kubebuilder project, all CRD types, Helm skeleton, CI (lint, unit, envtest) | `make test` green in CI; CRDs install on kind |
-| M1 | Audit foundation | `internal/audit`; gateway skeleton with fail-closed writes, leader election, startup verification; bundled MinIO with compliance lock; `kubectl last audit verify/log` | Tamper tests pass; gateway refuses to act when MinIO is down |
+| M1 | Audit foundation | `internal/audit`; gateway skeleton with fail-closed writes, leader election, startup verification; bundled RustFS with compliance lock; `kubectl last audit verify/log/conformance` | Tamper tests pass; conformance passes against bundled RustFS in CI; gateway refuses to act when the store is down |
 | M2 | Sandbox + lifecycle (fake LLM) | Sandbox pods on the base image only (commands with `image.install` rejected until M4), `kubernetes` and `env-secret` Providers, per-execution egress; concurrency cap + queue; Intent state machine; plans and hashing; `IntentApproval` + admission; plan enforcement; probes with compact audit, fixed interval, and no overlap; ManagedResource; output Secrets | e2e: scripted-LLM web server Intent goes Pending → Ready via `kubectl` in a sandbox, with a verified audit chain |
 | M3 | Real LLMs + web server demo | Anthropic and OpenAI-compatible adapters; Clarifying and Discovery phases; `kubectl last` create/answer/plan/approve/deny | `kubectl last "run an nginx web server serving X"` works end to end against a real model |
 | M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled Distribution + nginx front proxy + node-local pull proxy; external registry mode; audit-backed digest index; single flight; coordinated GC with sidecar. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
@@ -1262,7 +1289,7 @@ docs/
 | Tracking | Child `ManagedResource` CRs |
 | Outputs | Secret per resource + status |
 | Transcripts | In the audit log |
-| Audit | Gateway-written, fail-closed, hash-chained, signed, S3 Object Lock compliance; bundled MinIO or external |
+| Audit | Gateway-written, fail-closed, hash-chained, signed, S3 Object Lock compliance; bundled RustFS or external; WORM conformance check in CI and on demand |
 | Threat model | Untrusted operator; trusted cluster admins |
 | LLM | Pluggable from day one (Anthropic, OpenAI, OpenAI-compatible) |
 | Stack | Go + kubebuilder |
