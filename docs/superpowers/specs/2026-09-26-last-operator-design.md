@@ -1043,8 +1043,10 @@ longer ships images.
 - An install Job creates the bucket with Object Lock enabled and sets
   default compliance-mode retention.
 - The gateway receives a RustFS user whose policy allows only
-  `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`, and
-  `s3:GetBucketObjectLockConfiguration`.
+  `s3:PutObject`, `s3:PutObjectRetention` (needed to set retention on
+  each write; compliance mode still refuses any shortening),
+  `s3:GetObject`, `s3:GetObjectVersion`, `s3:ListBucket`,
+  `s3:ListBucketVersions`, and `s3:GetBucketObjectLockConfiguration`.
 - A separate read-only user is created for `kubectl last audit`.
 - RustFS root credentials exist only in `last-audit`. Neither the
   operator nor the gateway has RBAC there.
