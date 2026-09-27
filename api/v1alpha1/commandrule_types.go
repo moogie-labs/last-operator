@@ -5,70 +5,74 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// ArgvPattern matches a command's resolved argv position by position (spec §9.2):
+// a literal, a glob within one argument (*, ?, [...]), "re:<RE2>" anchored to one
+// argument, or "..." (last position only) for any remaining arguments.
+// +kubebuilder:validation:XValidation:rule="size(self.argv) == 0 || (!self.argv[0].contains('*') && !self.argv[0].contains('?') && !self.argv[0].contains('[') && !self.argv[0].startsWith('re:') && self.argv[0] != '...')",message="argv[0] must be a literal"
+// +kubebuilder:validation:XValidation:rule="!self.argv.exists(a, a == '...') || (self.argv[size(self.argv) - 1] == '...' && size(self.argv.filter(a, a == '...')) == 1)",message="'...' is only allowed in the last position"
+type ArgvPattern struct {
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=1024
+	Argv []string `json:"argv"`
+}
 
-// CommandRuleSpec defines the desired state of CommandRule
+// RuleOrigin records how a rule was created.
+// +kubebuilder:validation:Enum=approval;suggestion;manual
+type RuleOrigin string
+
+const (
+	RuleOriginApproval   RuleOrigin = "approval"
+	RuleOriginSuggestion RuleOrigin = "suggestion"
+	RuleOriginManual     RuleOrigin = "manual"
+)
+
+// RuleSource is provenance set by the CLI.
+type RuleSource struct {
+	CreatedFrom RuleOrigin `json:"createdFrom"`
+	// +optional
+	SuggestionRef *LocalRef `json:"suggestionRef,omitempty"`
+}
+
+// CommandRuleSpec lets matching commands skip approval (spec §9).
 type CommandRuleSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of CommandRule. Edit commandrule_types.go to remove/update
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// CommandRuleStatus defines the observed state of CommandRule.
-type CommandRuleStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the CommandRule resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	Description string `json:"description,omitempty"`
+	// +kubebuilder:validation:MinItems=1
+	Stages []Stage `json:"stages"`
+	// A command's providers must be a subset of this list.
+	// +kubebuilder:validation:MinItems=1
+	Providers []string    `json:"providers"`
+	Match     ArgvPattern `json:"match"`
+	// Every image.install command of a matching command must match one of these.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// +kubebuilder:validation:MaxItems=32
+	Install []ArgvPattern `json:"install,omitempty"`
+	// A command's declared egress must be a subset of this list.
+	// +optional
+	Egress []string `json:"egress,omitempty"`
+	// +optional
+	Source *RuleSource `json:"source,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Stages",type=string,JSONPath=`.spec.stages`
+// +kubebuilder:printcolumn:name="Match",type=string,JSONPath=`.spec.match.argv`
 
-// CommandRule is the Schema for the commandrules API
+// CommandRule is a namespace-scoped allow rule.
 type CommandRule struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of CommandRule
-	// +required
 	Spec CommandRuleSpec `json:"spec"`
-
-	// status defines the observed state of CommandRule
-	// +optional
-	Status CommandRuleStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// CommandRuleList contains a list of CommandRule
+// CommandRuleList contains a list of CommandRule.
 type CommandRuleList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CommandRule `json:"items"`
 }
 

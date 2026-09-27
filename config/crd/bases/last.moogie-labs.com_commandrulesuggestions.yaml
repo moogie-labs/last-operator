@@ -14,11 +14,21 @@ spec:
     singular: commandrulesuggestion
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.trigger
+      name: Trigger
+      type: string
+    - jsonPath: .spec.decision
+      name: Decision
+      type: string
+    - jsonPath: .spec.proposed.match.argv
+      name: Match
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: CommandRuleSuggestion is the Schema for the commandrulesuggestions
-          API
+        description: CommandRuleSuggestion is an allow rule the operator proposes;
+          only humans decide it.
         properties:
           apiVersion:
             description: |-
@@ -38,90 +48,241 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of CommandRuleSuggestion
+            description: CommandRuleSuggestionSpec is an operator-proposed allow rule
+              awaiting a human decision.
             properties:
-              foo:
-                description: foo is an example field of CommandRuleSuggestion. Edit
-                  commandrulesuggestion_types.go to remove/update
-                type: string
-            type: object
-          status:
-            description: status defines the observed state of CommandRuleSuggestion
-            properties:
-              conditions:
-                description: |-
-                  conditions represent the current state of the CommandRuleSuggestion resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+              breadthWarnings:
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  type: string
+                maxItems: 20
+                type: array
+              decidedBy:
+                minLength: 1
+                type: string
+              decision:
+                default: Pending
+                description: SuggestionDecision is a human's verdict on a suggestion.
+                enum:
+                - Pending
+                - Accepted
+                - Denied
+                type: string
+              decisionReason:
+                type: string
+              examples:
+                items:
+                  description: 'Command is the unit of action: one sandboxed execution
+                    (spec §8.1).'
                   properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
+                    egress:
+                      description: Egress lists host:port or CIDR:port destinations
+                        beyond what providers imply.
+                      items:
+                        type: string
+                      type: array
+                    files:
+                      additionalProperties:
+                        type: string
+                      description: Files are written under /work before the command
+                        runs, keyed by absolute path.
+                      type: object
+                    id:
                       type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
+                    image:
+                      description: ImageSpec lists install commands baked into the
+                        command's image at build time (spec §11.2).
+                      properties:
+                        install:
+                          items:
+                            description: ArgvCommand is a command executed directly,
+                              without a shell.
+                            properties:
+                              argv:
+                                items:
+                                  type: string
+                                minItems: 1
+                                type: array
+                            required:
+                            - argv
+                            type: object
+                          minItems: 1
+                          type: array
+                      required:
+                      - install
+                      type: object
+                    providers:
+                      description: Providers names the Provider credentials to inject.
+                      items:
+                        type: string
+                      type: array
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                    run:
+                      description: CommandRun is exactly one of argv (exec'd directly)
+                        or script (run with /bin/sh -c).
+                      properties:
+                        argv:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        script:
+                          minLength: 1
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of argv or script must be set
+                        rule: has(self.argv) != has(self.script)
+                    timeout:
                       type: string
                   required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
+                  - run
                   type: object
+                maxItems: 20
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
+              proposed:
+                description: CommandRuleSpec lets matching commands skip approval
+                  (spec §9).
+                properties:
+                  description:
+                    type: string
+                  egress:
+                    description: A command's declared egress must be a subset of this
+                      list.
+                    items:
+                      type: string
+                    type: array
+                  install:
+                    description: Every image.install command of a matching command
+                      must match one of these.
+                    items:
+                      description: |-
+                        ArgvPattern matches a command's resolved argv position by position (spec §9.2):
+                        a literal, a glob within one argument (*, ?, [...]), "re:<RE2>" anchored to one
+                        argument, or "..." (last position only) for any remaining arguments.
+                      properties:
+                        argv:
+                          items:
+                            maxLength: 1024
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                      required:
+                      - argv
+                      type: object
+                      x-kubernetes-validations:
+                      - message: argv[0] must be a literal
+                        rule: size(self.argv) == 0 || (!self.argv[0].contains('*')
+                          && !self.argv[0].contains('?') && !self.argv[0].contains('[')
+                          && !self.argv[0].startsWith('re:') && self.argv[0] != '...')
+                      - message: '''...'' is only allowed in the last position'
+                        rule: '!self.argv.exists(a, a == ''...'') || (self.argv[size(self.argv)
+                          - 1] == ''...'' && size(self.argv.filter(a, a == ''...''))
+                          == 1)'
+                    maxItems: 32
+                    type: array
+                  match:
+                    description: |-
+                      ArgvPattern matches a command's resolved argv position by position (spec §9.2):
+                      a literal, a glob within one argument (*, ?, [...]), "re:<RE2>" anchored to one
+                      argument, or "..." (last position only) for any remaining arguments.
+                    properties:
+                      argv:
+                        items:
+                          maxLength: 1024
+                          type: string
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                    required:
+                    - argv
+                    type: object
+                    x-kubernetes-validations:
+                    - message: argv[0] must be a literal
+                      rule: size(self.argv) == 0 || (!self.argv[0].contains('*') &&
+                        !self.argv[0].contains('?') && !self.argv[0].contains('[')
+                        && !self.argv[0].startsWith('re:') && self.argv[0] != '...')
+                    - message: '''...'' is only allowed in the last position'
+                      rule: '!self.argv.exists(a, a == ''...'') || (self.argv[size(self.argv)
+                        - 1] == ''...'' && size(self.argv.filter(a, a == ''...''))
+                        == 1)'
+                  providers:
+                    description: A command's providers must be a subset of this list.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  source:
+                    description: RuleSource is provenance set by the CLI.
+                    properties:
+                      createdFrom:
+                        description: RuleOrigin records how a rule was created.
+                        enum:
+                        - approval
+                        - suggestion
+                        - manual
+                        type: string
+                      suggestionRef:
+                        description: LocalRef names an object in the same namespace
+                          (or a cluster-scoped object).
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - createdFrom
+                    type: object
+                  stages:
+                    items:
+                      description: Stage identifies what an approval subject or allow
+                        rule applies to.
+                      enum:
+                      - Discovery
+                      - Create
+                      - Update
+                      - Remediate
+                      - Delete
+                      type: string
+                    minItems: 1
+                    type: array
+                required:
+                - match
+                - providers
+                - stages
+                type: object
+              rationale:
+                type: string
+              targetScope:
+                description: RuleScope is which kind of rule a suggestion would create.
+                enum:
+                - Namespace
+                - Cluster
+                type: string
+              trigger:
+                description: SuggestionTrigger is why the operator made a suggestion
+                  (spec §9.5).
+                enum:
+                - PlanTime
+                - RepeatedApproval
+                - PeriodicReview
+                type: string
+            required:
+            - proposed
+            - targetScope
+            - trigger
             type: object
+            x-kubernetes-validations:
+            - message: decision cannot change once decided
+              rule: oldSelf.decision == 'Pending' || self.decision == oldSelf.decision
+            - message: decidedBy is required once decided
+              rule: self.decision == 'Pending' || has(self.decidedBy)
         required:
         - spec
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}
+    subresources: {}

@@ -5,70 +5,79 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// RuleScope is which kind of rule a suggestion would create.
+// +kubebuilder:validation:Enum=Namespace;Cluster
+type RuleScope string
 
-// CommandRuleSuggestionSpec defines the desired state of CommandRuleSuggestion
+const (
+	RuleScopeNamespace RuleScope = "Namespace"
+	RuleScopeCluster   RuleScope = "Cluster"
+)
+
+// SuggestionTrigger is why the operator made a suggestion (spec §9.5).
+// +kubebuilder:validation:Enum=PlanTime;RepeatedApproval;PeriodicReview
+type SuggestionTrigger string
+
+const (
+	TriggerPlanTime         SuggestionTrigger = "PlanTime"
+	TriggerRepeatedApproval SuggestionTrigger = "RepeatedApproval"
+	TriggerPeriodicReview   SuggestionTrigger = "PeriodicReview"
+)
+
+// SuggestionDecision is a human's verdict on a suggestion.
+// +kubebuilder:validation:Enum=Pending;Accepted;Denied
+type SuggestionDecision string
+
+const (
+	SuggestionPending  SuggestionDecision = "Pending"
+	SuggestionAccepted SuggestionDecision = "Accepted"
+	SuggestionDenied   SuggestionDecision = "Denied"
+)
+
+// CommandRuleSuggestionSpec is an operator-proposed allow rule awaiting a human decision.
+// +kubebuilder:validation:XValidation:rule="self.decision == 'Pending' || has(self.decidedBy)",message="decidedBy is required once decided"
 type CommandRuleSuggestionSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of CommandRuleSuggestion. Edit commandrulesuggestion_types.go to remove/update
+	TargetScope RuleScope         `json:"targetScope"`
+	Trigger     SuggestionTrigger `json:"trigger"`
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// CommandRuleSuggestionStatus defines the observed state of CommandRuleSuggestion.
-type CommandRuleSuggestionStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the CommandRuleSuggestion resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	Rationale string          `json:"rationale,omitempty"`
+	Proposed  CommandRuleSpec `json:"proposed"`
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// +kubebuilder:validation:MaxItems=20
+	Examples []Command `json:"examples,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	BreadthWarnings []string `json:"breadthWarnings,omitempty"`
+	// +kubebuilder:default=Pending
+	// +optional
+	Decision SuggestionDecision `json:"decision,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	DecidedBy string `json:"decidedBy,omitempty"`
+	// +optional
+	DecisionReason string `json:"decisionReason,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Trigger",type=string,JSONPath=`.spec.trigger`
+// +kubebuilder:printcolumn:name="Decision",type=string,JSONPath=`.spec.decision`
+// +kubebuilder:printcolumn:name="Match",type=string,JSONPath=`.spec.proposed.match.argv`
 
-// CommandRuleSuggestion is the Schema for the commandrulesuggestions API
+// CommandRuleSuggestion is an allow rule the operator proposes; only humans decide it.
 type CommandRuleSuggestion struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of CommandRuleSuggestion
-	// +required
+	// +kubebuilder:validation:XValidation:rule="oldSelf.decision == 'Pending' || self.decision == oldSelf.decision",message="decision cannot change once decided"
 	Spec CommandRuleSuggestionSpec `json:"spec"`
-
-	// status defines the observed state of CommandRuleSuggestion
-	// +optional
-	Status CommandRuleSuggestionStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// CommandRuleSuggestionList contains a list of CommandRuleSuggestion
+// CommandRuleSuggestionList contains a list of CommandRuleSuggestion.
 type CommandRuleSuggestionList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CommandRuleSuggestion `json:"items"`
 }
 
