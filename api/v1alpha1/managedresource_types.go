@@ -5,38 +5,36 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// ManagedResourceSpec defines the desired state of ManagedResource
+// ManagedResourceSpec describes one provisioned thing. It is also used as a
+// template inside Plan.resources, where IntentRef is omitted.
 type ManagedResourceSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of ManagedResource. Edit managedresource_types.go to remove/update
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	IntentRef *LocalRef `json:"intentRef,omitempty"`
+	// +optional
+	Description string `json:"description,omitempty"`
+	// Identity is free-form: how humans and the agent find this thing again.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Identity *runtime.RawExtension `json:"identity,omitempty"`
+	// Desired is the approved desired-state snapshot.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Desired *runtime.RawExtension `json:"desired,omitempty"`
+	// +optional
+	Probes []Probe `json:"probes,omitempty"`
+	// +optional
+	OutputsSecretRef *LocalRef `json:"outputsSecretRef,omitempty"`
+	// +optional
+	Teardown []Command `json:"teardown,omitempty"`
 }
 
-// ManagedResourceStatus defines the observed state of ManagedResource.
+// ManagedResourceStatus holds the latest probe observations.
 type ManagedResourceStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the ManagedResource resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Observed *runtime.RawExtension `json:"observed,omitempty"`
+	// +optional
+	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -45,30 +43,26 @@ type ManagedResourceStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Intent",type=string,JSONPath=`.spec.intentRef.name`
+// +kubebuilder:printcolumn:name="Description",type=string,JSONPath=`.spec.description`
+// +kubebuilder:printcolumn:name="InSync",type=string,JSONPath=`.status.conditions[?(@.type=="InSync")].status`
 
-// ManagedResource is the Schema for the managedresources API
+// ManagedResource is one thing an Intent provisioned.
 type ManagedResource struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of ManagedResource
-	// +required
 	Spec ManagedResourceSpec `json:"spec"`
-
-	// status defines the observed state of ManagedResource
 	// +optional
-	Status ManagedResourceStatus `json:"status,omitzero"`
+	Status ManagedResourceStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// ManagedResourceList contains a list of ManagedResource
+// ManagedResourceList contains a list of ManagedResource.
 type ManagedResourceList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ManagedResource `json:"items"`
 }
 

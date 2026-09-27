@@ -14,10 +14,20 @@ spec:
     singular: managedresource
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.intentRef.name
+      name: Intent
+      type: string
+    - jsonPath: .spec.description
+      name: Description
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="InSync")].status
+      name: InSync
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ManagedResource is the Schema for the managedresources API
+        description: ManagedResource is one thing an Intent provisioned.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +47,202 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ManagedResource
+            description: |-
+              ManagedResourceSpec describes one provisioned thing. It is also used as a
+              template inside Plan.resources, where IntentRef is omitted.
             properties:
-              foo:
-                description: foo is an example field of ManagedResource. Edit managedresource_types.go
-                  to remove/update
+              description:
                 type: string
+              desired:
+                description: Desired is the approved desired-state snapshot.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              identity:
+                description: 'Identity is free-form: how humans and the agent find
+                  this thing again.'
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              intentRef:
+                description: LocalRef names an object in the same namespace (or a
+                  cluster-scoped object).
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              outputsSecretRef:
+                description: LocalRef names an object in the same namespace (or a
+                  cluster-scoped object).
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              probes:
+                items:
+                  description: Probe is a command plus a CEL assertion over its result
+                    (spec §10).
+                  properties:
+                    assert:
+                      minLength: 1
+                      type: string
+                    command:
+                      description: 'Command is the unit of action: one sandboxed execution
+                        (spec §8.1).'
+                      properties:
+                        egress:
+                          description: Egress lists host:port or CIDR:port destinations
+                            beyond what providers imply.
+                          items:
+                            type: string
+                          type: array
+                        files:
+                          additionalProperties:
+                            type: string
+                          description: Files are written under /work before the command
+                            runs, keyed by absolute path.
+                          type: object
+                        id:
+                          type: string
+                        image:
+                          description: ImageSpec lists install commands baked into
+                            the command's image at build time (spec §11.2).
+                          properties:
+                            install:
+                              items:
+                                description: ArgvCommand is a command executed directly,
+                                  without a shell.
+                                properties:
+                                  argv:
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - argv
+                                type: object
+                              minItems: 1
+                              type: array
+                          required:
+                          - install
+                          type: object
+                        providers:
+                          description: Providers names the Provider credentials to
+                            inject.
+                          items:
+                            type: string
+                          type: array
+                        reason:
+                          type: string
+                        run:
+                          description: CommandRun is exactly one of argv (exec'd directly)
+                            or script (run with /bin/sh -c).
+                          properties:
+                            argv:
+                              items:
+                                type: string
+                              minItems: 1
+                              type: array
+                            script:
+                              minLength: 1
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                          - message: exactly one of argv or script must be set
+                            rule: has(self.argv) != has(self.script)
+                        timeout:
+                          type: string
+                      required:
+                      - run
+                      type: object
+                    id:
+                      minLength: 1
+                      type: string
+                  required:
+                  - assert
+                  - command
+                  - id
+                  type: object
+                type: array
+              teardown:
+                items:
+                  description: 'Command is the unit of action: one sandboxed execution
+                    (spec §8.1).'
+                  properties:
+                    egress:
+                      description: Egress lists host:port or CIDR:port destinations
+                        beyond what providers imply.
+                      items:
+                        type: string
+                      type: array
+                    files:
+                      additionalProperties:
+                        type: string
+                      description: Files are written under /work before the command
+                        runs, keyed by absolute path.
+                      type: object
+                    id:
+                      type: string
+                    image:
+                      description: ImageSpec lists install commands baked into the
+                        command's image at build time (spec §11.2).
+                      properties:
+                        install:
+                          items:
+                            description: ArgvCommand is a command executed directly,
+                              without a shell.
+                            properties:
+                              argv:
+                                items:
+                                  type: string
+                                minItems: 1
+                                type: array
+                            required:
+                            - argv
+                            type: object
+                          minItems: 1
+                          type: array
+                      required:
+                      - install
+                      type: object
+                    providers:
+                      description: Providers names the Provider credentials to inject.
+                      items:
+                        type: string
+                      type: array
+                    reason:
+                      type: string
+                    run:
+                      description: CommandRun is exactly one of argv (exec'd directly)
+                        or script (run with /bin/sh -c).
+                      properties:
+                        argv:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        script:
+                          minLength: 1
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of argv or script must be set
+                        rule: has(self.argv) != has(self.script)
+                    timeout:
+                      type: string
+                  required:
+                  - run
+                  type: object
+                type: array
             type: object
           status:
-            description: status defines the observed state of ManagedResource
+            description: ManagedResourceStatus holds the latest probe observations.
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the ManagedResource resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +301,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastProbeTime:
+                format: date-time
+                type: string
+              observed:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             type: object
         required:
         - spec

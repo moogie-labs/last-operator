@@ -5,38 +5,98 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// Phase is where an Intent is in its lifecycle (spec §7).
+// +kubebuilder:validation:Enum=Pending;Clarifying;Planning;AwaitingDiscoveryApproval;AwaitingApproval;Executing;Verifying;Ready;Drifted;Remediating;TearingDown;Failed
+type Phase string
 
-// IntentSpec defines the desired state of Intent
-type IntentSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+const (
+	PhasePending                   Phase = "Pending"
+	PhaseClarifying                Phase = "Clarifying"
+	PhasePlanning                  Phase = "Planning"
+	PhaseAwaitingDiscoveryApproval Phase = "AwaitingDiscoveryApproval"
+	PhaseAwaitingApproval          Phase = "AwaitingApproval"
+	PhaseExecuting                 Phase = "Executing"
+	PhaseVerifying                 Phase = "Verifying"
+	PhaseReady                     Phase = "Ready"
+	PhaseDrifted                   Phase = "Drifted"
+	PhaseRemediating               Phase = "Remediating"
+	PhaseTearingDown               Phase = "TearingDown"
+	PhaseFailed                    Phase = "Failed"
+)
 
-	// foo is an example field of Intent. Edit intent_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+// Answer answers one of status.questions.
+type Answer struct {
+	// +kubebuilder:validation:MinLength=1
+	ID    string `json:"id"`
+	Value string `json:"value"`
 }
 
-// IntentStatus defines the observed state of Intent.
+// IntentSpec is a natural-language request plus the requester's inputs.
+type IntentSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	Request string `json:"request"`
+	// +optional
+	Answers []Answer `json:"answers,omitempty"`
+	// Modes may only be as strict as, or stricter than, the effective policy.
+	// +optional
+	Modes *StageModes `json:"modes,omitempty"`
+}
+
+// Question is a clarifying question from the agent.
+type Question struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+	// +optional
+	Options []string `json:"options,omitempty"`
+}
+
+// Generalization is an LLM-proposed wildcard pattern for an allow rule (advice only).
+type Generalization struct {
+	Argv []string `json:"argv"`
+	// +optional
+	Lint []string `json:"lint,omitempty"`
+}
+
+// PendingCommand is a discovery command awaiting approval.
+type PendingCommand struct {
+	Hash    string  `json:"hash"`
+	Command Command `json:"command"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	Generalization *Generalization `json:"generalization,omitempty"`
+}
+
+// Plan is the agent's reviewable plan (spec §8.2).
+type Plan struct {
+	Hash string `json:"hash"`
+	// +optional
+	Summary string    `json:"summary,omitempty"`
+	Steps   []Command `json:"steps"`
+	// +optional
+	Resources []ManagedResourceSpec `json:"resources,omitempty"`
+	// +optional
+	UncoveredSteps []string `json:"uncoveredSteps,omitempty"`
+	// +optional
+	Generalizations map[string]Generalization `json:"generalizations,omitempty"`
+}
+
+// IntentStatus is written by the operator.
 type IntentStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the Intent resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
+	Phase Phase `json:"phase,omitempty"`
+	// +optional
+	Stage Stage `json:"stage,omitempty"`
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +optional
+	Questions []Question `json:"questions,omitempty"`
+	// +optional
+	PendingCommand *PendingCommand `json:"pendingCommand,omitempty"`
+	// +optional
+	Plan *Plan `json:"plan,omitempty"`
+	// +optional
+	SuggestedRules []string `json:"suggestedRules,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -45,30 +105,26 @@ type IntentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Stage",type=string,JSONPath=`.status.stage`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Intent is the Schema for the intents API
+// Intent is a natural-language provisioning request.
 type Intent struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of Intent
-	// +required
 	Spec IntentSpec `json:"spec"`
-
-	// status defines the observed state of Intent
 	// +optional
-	Status IntentStatus `json:"status,omitzero"`
+	Status IntentStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// IntentList contains a list of Intent
+// IntentList contains a list of Intent.
 type IntentList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Intent `json:"items"`
 }
 
