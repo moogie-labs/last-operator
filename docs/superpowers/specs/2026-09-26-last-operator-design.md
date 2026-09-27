@@ -139,7 +139,7 @@ Cluster admins are trusted (see §17.2 for what that implies).
 | `last-gateway` | Gateway, credential Secrets, signing key, Kubernetes provider ServiceAccounts | **none** | full within ns (incl. `serviceaccounts/token`) |
 | `last-sandbox` | Sandbox and build pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
 | `last-audit` | Bundled MinIO + root credentials | **none** | **none** (S3 API only) |
-| `last-registry` | Bundled OCI registry, node-local pull proxy DaemonSet, registry admin credentials | **none** | **none** (registry API only) |
+| `last-registry` | Bundled Distribution registry + GC sidecar, nginx front proxy, node-local pull proxy DaemonSet, registry credentials | **none** | **none** (registry API only) |
 
 ## 4. Components
 
@@ -217,8 +217,8 @@ MinIO; external S3-compatible storage is also supported. See §14.
 ### 4.5 Image registry
 
 An OCI registry that holds images built by the gateway. By default the
-Helm chart bundles one (zot) in `last-registry`, with a node-local pull
-proxy. An external registry (ECR, GHCR, Harbor, …) can be used
+Helm chart bundles Distribution v3 in `last-registry`, behind an nginx
+front proxy, with a node-local pull proxy. An external registry (ECR, GHCR, Harbor, …) can be used
 instead. See §11.3.
 
 ### 4.6 `kubectl-last` (`cmd/kubectl-last`)
@@ -458,7 +458,7 @@ phase. The operator resolves it too, but only for display in status.
 | Audit retention | 365 days, compliance mode |
 | Probe interval | 1m after a change or drift, backing off to 5m; floor 1m |
 | Sandbox concurrency | 20 pods cluster-wide |
-| Registry | Bundled (zot + node-local pull proxy) |
+| Registry | Bundled (Distribution v3 + nginx front proxy + node-local pull proxy) |
 | Unused image retention | 30 days |
 
 ## 7. Intent lifecycle
@@ -827,8 +827,9 @@ When a command has `image.install`, the gateway resolves its
    - has egress only to `OperatorConfig.images.buildEgress` (package
      sources such as PyPI, npm, and GitHub releases, intersected with
      policy) and to the registry;
-   - receives a short-lived push credential scoped to the images
-     repository;
+   - receives the registry's push-only credential (bundled: the
+     front proxy's *pusher* credential, which cannot delete; external:
+     `pushSecretRef`) through a Secret that exists only for the build;
    - has CPU, memory, and time limits.
 3. **Record.** The gateway writes `image.build.start` (specHash and
    Containerfile) before the build, and `image.build.result` (digest
@@ -849,24 +850,76 @@ the plan must pin a different version.
 **Garbage collection.** Once a day, the gateway deletes images whose
 `specHash` isn't referenced by any existing Intent's last executed
 plan and that haven't been used for `images.unusedRetention`. Each
-deletion is audited (`image.deleted`).
+deletion is audited (`image.deleted`). For the bundled registry this
+works in two parts (§11.3):
+
+1. The gateway deletes manifests through the registry API.
+2. Blob storage is reclaimed in a GC window, which the gateway
+   coordinates.
+
+External registries use their own retention and GC after the manifest
+is deleted.
 
 ### 11.3 Registry
 
-**Bundled (default).** The Helm chart installs zot, an OCI registry, in
-`last-registry` with a PVC, plus a **node-local pull proxy** DaemonSet
-listening on `hostPort` 5000 on every node. Images are referenced as
-`localhost:5000/last/images@sha256:…`, so kubelet pulls through the
-proxy on its own node. containerd allows plain HTTP to `localhost` by
-default, so this works without TLS certificates or containerd
-configuration (the classic `kube-registry-proxy` pattern). Only the
-gateway holds push and delete credentials. Pulls through the proxy are
-unauthenticated, which is acceptable because images never contain
-credentials: builds never receive any.
+**Bundled (default).** The Helm chart installs the following in
+`last-registry`:
 
-- **Validation required:** this pattern must be tested early (M4) on
-  kind, k3s, EKS, and GKE Standard. Platforms that forbid `hostPort`
-  (e.g. GKE Autopilot) must use an external registry.
+```
+ kubelet ──► node-local pull proxy (DaemonSet, hostPort 5000; GET/HEAD only)
+                 │
+ build pods ─────┼──► front proxy (nginx Deployment) ──► Distribution v3 (PVC)
+ gateway ────────┘      GET/HEAD: anonymous             storage.delete.enabled: true
+                        PUT/POST/PATCH: pusher cred     no auth of its own; ingress
+                        DELETE: admin cred (gateway)    only from the front proxy
+                                                        + GC sidecar
+```
+
+- **Distribution v3** (CNCF, the reference OCI registry) stores images
+  on a PVC. It has no authentication of its own. A NetworkPolicy
+  allows ingress only from the front proxy.
+- **Front proxy.** nginx with per-method basic auth, the approach
+  Distribution's docs recommend:
+  - `GET`/`HEAD` are anonymous;
+  - push methods (`PUT`/`POST`/`PATCH`) require the **pusher**
+    credential, which build pods receive;
+  - `DELETE` requires the **admin** credential, held only by the
+    gateway.
+
+  Both credentials are generated at install time. The operator has no
+  access to either.
+- **Node-local pull proxy.** A DaemonSet on `hostPort` 5000 that
+  forwards only `GET`/`HEAD` to the front proxy. Images are referenced
+  as `localhost:5000/last/images@sha256:…`, so kubelet pulls through
+  the proxy on its own node. containerd allows plain HTTP to
+  `localhost` by default, so this needs no TLS certificates or
+  containerd configuration (the classic `kube-registry-proxy`
+  pattern). Anonymous pulls are acceptable because images never
+  contain credentials: builds never receive any.
+- **Tags don't matter for integrity.** Anyone holding the pusher
+  credential (i.e. a build pod) could push arbitrary content under
+  any tag. That cannot affect what runs, because the gateway only ever
+  references digests recorded in the audit log (§11.2). The worst case
+  is storage consumption, which GC cleans up.
+- **Coordinated GC.** Distribution's `registry garbage-collect` is
+  unsafe while uploads are in progress, and every upload comes from a
+  build the gateway starts. The gateway therefore runs GC as follows:
+  1. Write `image.gc.start`.
+  2. Pause new builds (they queue) and wait for running builds to
+     finish.
+  3. Delete unused manifests through the front proxy with the admin
+     credential.
+  4. Call the **GC sidecar** in the registry pod. It shares the PVC,
+     runs `registry garbage-collect`, and listens on an endpoint that
+     requires the admin credential and is reachable only from the
+     gateway.
+  5. Resume builds and write `image.gc.result` with the bytes freed.
+
+  Pulls continue throughout. A build waiting during GC is delayed, not
+  failed.
+- **Validation required:** the pull-proxy pattern must be tested early
+  (M4) on kind, k3s, EKS, and GKE Standard. Platforms that forbid
+  `hostPort` (e.g. GKE Autopilot) must use an external registry.
 
 **External (optional).** `registry.mode: external` points at a
 repository in ECR, GHCR, Harbor, or similar. The gateway uses
@@ -941,7 +994,8 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 `phase.end`, `llm.request`, `llm.response`, `command.start`,
 `command.result`, `credential.issued`, `egress.granted`,
 `egress.revoked`, `probe.start`, `probe.result` (§10.2),
-`image.build.start`, `image.build.result`, `image.deleted` (§11.2),
+`image.build.start`, `image.build.result`, `image.deleted`,
+`image.gc.start`, `image.gc.result` (§11.2, §11.3),
 `approval.observed`, `rule.observed` (a rule created, changed, or
 deleted, seen via watch), `suggestion.decided`, `policy.denied`.
 
@@ -1114,10 +1168,12 @@ restricted to the same level as admin access.
   request → response fixtures) and a fake gateway.
 - **Gateway integration tests:** against MinIO via testcontainers,
   covering fail-closed behavior, refusal to start without compliance
-  lock, and denial of unauthorized or mismatched commands; against zot
-  via testcontainers, covering build → push → digest recorded, single
-  flight, rebuilding the index from the audit log, and ignoring a
-  tampered tag.
+  lock, and denial of unauthorized or mismatched commands; against
+  Distribution + the nginx front proxy via testcontainers, covering
+  build → push → digest recorded, single flight, rebuilding the index
+  from the audit log, ignoring a tampered tag, per-method auth (a
+  pusher cannot delete; anonymous users cannot push), and coordinated
+  GC (builds queue during GC; referenced blobs survive).
 - **Admission tests:** the operator ServiceAccount cannot create
   approvals or rules or set suggestion decisions; `approvedBy` /
   `decidedBy` spoofing is rejected; rule constraints are enforced
@@ -1151,7 +1207,8 @@ internal/audit/          chain, signing, S3 sink, verifier (shared with CLI)
 internal/sandbox/        pod, credential, and NetworkPolicy builders; scheduler + queue
 internal/images/         image spec hashing, Containerfile generation, builds, registry client, GC
 images/sandbox-base/     base sandbox image
-charts/last-operator/    Helm chart (+ MinIO and zot subcharts, pull proxy, admission policies)
+charts/last-operator/    Helm chart (+ MinIO subchart; Distribution, front proxy, pull proxy; admission policies)
+images/registry-gc/      GC sidecar (wraps `registry garbage-collect`)
 docs/
 ```
 
@@ -1163,7 +1220,7 @@ docs/
 | M1 | Audit foundation | `internal/audit`; gateway skeleton with fail-closed writes, leader election, startup verification; bundled MinIO with compliance lock; `kubectl last audit verify/log` | Tamper tests pass; gateway refuses to act when MinIO is down |
 | M2 | Sandbox + lifecycle (fake LLM) | Sandbox pods on the base image only (commands with `image.install` rejected until M4), `kubernetes` and `env-secret` Providers, per-execution egress; concurrency cap + queue; Intent state machine; plans and hashing; `IntentApproval` + admission; plan enforcement; probes with compact audit, fixed interval, and no overlap; ManagedResource; output Secrets | e2e: scripted-LLM web server Intent goes Pending → Ready via `kubectl` in a sandbox, with a verified audit chain |
 | M3 | Real LLMs + web server demo | Anthropic and OpenAI-compatible adapters; Clarifying and Discovery phases; `kubectl last` create/answer/plan/approve/deny | `kubectl last "run an nginx web server serving X"` works end to end against a real model |
-| M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled zot + node-local pull proxy; external registry mode; audit-backed digest index; single flight; GC. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
+| M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled Distribution + nginx front proxy + node-local pull proxy; external registry mode; audit-backed digest index; single flight; coordinated GC with sidecar. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
 | M5 | Day 2 | Update stage; drift → remediation; teardown with finalizers; Auto modes and layering; adaptive probe intervals + jitter + floor | e2e: edit, drift, and delete flows in Manual and Auto modes |
 | M6 | Allow rules | `CommandRule` / `ClusterCommandRule` + admission; gateway matching (incl. `image.install`); `uncoveredSteps`; `approve --always-allow` with exact/generalized patterns; breadth lint | e2e: a second similar Intent runs without approval because of rules from the first |
 | M7 | Suggestions | `CommandRuleSuggestion` + admission; PlanTime, RepeatedApproval, and PeriodicReview triggers; denied-pattern suppression; `kubectl last rules suggestions` | e2e: a denied suggestion is never re-suggested; a narrower one is |
@@ -1201,7 +1258,7 @@ docs/
 | Credentials | Operator-wide Providers, held only by the gateway; Kubernetes via minted ServiceAccount tokens |
 | Sandbox | Short-lived pods on digest-pinned images, per-execution egress |
 | Tool installation | Baked into images built automatically by the gateway (rootless BuildKit, no credentials); no runtime installs |
-| Registry | Bundled zot + node-local pull proxy by default; external registry optional |
+| Registry | Bundled Distribution v3 by default (nginx front proxy with per-method auth, node-local pull proxy, gateway-coordinated GC); external registry optional. Chosen over zot for maturity. |
 | Tracking | Child `ManagedResource` CRs |
 | Outputs | Secret per resource + status |
 | Transcripts | In the audit log |
