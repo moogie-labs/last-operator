@@ -256,3 +256,73 @@ func TestVerifyFromSeqSkipsEarlierEntries(t *testing.T) {
 		t.Fatalf("report = %+v", rep)
 	}
 }
+
+// Regression tests for Finding 1: canonical encoding validation.
+
+func TestVerifyDetectsTrailingDataAfterEntry(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 5, nil)
+	// Append trailing junk to the entry body.
+	e := es[2]
+	body := mustMarshal(t, e)
+	body = append(body, []byte(`{"actor":"attacker"}`)...)
+	sink.TamperReplace(audit.EntryKey(chainID, 2), body)
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemMalformed)
+}
+
+func TestVerifyDetectsNonCanonicalEncoding(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 5, nil)
+	// Add a duplicate key with different casing.
+	raw := strings.TrimSuffix(string(mustMarshal(t, es[1])), "}") + `,"ACTOR":"x"}`
+	sink.TamperReplace(audit.EntryKey(chainID, 1), []byte(raw))
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 1, audit.ProblemMalformed)
+}
+
+// Focused tests for Finding 2: checkpoint validation conditions.
+
+func TestVerifyDetectsCheckpointIndexWithWrongHash(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	buildChain(t, sink, s, 10, checkpointAt(5))
+	// Create checkpoint index with wrong hash but correct seq, pointing at a checkpoint entry.
+	wrongHash := audit.CheckpointIndex{Seq: 5, Hash: "sha256:" + strings.Repeat("b", 64)}
+	if err := sink.Put(bg, audit.CheckpointKey(chainID, 5), mustMarshal(t, wrongHash), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadCheckpoint)
+}
+
+func TestVerifyDetectsCheckpointIndexOfNonCheckpointEntry(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 10, nil)
+	// Create checkpoint index with correct hash of a non-checkpoint entry (seq 5 is NOT a checkpoint).
+	idx := audit.CheckpointIndex{Seq: 5, Hash: es[5].Hash}
+	if err := sink.Put(bg, audit.CheckpointKey(chainID, 5), mustMarshal(t, idx), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadCheckpoint)
+}
+
+func TestVerifyDetectsCheckpointIndexSeqMismatch(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 10, checkpointAt(5))
+	// Create checkpoint index whose body seq differs from its key.
+	mismatchIdx := audit.CheckpointIndex{Seq: 7, Hash: es[5].Hash}
+	if err := sink.Put(bg, audit.CheckpointKey(chainID, 5), mustMarshal(t, mismatchIdx), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadCheckpoint)
+}
+
+func TestVerifyDetectsCheckpointPayloadWithWrongPrevHash(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	buildChain(t, sink, s, 10, func(e *audit.Entry) {
+		if e.Seq == 5 {
+			e.Type = audit.TypeCheckpoint
+			// Correct PrevSeq but wrong PrevHash.
+			b, _ := json.Marshal(audit.CheckpointPayload{PrevSeq: 4, PrevHash: "sha256:" + strings.Repeat("x", 64)})
+			e.Payload = b
+		}
+	})
+	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadCheckpoint)
+}

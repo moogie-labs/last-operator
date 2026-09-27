@@ -116,6 +116,13 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 			prev = nil
 			continue
 		}
+		// Verify the body is the canonical encoding of the entry.
+		canonical, _ := json.Marshal(e)
+		if !bytes.Equal(body, canonical) {
+			rep.add(seq, ProblemMalformed, "body is not the canonical encoding of the entry")
+			prev = nil
+			continue
+		}
 		if e.Seq != seq {
 			rep.add(seq, ProblemSeqMismatch, "key says %d, entry says %d", seq, e.Seq)
 		}
