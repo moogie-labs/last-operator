@@ -17,7 +17,7 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: OperatorConfig is the Schema for the operatorconfigs API
+        description: OperatorConfig is the cluster-wide singleton configuration.
         properties:
           apiVersion:
             description: |-
@@ -37,90 +37,187 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of OperatorConfig
+            description: OperatorConfigSpec holds cluster defaults.
             properties:
-              foo:
-                description: foo is an example field of OperatorConfig. Edit operatorconfig_types.go
-                  to remove/update
-                type: string
+              defaults:
+                description: IntentPolicySpec can only tighten OperatorConfig.defaults
+                  (spec §6).
+                properties:
+                  allowAutoModes:
+                    description: StageFlags sets a boolean per lifecycle stage.
+                    properties:
+                      create:
+                        type: boolean
+                      delete:
+                        type: boolean
+                      discovery:
+                        type: boolean
+                      reconcile:
+                        type: boolean
+                    type: object
+                  allowScripts:
+                    type: boolean
+                  egress:
+                    description: EgressPolicy bounds sandbox egress.
+                    properties:
+                      allowed:
+                        description: Allowed lists CIDR:port or host:port patterns
+                          (host names need Cilium).
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  modes:
+                    description: StageModes sets Auto/Manual per lifecycle stage.
+                      Create covers the Create and Update stages.
+                    properties:
+                      create:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      delete:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      discovery:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      reconcile:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                    type: object
+                  probes:
+                    description: ProbePolicy sets drift-check cadence (spec §10.1).
+                    properties:
+                      fastInterval:
+                        description: Interval used right after a change or drift.
+                        type: string
+                      interval:
+                        description: Steady-state interval (the adaptive ceiling).
+                        type: string
+                    type: object
+                  providers:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              images:
+                description: ImagesConfig configures automatic image builds.
+                properties:
+                  buildEgress:
+                    items:
+                      type: string
+                    type: array
+                  unusedRetention:
+                    type: string
+                type: object
+              llmProviderRef:
+                description: LocalRef names an object in the same namespace (or a
+                  cluster-scoped object).
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              probes:
+                description: ProbeLimits bounds probe intervals cluster-wide.
+                properties:
+                  minInterval:
+                    type: string
+                type: object
+              registry:
+                description: RegistryConfig configures where built images live (spec
+                  §11.3).
+                properties:
+                  external:
+                    description: ExternalRegistry points at a customer-managed registry.
+                    properties:
+                      pullSecretRef:
+                        description: LocalRef names an object in the same namespace
+                          (or a cluster-scoped object).
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      pushSecretRef:
+                        description: LocalRef names an object in the same namespace
+                          (or a cluster-scoped object).
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      repository:
+                        minLength: 1
+                        type: string
+                    required:
+                    - pullSecretRef
+                    - pushSecretRef
+                    - repository
+                    type: object
+                  mode:
+                    default: bundled
+                    description: RegistryMode selects the bundled or an external image
+                      registry.
+                    enum:
+                    - bundled
+                    - external
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: external is required when mode is external
+                  rule: self.mode != 'external' || has(self.external)
+              sandbox:
+                description: SandboxConfig configures sandbox pods.
+                properties:
+                  baseImage:
+                    description: BaseImage must be pinned by digest.
+                    pattern: '@sha256:[0-9a-f]{64}$'
+                    type: string
+                  maxConcurrent:
+                    default: 20
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - baseImage
+                type: object
+              suggestions:
+                description: SuggestionsConfig tunes rule suggestions (spec §9.5).
+                properties:
+                  repeatThreshold:
+                    default: 3
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  reviewInterval:
+                    type: string
+                type: object
             type: object
-          status:
-            description: status defines the observed state of OperatorConfig
-            properties:
-              conditions:
-                description: |-
-                  conditions represent the current state of the OperatorConfig resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        required:
-        - spec
         type: object
+        x-kubernetes-validations:
+        - message: OperatorConfig must be named 'default'
+          rule: self.metadata.name == 'default'
     served: true
     storage: true
-    subresources:
-      status: {}

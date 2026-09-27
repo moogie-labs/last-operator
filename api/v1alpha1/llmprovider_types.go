@@ -5,71 +5,47 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// LLMProviderType selects a gateway LLM adapter.
+// +kubebuilder:validation:Enum=anthropic;openai;openai-compatible
+type LLMProviderType string
 
-// LLMProviderSpec defines the desired state of LLMProvider
+const (
+	LLMAnthropic        LLMProviderType = "anthropic"
+	LLMOpenAI           LLMProviderType = "openai"
+	LLMOpenAICompatible LLMProviderType = "openai-compatible"
+)
+
+// LLMProviderSpec configures one model endpoint.
+// +kubebuilder:validation:XValidation:rule="self.type != 'openai-compatible' || has(self.endpoint)",message="endpoint is required for openai-compatible"
 type LLMProviderSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of LLMProvider. Edit llmprovider_types.go to remove/update
+	Type LLMProviderType `json:"type"`
+	// +kubebuilder:validation:MinLength=1
+	Model string `json:"model"`
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// LLMProviderStatus defines the observed state of LLMProvider.
-type LLMProviderStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the LLMProvider resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
-	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// SecretRef names a Secret in last-gateway holding the API key.
+	SecretRef LocalRef `json:"secretRef"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 
-// LLMProvider is the Schema for the llmproviders API
+// LLMProvider is a model endpoint the gateway can call.
 type LLMProvider struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of LLMProvider
-	// +required
 	Spec LLMProviderSpec `json:"spec"`
-
-	// status defines the observed state of LLMProvider
-	// +optional
-	Status LLMProviderStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// LLMProviderList contains a list of LLMProvider
+// LLMProviderList contains a list of LLMProvider.
 type LLMProviderList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []LLMProvider `json:"items"`
 }
 

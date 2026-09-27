@@ -5,71 +5,61 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// ProviderType selects how credentials are materialized in a sandbox.
+// +kubebuilder:validation:Enum=kubernetes;env-secret
+type ProviderType string
 
-// ProviderSpec defines the desired state of Provider
+const (
+	ProviderKubernetes ProviderType = "kubernetes"
+	ProviderEnvSecret  ProviderType = "env-secret"
+)
+
+// KubernetesProvider mints short-lived tokens for a ServiceAccount in last-gateway.
+type KubernetesProvider struct {
+	ServiceAccountRef LocalRef `json:"serviceAccountRef"`
+	// +optional
+	TokenTTL *metav1.Duration `json:"tokenTTL,omitempty"`
+}
+
+// ProviderSpec describes one set of platform credentials (spec §13).
+// +kubebuilder:validation:XValidation:rule="self.type != 'kubernetes' || has(self.kubernetes)",message="kubernetes is required when type is kubernetes"
+// +kubebuilder:validation:XValidation:rule="self.type != 'env-secret' || has(self.secretRef)",message="secretRef is required when type is env-secret"
 type ProviderSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of Provider. Edit provider_types.go to remove/update
+	Type ProviderType `json:"type"`
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// ProviderStatus defines the observed state of Provider.
-type ProviderStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the Provider resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	Description string `json:"description,omitempty"`
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Kubernetes *KubernetesProvider `json:"kubernetes,omitempty"`
+	// SecretRef names a Secret in last-gateway.
+	// +optional
+	SecretRef *LocalRef `json:"secretRef,omitempty"`
+	// Env maps sandbox env var name -> Secret key.
+	// +optional
+	Env map[string]string `json:"env,omitempty"`
+	// Files maps Secret key -> file path in the sandbox.
+	// +optional
+	Files map[string]string `json:"files,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+// +kubebuilder:printcolumn:name="Description",type=string,JSONPath=`.spec.description`
 
-// Provider is the Schema for the providers API
+// Provider is a set of platform credentials held only by the gateway.
 type Provider struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of Provider
-	// +required
 	Spec ProviderSpec `json:"spec"`
-
-	// status defines the observed state of Provider
-	// +optional
-	Status ProviderStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// ProviderList contains a list of Provider
+// ProviderList contains a list of Provider.
 type ProviderList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Provider `json:"items"`
 }
 

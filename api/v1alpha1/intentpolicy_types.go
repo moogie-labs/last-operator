@@ -5,70 +5,55 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// EgressPolicy bounds sandbox egress.
+type EgressPolicy struct {
+	// Allowed lists CIDR:port or host:port patterns (host names need Cilium).
+	// +optional
+	Allowed []string `json:"allowed,omitempty"`
+}
 
-// IntentPolicySpec defines the desired state of IntentPolicy
+// ProbePolicy sets drift-check cadence (spec §10.1).
+type ProbePolicy struct {
+	// Steady-state interval (the adaptive ceiling).
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
+	// Interval used right after a change or drift.
+	// +optional
+	FastInterval *metav1.Duration `json:"fastInterval,omitempty"`
+}
+
+// IntentPolicySpec can only tighten OperatorConfig.defaults (spec §6).
 type IntentPolicySpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of IntentPolicy. Edit intentpolicy_types.go to remove/update
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// IntentPolicyStatus defines the observed state of IntentPolicy.
-type IntentPolicyStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the IntentPolicy resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	Modes *StageModes `json:"modes,omitempty"`
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	AllowAutoModes *StageFlags `json:"allowAutoModes,omitempty"`
+	// +optional
+	AllowScripts *bool `json:"allowScripts,omitempty"`
+	// +optional
+	Providers []string `json:"providers,omitempty"`
+	// +optional
+	Egress *EgressPolicy `json:"egress,omitempty"`
+	// +optional
+	Probes *ProbePolicy `json:"probes,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 
-// IntentPolicy is the Schema for the intentpolicies API
+// IntentPolicy is a namespace's policy for Intents.
 type IntentPolicy struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of IntentPolicy
-	// +required
 	Spec IntentPolicySpec `json:"spec"`
-
-	// status defines the observed state of IntentPolicy
-	// +optional
-	Status IntentPolicyStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// IntentPolicyList contains a list of IntentPolicy
+// IntentPolicyList contains a list of IntentPolicy.
 type IntentPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []IntentPolicy `json:"items"`
 }
 

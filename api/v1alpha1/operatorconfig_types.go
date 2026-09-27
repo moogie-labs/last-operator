@@ -5,71 +5,105 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// SandboxConfig configures sandbox pods.
+type SandboxConfig struct {
+	// BaseImage must be pinned by digest.
+	// +kubebuilder:validation:Pattern=`@sha256:[0-9a-f]{64}$`
+	BaseImage string `json:"baseImage"`
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxConcurrent int32 `json:"maxConcurrent,omitempty"`
+}
 
-// OperatorConfigSpec defines the desired state of OperatorConfig
+// RegistryMode selects the bundled or an external image registry.
+// +kubebuilder:validation:Enum=bundled;external
+type RegistryMode string
+
+const (
+	RegistryBundled  RegistryMode = "bundled"
+	RegistryExternal RegistryMode = "external"
+)
+
+// ExternalRegistry points at a customer-managed registry.
+type ExternalRegistry struct {
+	// +kubebuilder:validation:MinLength=1
+	Repository    string   `json:"repository"`
+	PushSecretRef LocalRef `json:"pushSecretRef"`
+	PullSecretRef LocalRef `json:"pullSecretRef"`
+}
+
+// RegistryConfig configures where built images live (spec §11.3).
+// +kubebuilder:validation:XValidation:rule="self.mode != 'external' || has(self.external)",message="external is required when mode is external"
+type RegistryConfig struct {
+	// +kubebuilder:default=bundled
+	// +optional
+	Mode RegistryMode `json:"mode,omitempty"`
+	// +optional
+	External *ExternalRegistry `json:"external,omitempty"`
+}
+
+// ImagesConfig configures automatic image builds.
+type ImagesConfig struct {
+	// +optional
+	BuildEgress []string `json:"buildEgress,omitempty"`
+	// +optional
+	UnusedRetention *metav1.Duration `json:"unusedRetention,omitempty"`
+}
+
+// ProbeLimits bounds probe intervals cluster-wide.
+type ProbeLimits struct {
+	// +optional
+	MinInterval *metav1.Duration `json:"minInterval,omitempty"`
+}
+
+// SuggestionsConfig tunes rule suggestions (spec §9.5).
+type SuggestionsConfig struct {
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	RepeatThreshold int32 `json:"repeatThreshold,omitempty"`
+	// +optional
+	ReviewInterval *metav1.Duration `json:"reviewInterval,omitempty"`
+}
+
+// OperatorConfigSpec holds cluster defaults.
 type OperatorConfigSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of OperatorConfig. Edit operatorconfig_types.go to remove/update
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
-
-// OperatorConfigStatus defines the observed state of OperatorConfig.
-type OperatorConfigStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the OperatorConfig resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	LLMProviderRef *LocalRef `json:"llmProviderRef,omitempty"`
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Sandbox *SandboxConfig `json:"sandbox,omitempty"`
+	// +optional
+	Registry *RegistryConfig `json:"registry,omitempty"`
+	// +optional
+	Images *ImagesConfig `json:"images,omitempty"`
+	// +optional
+	Probes *ProbeLimits `json:"probes,omitempty"`
+	// +optional
+	Suggestions *SuggestionsConfig `json:"suggestions,omitempty"`
+	// +optional
+	Defaults *IntentPolicySpec `json:"defaults,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'default'",message="OperatorConfig must be named 'default'"
 
-// OperatorConfig is the Schema for the operatorconfigs API
+// OperatorConfig is the cluster-wide singleton configuration.
 type OperatorConfig struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
 	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of OperatorConfig
-	// +required
-	Spec OperatorConfigSpec `json:"spec"`
-
-	// status defines the observed state of OperatorConfig
-	// +optional
-	Status OperatorConfigStatus `json:"status,omitzero"`
+	Spec OperatorConfigSpec `json:"spec,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// OperatorConfigList contains a list of OperatorConfig
+// OperatorConfigList contains a list of OperatorConfig.
 type OperatorConfigList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []OperatorConfig `json:"items"`
 }
 
