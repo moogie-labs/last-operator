@@ -16,14 +16,15 @@ var (
 	ErrAuditUnavailable = errors.New("audit: entry could not be recorded; action refused")
 )
 
-// WriterConfig configures a Writer. Zero values get defaults.
+// WriterConfig configures a Writer. Zero values get defaults except Retention, which is required.
 type WriterConfig struct {
 	ChainID            string
-	Retention          time.Duration
+	Retention          time.Duration // required; must be positive
 	CheckpointEvery    uint64
 	CheckpointInterval time.Duration
 	PutAttempts        int
 	RetryBackoff       time.Duration
+	PutTimeout         time.Duration // default 10s
 	Now                func() time.Time
 	Actor              string
 }
@@ -40,6 +41,9 @@ func (c WriterConfig) withDefaults() WriterConfig {
 	}
 	if c.RetryBackoff == 0 {
 		c.RetryBackoff = 200 * time.Millisecond
+	}
+	if c.PutTimeout == 0 {
+		c.PutTimeout = 10 * time.Second
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -70,6 +74,9 @@ type Writer struct {
 // Open verifies the chain from its latest checkpoint, resumes after its head, and
 // records a gateway.start entry. It refuses a chain that fails verification.
 func Open(ctx context.Context, sink Sink, signer *Signer, cfg WriterConfig, startPayload any) (*Writer, error) {
+	if cfg.Retention <= 0 {
+		return nil, errors.New("audit: WriterConfig.Retention must be positive")
+	}
 	cfg = cfg.withDefaults()
 	from, err := latestCheckpointSeq(ctx, sink, cfg.ChainID)
 	if err != nil {
@@ -202,21 +209,22 @@ func (w *Writer) checkpointLocked(ctx context.Context, byTime bool) error {
 // bytes match is an earlier attempt that landed; anything else breaks the writer.
 func (w *Writer) putLocked(ctx context.Context, key string, body []byte) error {
 	retainUntil := w.cfg.Now().Add(w.cfg.Retention)
+	detached := context.WithoutCancel(ctx)
 	var lastErr error
 	for attempt := 0; attempt < w.cfg.PutAttempts; attempt++ {
 		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return w.fail(fmt.Errorf("%w: %v", ErrWriterBroken, ctx.Err()))
-			case <-time.After(w.cfg.RetryBackoff):
-			}
+			<-time.After(w.cfg.RetryBackoff)
 		}
-		err := w.sink.Put(ctx, key, body, retainUntil)
+		putCtx, cancel := context.WithTimeout(detached, w.cfg.PutTimeout)
+		err := w.sink.Put(putCtx, key, body, retainUntil)
+		cancel()
 		if err == nil {
 			return nil
 		}
 		if errors.Is(err, ErrExists) {
-			existing, getErr := w.sink.Get(ctx, key, "")
+			getCtx, cancel := context.WithTimeout(detached, w.cfg.PutTimeout)
+			existing, getErr := w.sink.Get(getCtx, key, "")
+			cancel()
 			if getErr == nil && bytes.Equal(existing, body) {
 				return nil
 			}

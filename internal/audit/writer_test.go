@@ -290,3 +290,77 @@ func TestDoRecordsActionFailure(t *testing.T) {
 		t.Fatal("failure not recorded in the outcome entry")
 	}
 }
+
+// cancelSink wraps a sink and cancels its context during Put if the sink's context is already done.
+type cancelSink struct {
+	*audittest.MemSink
+}
+
+func (c *cancelSink) Put(ctx context.Context, key string, body []byte, until time.Time) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return c.MemSink.Put(context.Background(), key, body, until)
+}
+
+func (c *cancelSink) Get(ctx context.Context, key string, s string) ([]byte, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return c.MemSink.Get(context.Background(), key, s)
+}
+
+func TestDoOutcomeRecordedDespiteContextCancellation(t *testing.T) {
+	s := newSigner(t)
+	sink := &cancelSink{MemSink: audittest.NewMemSink()}
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+
+	// Create a context that will be cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+	actionErr := errors.New("action error")
+
+	err := w.Do(ctx, cmd(1), func(context.Context) (any, error) {
+		// Cancel the context during the action, simulating a timeout or client disconnect
+		cancel()
+		return nil, actionErr
+	}, after)
+
+	// (a) the outcome entry is recorded
+	if _, getErr := sink.Get(context.Background(), audit.EntryKey(chainID, 2), ""); getErr != nil {
+		t.Fatalf("outcome entry not recorded: %v", getErr)
+	}
+
+	// (b) Do returns the action's error
+	if !errors.Is(err, actionErr) {
+		t.Fatalf("Do = %v, want the action's error", err)
+	}
+
+	// (c) w.Broken() is false
+	if w.Broken() {
+		t.Fatal("writer should not be broken after context cancellation during action")
+	}
+
+	// (d) a later Append succeeds
+	if _, appendErr := w.Append(context.Background(), cmd(3)); appendErr != nil {
+		t.Fatalf("append after context cancellation = %v, want success", appendErr)
+	}
+
+	// (e) the chain still verifies
+	if rep := verifyChain(t, sink, s, audit.VerifyOptions{}); !rep.OK() {
+		t.Fatalf("chain verification failed: %+v", rep.Problems)
+	}
+}
+
+func TestOpenRefusesZeroRetention(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	cfg := writerConfig(newClock())
+	cfg.Retention = 0
+	_, err := audit.Open(bg, sink, s, cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "Retention must be positive") {
+		t.Fatalf("open with Retention 0 = %v, want error about Retention", err)
+	}
+	// Ensure no entry was written
+	if len(sink.Keys()) != 0 {
+		t.Fatalf("open with Retention 0 wrote entries, want none: %v", sink.Keys())
+	}
+}
