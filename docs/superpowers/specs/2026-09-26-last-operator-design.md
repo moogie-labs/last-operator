@@ -20,6 +20,11 @@ is the only way the system acts on the world:
 - HTTP APIs are reached with `curl`.
 - Clouds and SaaS are reached with their CLIs.
 
+Any tools a command needs beyond the base image are **baked into an
+image** that the gateway builds automatically. The image is pinned by
+digest and reused for every later run of that command, including drift
+probes.
+
 The resources a plan creates are then continuously reconciled against
 the approved state.
 
@@ -112,8 +117,9 @@ sysadmins (approvers, policy and rule authors).
                     └──┬───────────┬────────────┘
                        │           │
                      LLM APIs   Sandbox pods (last-sandbox) ──► kubectl / curl / any CLI
-                                   per-execution NetworkPolicy + injected credentials
-                       │
+                       │           per-execution NetworkPolicy + injected credentials
+                       │           image@digest ◄── Registry (last-registry, bundled; or external)
+                       │                               ▲ push (build pods, no provider creds)
                     ┌──▼────────────────────────┐
                     │ Audit sink (WORM)         │  bundled MinIO (last-audit ns)
                     │ S3 Object Lock, compliance│  or external S3-compatible
@@ -131,8 +137,9 @@ Cluster admins are trusted (see §17.2 for what that implies).
 |---|---|---|---|
 | `last-system` | Operator; cluster-scoped rule suggestions | none beyond its CRs | none |
 | `last-gateway` | Gateway, credential Secrets, signing key, Kubernetes provider ServiceAccounts | **none** | full within ns (incl. `serviceaccounts/token`) |
-| `last-sandbox` | Sandbox pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
+| `last-sandbox` | Sandbox and build pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
 | `last-audit` | Bundled MinIO + root credentials | **none** | **none** (S3 API only) |
+| `last-registry` | Bundled OCI registry, node-local pull proxy DaemonSet, registry admin credentials | **none** | **none** (registry API only) |
 
 ## 4. Components
 
@@ -145,7 +152,7 @@ A kubebuilder controller manager. It:
   and parsing the plan) by calling the gateway's `CallLLM`.
 - Drives discovery commands, plan execution, and probes through the
   gateway.
-- Creates `CommandRuleSuggestion`s (§9.4).
+- Creates `CommandRuleSuggestion`s (§9.5).
 - Writes status on its CRs.
 
 **RBAC:**
@@ -154,7 +161,7 @@ A kubebuilder controller manager. It:
   status subresources, `Events`, and `Leases`.
 - create/delete on `ManagedResource`.
 - create on `CommandRuleSuggestion`. The `spec.decision` field is
-  excluded by admission (§9.4).
+  excluded by admission (§9.5).
 - get/list/watch on `OperatorConfig`, `IntentPolicy`, `Provider`,
   `LLMProvider`, `IntentApproval`, `CommandRule`,
   `ClusterCommandRule`, and `CommandRuleSuggestion`.
@@ -188,6 +195,9 @@ A gRPC server and the only component able to cause side effects.
   about modes, approvals, or rules.
 - **Phase, approval, rule, and plan enforcement** (§8, §9).
 - **Sandbox launcher** (§11).
+- **Image builder.** Resolves image specs to digests, building and
+  pushing images when needed (§11.2).
+- **Probe scheduler.** Enforces the concurrency cap and queue (§10.1).
 - **Audit writing**, fail-closed (§14).
 - **LLM provider adapters** (§12).
 
@@ -204,7 +214,14 @@ command the system runs executes in one. See §11.
 WORM object storage via the S3 Object Lock API. The Helm chart bundles
 MinIO; external S3-compatible storage is also supported. See §14.
 
-### 4.5 `kubectl-last` (`cmd/kubectl-last`)
+### 4.5 Image registry
+
+An OCI registry that holds images built by the gateway. By default the
+Helm chart bundles one (zot) in `last-registry`, with a node-local pull
+proxy. An external registry (ECR, GHCR, Harbor, …) can be used
+instead. See §11.3.
+
+### 4.6 `kubectl-last` (`cmd/kubectl-last`)
 
 A CLI plugin. It creates and edits Intents, handles clarifying
 questions, shows plans and pending commands, approves and denies
@@ -327,7 +344,7 @@ spec:
   providers: [aws-prod]          # the command's providers must be a subset of this list
   match:
     argv: ["aws", "ec2", "describe-*", "..."]
-  install:                       # install commands this rule also covers (same pattern syntax)
+  install:                       # image.install commands this rule also covers (same pattern syntax)
     - argv: ["pip", "install", "awscli==1.*"]
   egress: ["*.amazonaws.com:443"] # the command's declared egress must be a subset of this list
   source:                        # provenance, set by the CLI
@@ -345,7 +362,7 @@ metadata: { namespace: team-x }  # cluster-targeted suggestions live in last-sys
 spec:
   targetScope: Namespace         # Namespace → CommandRule; Cluster → ClusterCommandRule
   trigger: PlanTime | RepeatedApproval | PeriodicReview
-  rationale: "Needed to probe this Deployment every 5m without approval"
+  rationale: "Lets drift remediation for this Deployment run without approval"
   proposed: { …CommandRule spec… }
   examples: [ …concrete commands this would have matched, from the audit log… ]
   breadthWarnings: [ …lint findings, §9.2… ]
@@ -361,7 +378,19 @@ kind: OperatorConfig            # cluster defaults; same fields as IntentPolicy,
 spec:
   llmProviderRef: { name: anthropic-default }
   sandbox:
-    baseImage: ghcr.io/moogie-labs/last-sandbox-base:<release>
+    baseImage: ghcr.io/moogie-labs/last-sandbox-base@sha256:…   # pinned by digest
+    maxConcurrent: 20           # cluster-wide cap on running sandbox + build pods
+  registry:
+    mode: bundled               # bundled | external
+    external:                   # when mode: external
+      repository: 123456789.dkr.ecr.us-east-1.amazonaws.com/last-images
+      pushSecretRef: { name: registry-push }     # in last-gateway
+      pullSecretRef: { name: registry-pull }     # copied into last-sandbox for pods
+  images:
+    buildEgress: ["pypi.org:443", "files.pythonhosted.org:443", "registry.npmjs.org:443", "github.com:443", "objects.githubusercontent.com:443"]
+    unusedRetention: 30d        # delete images not referenced by any live plan for this long
+  probes:
+    minInterval: 1m             # floor; no layer may go below it
   suggestions:
     repeatThreshold: 3          # manual approvals of the same pattern before suggesting
     reviewInterval: 24h         # periodic review cadence
@@ -375,7 +404,9 @@ spec:
   providers: [cluster-team-x]   # which Providers Intents here may use
   egress:
     allowed: []                 # CIDR:port or host:port (FQDN needs Cilium) patterns
-  probeInterval: 5m
+  probes:
+    interval: 5m                # steady-state interval (the adaptive ceiling)
+    fastInterval: 1m            # used right after a change or drift (§10.1)
 ---
 kind: Provider
 spec:
@@ -425,7 +456,10 @@ phase. The operator resolves it too, but only for display in status.
 | Providers | None. The Helm chart can optionally create one `kubernetes` Provider scoped by a ServiceAccount the admin binds. |
 | Sandbox egress | Deny all except the Kubernetes API server (only when a `kubernetes` Provider is attached) |
 | Audit retention | 365 days, compliance mode |
-| Probe interval | 5m |
+| Probe interval | 1m after a change or drift, backing off to 5m; floor 1m |
+| Sandbox concurrency | 20 pods cluster-wide |
+| Registry | Bundled (zot + node-local pull proxy) |
+| Unused image retention | 30 days |
 
 ## 7. Intent lifecycle
 
@@ -477,8 +511,9 @@ run:
   argv: ["kubectl", "apply", "-f", "/work/deploy.yaml"]   # exec'd directly, no shell
   # — or —
   script: "kubectl get deploy -A -o json | jq '.items | length'"   # run with /bin/sh -c
-install:                                  # argv commands run first, same pod
-  - argv: ["curl", "-fsSLo", "/work/bin/jq", "https://…/jq-1.7.1-linux-amd64"]
+image:                                    # optional; omitted = base image as-is
+  install:                                # baked into an image at build time (§11.2)
+    - argv: ["pip", "install", "awscli==1.33.0"]
 files:                                    # written to /work before running
   /work/deploy.yaml: "…manifest…"
 providers: [cluster-team-x]               # credentials to inject
@@ -491,6 +526,12 @@ timeout: 5m
 - **`argv` commands can match allow rules. `script` commands never
   match.** A script needs approval whenever its stage is Manual, and
   `allowScripts: false` forbids scripts entirely.
+- **Image spec.** The image spec is always based on
+  `OperatorConfig.sandbox.baseImage` (pinned by digest). Its
+  `specHash` is the SHA-256 of the canonical JSON of `{baseDigest,
+  install}`. Commands with the same `specHash` share one image. The
+  resolved digest is recorded in the audit entry for every command.
+  Install commands are `argv` only; there are no install scripts.
 
 ### 8.2 Plan structure
 
@@ -511,8 +552,8 @@ each call, the gateway:
    - the effective mode for the stage is Auto;
    - a valid `IntentApproval` exists for this `subjectHash`;
    - every command in the subject (the discovery command, or every
-     plan step, install command included) matches an allow rule for
-     this stage (§9.3).
+     plan step, including its `image.install` commands) matches an
+     allow rule for this stage (§9.3).
 
    The gateway reads the plan from `Intent.status` and checks its hash
    against `subjectHash`.
@@ -521,7 +562,10 @@ each call, the gateway:
    earlier results, and requires the resolved arguments, files,
    providers, and egress to match exactly.
 4. Confirms providers and egress are allowed by policy.
-5. Writes the `command.start` audit entry, runs the sandbox (§11), and
+5. Resolves the image spec to a digest, building the image first if
+   needed (§11.2). A build is covered by the same authorization as the
+   command that needs it.
+6. Writes the `command.start` audit entry, runs the sandbox (§11), and
    writes `command.result`.
 
 Any mismatch produces a `policy.denied` audit entry and an error to the
@@ -583,10 +627,10 @@ the CLI flags it when creating rules. Examples:
 from stdin.** A rule for `kubectl apply -f ...` allows applying *any*
 manifest those credentials permit. The lint calls this out.
 
-**Install commands:** a command matches a rule only if each of its
-install commands also matches an entry in the rule's `install` list.
-Otherwise a rule for `aws ...` would allow running whatever binary
-an unapproved install step had placed at `aws`.
+**Image install commands:** a command matches a rule only if each of its
+`image.install` commands also matches an entry in the rule's `install`
+list. Otherwise a rule for `aws ...` would allow running whatever binary
+an unapproved install step had baked into the image at `aws`.
 
 ### 9.3 Matching
 
@@ -597,7 +641,7 @@ A command is **covered** at stage S if some rule (namespace
 - the command's `providers ⊆ rule.providers`;
 - the command's declared egress ⊆ `rule.egress`;
 - `run.argv` matches `rule.match.argv`;
-- every install command matches an entry in `rule.install`;
+- every `image.install` command matches an entry in `rule.install`;
 - the command is `argv`, not `script`.
 
 A plan is covered when every step is covered. `status.plan.uncoveredSteps`
@@ -681,28 +725,63 @@ probes:
   new approval. The gateway runs only probes that appear in the
   Intent's last executed plan (§8.3). Editing probes on a
   ManagedResource cannot change what runs.
-- The `ManagedResource` controller runs probes every `probeInterval`
+- The `ManagedResource` controller runs probes on the schedule in §10.1
   and does not call the LLM. All probes of one Intent that share the
-  same provider set run in a single sandbox pod.
+  same provider set and image run in a single sandbox pod: one **probe
+  run**.
 - If an assertion fails, `InSync=False`, the Intent moves to `Drifted`,
   and the LLM builds a remediation plan.
 
+### 10.1 Scheduling
+
+- **Adaptive interval.** After an execution, a remediation, or a
+  detected drift, an Intent is probed at `probes.fastInterval`. Each
+  probe run in which every probe passes doubles the interval, up to
+  `probes.interval`. Any failure resets it to `fastInterval`.
+- **Floor.** No layer can set an interval below
+  `OperatorConfig.probes.minInterval`.
+- **Jitter.** Each scheduled run is offset by a random ±10% of its
+  interval, so Intents created together don't probe in lockstep.
+- **No overlap.** An Intent never has more than one probe run in flight
+  or queued. If the previous run hasn't finished when the next one is
+  due, the new run is skipped and the skip is counted in metrics.
+- **Concurrency cap and queue.** The gateway runs at most
+  `sandbox.maxConcurrent` sandbox and build pods cluster-wide. Beyond
+  that, requests queue with priority: plan execution and teardown
+  first, then discovery, then image builds for probes, then probes.
+  Queue depth and wait time are exported as metrics.
+
+### 10.2 Compact audit entries for probe runs
+
+A probe run writes **two** audit entries instead of one set per command:
+
+- `probe.start`, written **before** anything runs. It lists every
+  probe command, the image digest, the credentials to be issued, and
+  the egress to be granted.
+- `probe.result`, written afterwards. It records each probe's exit
+  code, output (truncated as in §11.1), assertion outcome, and the
+  egress revocation.
+
+This keeps the write-before-action guarantee (§14.1) while cutting a
+probe run from about 7–8 entries to 2.
+
 ## 11. Sandbox execution
+
+### 11.1 Sandbox pods
 
 Every command runs in a sandbox pod:
 
-- **Image.** Every sandbox uses `OperatorConfig.sandbox.baseImage`,
-  which contains common basics (`sh`, `curl`, `kubectl`, `jq`, `git`,
-  `python3`). Other tools are installed at runtime by the command's
-  `install` list.
+- **Image.** Either the base image
+  (`OperatorConfig.sandbox.baseImage`, which contains common basics:
+  `sh`, `curl`, `kubectl`, `jq`, `git`, `python3`) or a built image for
+  the command's image spec (§11.2). Images are always referenced by
+  digest. Nothing is installed at runtime.
 - **Pod.** Created by the gateway in `last-sandbox`, with no
   ServiceAccount token mounted, non-root, a read-only root filesystem
-  except for a writable `emptyDir` at `/work` (with `/work/bin` on
-  `PATH`), CPU and memory limits, and `activeDeadlineSeconds` set from
-  `timeout`.
-- **Execution.** Install commands run first, then the `files` are
-  written, then `run`. `argv` is exec'd directly. `script` runs with
-  `/bin/sh -c`.
+  except for a writable `emptyDir` at `/work`, CPU and memory limits,
+  and `activeDeadlineSeconds` set from `timeout`.
+- **Execution.** The `files` are written, then `run` executes. `argv` is
+  exec'd directly. `script` runs with `/bin/sh -c`.
 - **Credentials.** For each provider in `providers`, the gateway creates
   a short-lived Secret, mounts it, and deletes it when the pod ends:
   - `env-secret`: the configured env vars and files;
@@ -714,9 +793,9 @@ Every command runs in a sandbox pod:
   not the values.
 - **Egress.** `last-sandbox` has a default-deny NetworkPolicy. For each
   execution the gateway creates a NetworkPolicy selecting only that pod
-  (by a unique label). It allows the command's declared egress, the
-  sources its install commands download from, and the API server when
-  a `kubernetes` provider is attached, all intersected with policy.
+  (by a unique label). It allows the command's declared egress, and the
+  API server when a `kubernetes` provider is attached, all intersected
+  with policy.
   The policy is removed afterwards, and both actions are audited.
   - **Requirement:** the cluster's CNI must enforce NetworkPolicy.
     Host-name egress rules require Cilium (or equivalent). Without it,
@@ -724,6 +803,75 @@ Every command runs in a sandbox pod:
 - **Output.** The gateway captures stdout, stderr (each truncated at
   1 MiB, with truncation recorded), and the exit code into the audit
   log (`command.result`) and returns them to the operator.
+
+### 11.2 Automatic image builds
+
+When a command has `image.install`, the gateway resolves its
+`specHash` to a digest:
+
+1. **Lookup.** The gateway keeps a `specHash → digest` index, rebuilt
+   at startup from `image.build.result` audit entries. The audit log,
+   not registry tags, is authoritative, so a changed tag is never
+   trusted. If an entry exists and the digest is still in the
+   registry, the gateway uses it.
+2. **Build.** Otherwise the gateway generates a Containerfile:
+   ```
+   FROM <baseImage>@<baseDigest>
+   USER root
+   RUN ["pip", "install", "awscli==1.33.0"]      # one exec-form RUN per install argv
+   USER 65532
+   ```
+   It then launches a **build pod** in `last-sandbox`, using rootless
+   BuildKit. The build pod:
+   - gets **no provider credentials**, ever;
+   - has egress only to `OperatorConfig.images.buildEgress` (package
+     sources such as PyPI, npm, and GitHub releases, intersected with
+     policy) and to the registry;
+   - receives a short-lived push credential scoped to the images
+     repository;
+   - has CPU, memory, and time limits.
+3. **Record.** The gateway writes `image.build.start` (specHash and
+   Containerfile) before the build, and `image.build.result` (digest
+   and build log, truncated at 1 MiB) afterwards. The command then
+   runs on `image@digest`.
+4. **Single flight.** Concurrent requests for the same `specHash` wait
+   on one build.
+5. **Failure.** A failed build fails the command, and the build log is
+   returned to the agent as context.
+
+Once built, an image is reused by every later command with the same
+spec, including probes, remediation, and teardown. Unpinned installs
+(`pip install awscli`) are therefore frozen at build time, and probes
+don't change behavior when upstream packages change. A **new** plan
+with the same spec reuses the image. To pick up new package versions,
+the plan must pin a different version.
+
+**Garbage collection.** Once a day, the gateway deletes images whose
+`specHash` isn't referenced by any existing Intent's last executed
+plan and that haven't been used for `images.unusedRetention`. Each
+deletion is audited (`image.deleted`).
+
+### 11.3 Registry
+
+**Bundled (default).** The Helm chart installs zot, an OCI registry, in
+`last-registry` with a PVC, plus a **node-local pull proxy** DaemonSet
+listening on `hostPort` 5000 on every node. Images are referenced as
+`localhost:5000/last/images@sha256:…`, so kubelet pulls through the
+proxy on its own node. containerd allows plain HTTP to `localhost` by
+default, so this works without TLS certificates or containerd
+configuration (the classic `kube-registry-proxy` pattern). Only the
+gateway holds push and delete credentials. Pulls through the proxy are
+unauthenticated, which is acceptable because images never contain
+credentials: builds never receive any.
+
+- **Validation required:** this pattern must be tested early (M4) on
+  kind, k3s, EKS, and GKE Standard. Platforms that forbid `hostPort`
+  (e.g. GKE Autopilot) must use an external registry.
+
+**External (optional).** `registry.mode: external` points at a
+repository in ECR, GHCR, Harbor, or similar. The gateway uses
+`pushSecretRef` to push and delete. Sandbox pods use `pullSecretRef` as
+an `imagePullSecret`.
 
 ## 12. LLM providers
 
@@ -792,9 +940,10 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 **Entry types:** `gateway.start`, `checkpoint`, `phase.begin`,
 `phase.end`, `llm.request`, `llm.response`, `command.start`,
 `command.result`, `credential.issued`, `egress.granted`,
-`egress.revoked`, `approval.observed`, `rule.observed` (a rule
-created, changed, or deleted, seen via watch), `suggestion.decided`,
-`policy.denied`.
+`egress.revoked`, `probe.start`, `probe.result` (§10.2),
+`image.build.start`, `image.build.result`, `image.deleted` (§11.2),
+`approval.observed`, `rule.observed` (a rule created, changed, or
+deleted, seen via watch), `suggestion.decided`, `policy.denied`.
 
 **Redaction:** credential values are never logged. Values written to
 output Secrets are logged as SHA-256 hashes. LLM payloads and command
@@ -869,7 +1018,9 @@ namespace and Intent:
 
 - LLM tokens (in/out) and calls, per provider and model
 - Commands by stage, outcome, and authorization kind (approval / rule / auto)
-- Sandbox pod startup and run durations
+- Sandbox pod startup and run durations; sandbox queue depth and wait time
+- Image builds (count, duration, failures), image cache hits, registry size
+- Probe runs skipped due to overlap
 - Approvals pending and time-to-approve
 - Rule suggestions created, accepted, and denied
 - Audit writes, audit write failures, and chain seq
@@ -888,7 +1039,8 @@ The CRs emit standard Kubernetes Events for phase transitions.
 | Operator forges approvals or rules | `IntentApproval`, `CommandRule`, `ClusterCommandRule`, and suggestion decisions are unwritable by the operator (RBAC + admission) |
 | Operator grants itself Auto mode or more providers | Config CRs are read-only to the operator; the gateway resolves policy itself |
 | Command chaining defeats allow rules | Rules match structured argv only; scripts never match |
-| Unapproved binary masquerades as an allowed one | Install commands must also match the rule |
+| Unapproved binary masquerades as an allowed one | `image.install` commands must also match the rule; images pinned by digest, with the digest mapping taken from the audit log rather than registry tags |
+| Build step leaks or abuses credentials | Build pods never receive provider credentials; egress limited to `buildEgress` + registry |
 | Credential leakage via LLM context | Credentials are never returned to the operator; injected only into the sandbox |
 | Operator hides its tracks | Fail-closed WORM audit written by the gateway; hash chain + signatures + compliance lock |
 | Command escapes its scope | Sandbox with no API token, per-execution egress, short-lived credentials limited to the named Providers |
@@ -917,8 +1069,23 @@ The CRs emit standard Kubernetes Events for phase transitions.
   log records the exact command and output, but not the individual API
   calls the CLI makes. Provider-side audit trails (e.g. CloudTrail,
   Kubernetes audit) complement it.
-- **Every command and probe starts a pod.** Expect seconds of latency
-  per command, and more with runtime installs.
+- **Every command and probe starts a pod.** Expect a few seconds of
+  latency per command. The first use of a new image spec also waits for
+  a build, from about 30 seconds to a few minutes.
+- **Audit volume at scale.** Even with compact probe entries, each probe
+  run writes 2 objects under compliance retention, and every write goes
+  through one serialized writer. As a rough estimate, 500 Intents
+  probed every 5 minutes produce about 100M+ objects per year. Group
+  commit (batching entries into segment objects) is the planned fix and
+  is out of scope for v1.
+- **Build pods are less isolated than sandboxes.** Rootless BuildKit
+  needs relaxed seccomp/AppArmor profiles and user namespaces. This is
+  mitigated by giving builds no credentials and limited egress.
+- **Bundled registry node pulls** rely on `hostPort` and containerd's
+  plain-HTTP allowance for `localhost`. Platforms that forbid either
+  must use an external registry.
+- **Built images can contain vulnerable packages.** Images are frozen at
+  build time and not rescanned or rebuilt automatically.
 - **Probe reliability** depends on the LLM writing good probes. The
   Verifying phase catches probes that fail immediately, but not probes
   that pass trivially.
@@ -935,7 +1102,9 @@ restricted to the same level as admin access.
   layering and intersection; plan conformance, including `${steps…}`
   resolution; argv pattern matching (globs, regexes, `...`, install
   coverage, provider and egress subsets); pattern containment used for
-  denied-suggestion suppression; breadth lint; CEL probe evaluation.
+  denied-suggestion suppression; breadth lint; CEL probe evaluation;
+  image spec hashing and Containerfile generation; adaptive probe
+  interval, jitter, and overlap skipping; sandbox queue priority.
 - **Audit tamper tests** (`internal/audit`): deleted entry, reordered
   entries, modified payload, invalid signature, extra object version,
   forged checkpoint, truncated tail. Each must fail `verify` with the
@@ -945,13 +1114,18 @@ restricted to the same level as admin access.
   request → response fixtures) and a fake gateway.
 - **Gateway integration tests:** against MinIO via testcontainers,
   covering fail-closed behavior, refusal to start without compliance
-  lock, and denial of unauthorized or mismatched commands.
+  lock, and denial of unauthorized or mismatched commands; against zot
+  via testcontainers, covering build → push → digest recorded, single
+  flight, rebuilding the index from the audit log, and ignoring a
+  tampered tag.
 - **Admission tests:** the operator ServiceAccount cannot create
   approvals or rules or set suggestion decisions; `approvedBy` /
   `decidedBy` spoofing is rejected; rule constraints are enforced
   (literal `argv[0]`, `...` last only).
 - **End-to-end tests on kind** (with Calico for NetworkPolicy): full
-  Helm install with bundled MinIO; the web server demo driven by the
+  Helm install with bundled MinIO and registry; a command whose image
+  requires a build, then runs from the node-local proxy; the web server
+  demo driven by the
   scripted LLM through discovery, approval with `--always-allow`,
   execution, probes, drift remediation covered by a rule, and teardown;
   then `audit verify`.
@@ -974,9 +1148,10 @@ internal/gateway/llm/    anthropic, openai, openai-compatible adapters
 internal/rules/          argv pattern matching, containment, breadth lint (shared)
 internal/policy/         layered config resolution (shared by operator + gateway)
 internal/audit/          chain, signing, S3 sink, verifier (shared with CLI)
-internal/sandbox/        pod, credential, and NetworkPolicy builders
+internal/sandbox/        pod, credential, and NetworkPolicy builders; scheduler + queue
+internal/images/         image spec hashing, Containerfile generation, builds, registry client, GC
 images/sandbox-base/     base sandbox image
-charts/last-operator/    Helm chart (+ MinIO subchart, admission policies)
+charts/last-operator/    Helm chart (+ MinIO and zot subcharts, pull proxy, admission policies)
 docs/
 ```
 
@@ -986,19 +1161,22 @@ docs/
 |---|---|---|---|
 | M0 | Scaffolding | kubebuilder project, all CRD types, Helm skeleton, CI (lint, unit, envtest) | `make test` green in CI; CRDs install on kind |
 | M1 | Audit foundation | `internal/audit`; gateway skeleton with fail-closed writes, leader election, startup verification; bundled MinIO with compliance lock; `kubectl last audit verify/log` | Tamper tests pass; gateway refuses to act when MinIO is down |
-| M2 | Sandbox + lifecycle (fake LLM) | Sandbox pods, base image, `kubernetes` and `env-secret` Providers, per-execution egress; Intent state machine; plans and hashing; `IntentApproval` + admission; plan enforcement; probes; ManagedResource; output Secrets | e2e: scripted-LLM web server Intent goes Pending → Ready via `kubectl` in a sandbox, with a verified audit chain |
+| M2 | Sandbox + lifecycle (fake LLM) | Sandbox pods on the base image only (commands with `image.install` rejected until M4), `kubernetes` and `env-secret` Providers, per-execution egress; concurrency cap + queue; Intent state machine; plans and hashing; `IntentApproval` + admission; plan enforcement; probes with compact audit, fixed interval, and no overlap; ManagedResource; output Secrets | e2e: scripted-LLM web server Intent goes Pending → Ready via `kubectl` in a sandbox, with a verified audit chain |
 | M3 | Real LLMs + web server demo | Anthropic and OpenAI-compatible adapters; Clarifying and Discovery phases; `kubectl last` create/answer/plan/approve/deny | `kubectl last "run an nginx web server serving X"` works end to end against a real model |
-| M4 | Day 2 | Update stage; drift → remediation; teardown with finalizers; Auto modes and layering | e2e: edit, drift, and delete flows in Manual and Auto modes |
-| M5 | Allow rules | `CommandRule` / `ClusterCommandRule` + admission; gateway matching; `uncoveredSteps`; `approve --always-allow` with exact/generalized patterns; breadth lint | e2e: a second similar Intent runs without approval because of rules from the first |
-| M6 | Suggestions | `CommandRuleSuggestion` + admission; PlanTime, RepeatedApproval, and PeriodicReview triggers; denied-pattern suppression; `kubectl last rules suggestions` | e2e: a denied suggestion is never re-suggested; a narrower one is |
+| M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled zot + node-local pull proxy; external registry mode; audit-backed digest index; single flight; GC. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
+| M5 | Day 2 | Update stage; drift → remediation; teardown with finalizers; Auto modes and layering; adaptive probe intervals + jitter + floor | e2e: edit, drift, and delete flows in Manual and Auto modes |
+| M6 | Allow rules | `CommandRule` / `ClusterCommandRule` + admission; gateway matching (incl. `image.install`); `uncoveredSteps`; `approve --always-allow` with exact/generalized patterns; breadth lint | e2e: a second similar Intent runs without approval because of rules from the first |
+| M7 | Suggestions | `CommandRuleSuggestion` + admission; PlanTime, RepeatedApproval, and PeriodicReview triggers; denied-pattern suppression; `kubectl last rules suggestions` | e2e: a denied suggestion is never re-suggested; a narrower one is |
 
 ## 21. Out of scope for v1
 
 - MCP as a tool type (an MCP server may still be run *inside* a shell
   command like any other program)
 - Native (non-shell) Kubernetes or HTTP tools
-- Warm or pooled sandboxes and caching of runtime installs
-- Building custom sandbox images
+- Warm or pooled sandboxes
+- Runtime installs (all installs are baked into built images)
+- Vulnerability scanning or automatic rebuilds of built images
+- Audit group commit (batching entries into segment objects)
 - Multi-cluster / hub-and-spoke
 - Hard turn, token, or cost caps
 - Namespace-scoped credentials and requester-identity credentials
@@ -1013,7 +1191,7 @@ docs/
 |---|---|
 | Tool surface | Shell only, in sandboxes (Kubernetes via `kubectl`, HTTP via `curl`); MCP dropped |
 | Execution model | Agentic planning with discovery commands; deterministic plan execution |
-| Reconciliation | Probes (commands + CEL); LLM only on drift |
+| Reconciliation | Probes (commands + CEL); LLM only on drift; adaptive interval (1m → 5m), jitter, 1m floor, no overlap, cluster-wide sandbox cap with priority queue; 2 audit entries per probe run |
 | Approval | Auto/Manual per stage (discovery, create, reconcile, delete), layered cluster → namespace → Intent, default Manual |
 | Approvers | RBAC on `IntentApproval` |
 | Allow rules | Structured argv wildcard patterns; cluster + namespace scope; can cover all stages; created only by humans |
@@ -1021,7 +1199,9 @@ docs/
 | Ambiguity | Clarifying questions (status/spec, interactive in CLI) |
 | Updates | Edit the Intent |
 | Credentials | Operator-wide Providers, held only by the gateway; Kubernetes via minted ServiceAccount tokens |
-| Sandbox | Short-lived pods, base image + runtime install, per-execution egress |
+| Sandbox | Short-lived pods on digest-pinned images, per-execution egress |
+| Tool installation | Baked into images built automatically by the gateway (rootless BuildKit, no credentials); no runtime installs |
+| Registry | Bundled zot + node-local pull proxy by default; external registry optional |
 | Tracking | Child `ManagedResource` CRs |
 | Outputs | Secret per resource + status |
 | Transcripts | In the audit log |
