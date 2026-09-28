@@ -296,3 +296,8 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 		--set audit.bundled.enabled=false \
 		--set audit.external.endpoint=https://s3.example.com \
 		--set audit.external.existingSecret=audit-creds >/dev/null
+	helm template last charts/last-operator -n last-system \
+		--set audit.bundled.enabled=false \
+		--set audit.external.endpoint=https://s3.example.com \
+		--set audit.external.existingSecret=audit-creds \
+		--set namespaces.create=false >/dev/null

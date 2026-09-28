@@ -4,6 +4,7 @@ image:
   pullPolicy: IfNotPresent
 
 namespaces:
+  create: true          # set false to pre-create namespaces yourself (see audit.external.existingSecret)
   gateway: last-gateway
   audit: last-audit
 
@@ -22,7 +23,10 @@ audit:
     endpoint: ""
     region: us-east-1
     pathStyle: false
-    existingSecret: ""     # Secret in the gateway namespace with keys accessKey, secretKey
+    existingSecret: ""     # Secret in the gateway namespace with keys accessKey, secretKey.
+                            # Since the chart normally owns and can delete that namespace,
+                            # external mode typically pairs with namespaces.create=false,
+                            # with the gateway namespace (and this Secret in it) pre-created.
 
 gateway:
   resources:
