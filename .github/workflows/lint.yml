@@ -1,29 +1,15 @@
 name: Lint
-
-on:
-  push:
-  pull_request:
-
-permissions: {}
-
+on: [push, pull_request]
 jobs:
   lint:
-    permissions:
-      contents: read
-    name: Run on Ubuntu
     runs-on: ubuntu-latest
     steps:
-      - name: Clone the code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
-        with:
-          go-version-file: go.mod
-
-      - name: Check linter configuration
-        run: make lint-config
-      - name: Run linter
-        run: make lint
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - run: make lint
+      - uses: azure/setup-helm@v4
+      - name: Chart lint and CRD sync
+        run: |
+          make helm-lint
+          git diff --exit-code charts/ config/ || (echo "Run 'make helm-crds manifests' and commit the result." && exit 1)

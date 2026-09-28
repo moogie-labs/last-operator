@@ -1,121 +1,57 @@
 # last-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+An AI-driven Kubernetes operator that turns natural-language requests into
+reviewed, audited, continuously reconciled infrastructure.
+Design: [`docs/superpowers/specs/2026-09-26-last-operator-design.md`](docs/superpowers/specs/2026-09-26-last-operator-design.md).
 
-## Getting Started
+**Status:** foundation (M0–M1). The CRDs and the write-once audit log are in
+place; the agent, sandboxes, and approvals arrive in later milestones.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## What works today
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- All `last.moogie-labs.com/v1alpha1` CRDs, with validation.
+- The **gateway**, the only component that will ever act, writes a hash-chained,
+  Ed25519-signed audit log to S3 Object Lock storage in compliance mode, and
+  refuses to start if the store is unreachable or not locked correctly.
+- A bundled single-node **RustFS** audit store, provisioned with least-privilege users.
+- `kubectl last audit verify | log | conformance`.
 
-```sh
-make docker-build docker-push IMG=<some-registry>/last-operator:tag
+## Quick start (kind)
+
+```bash
+make test-e2e            # builds images, installs the chart on kind, runs the suite
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Verify the audit chain yourself:
 
-**Install the CRDs into the cluster:**
-
-```sh
-make install
+```bash
+kubectl port-forward -n last-audit svc/last-rustfs 9000:9000 &
+export LAST_AUDIT_ENDPOINT=http://127.0.0.1:9000
+export LAST_AUDIT_CHAIN_ID=$(kubectl get cm -n last-gateway last-audit-config -o jsonpath='{.data.chainId}')
+export AWS_ACCESS_KEY_ID=$(kubectl get secret -n last-audit last-audit-reader -o jsonpath='{.data.accessKey}' | base64 -d)
+export AWS_SECRET_ACCESS_KEY=$(kubectl get secret -n last-audit last-audit-reader -o jsonpath='{.data.secretKey}' | base64 -d)
+kubectl get cm -n last-gateway last-audit-pubkey -o jsonpath='{.data.ed25519\.pub}' > pub.pem
+go run ./cmd/kubectl-last audit verify --pubkey-file pub.pem
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+## Production audit storage
 
-```sh
-make deploy IMG=<some-registry>/last-operator:tag
+The bundled RustFS store is the easy default. For production compliance use,
+point the chart at an external S3 bucket (or Ceph RGW) that has Object Lock in
+compliance mode, and run `kubectl last audit conformance` against it:
+
+```bash
+helm install last charts/last-operator -n last-system --create-namespace \
+  --set audit.bundled.enabled=false \
+  --set audit.external.endpoint=https://s3.us-east-1.amazonaws.com \
+  --set audit.external.existingSecret=last-audit-writer   # keys: accessKey, secretKey
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## Development
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/last-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/last-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
+| Command | What it runs |
+|---|---|
+| `make test` | unit + envtest |
+| `make test-integration` | integration tests against RustFS (Docker) |
+| `make helm-lint` | chart lint and render |
+| `make test-e2e` | kind end-to-end suite |
