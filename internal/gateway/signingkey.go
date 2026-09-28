@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,7 +16,10 @@ import (
 )
 
 // EnsureSigningKey loads the audit signing key from its Secret, creating it on first
-// start, and publishes the public key to a ConfigMap for verifiers.
+// start, and publishes the public key to a ConfigMap for verifiers. A missing or
+// empty ConfigMap is created or filled; a published key that differs from the
+// Secret's key is never overwritten — it may be the only verifier key for the
+// historical chain, or evidence of a key swap — so the gateway refuses to start.
 func EnsureSigningKey(ctx context.Context, cs kubernetes.Interface, ns, secretName, cmName string) (ed25519.PrivateKey, error) {
 	key, err := loadOrCreateKey(ctx, cs, ns, secretName, cmName)
 	if err != nil {
@@ -32,14 +36,34 @@ func EnsureSigningKey(ctx context.Context, cs kubernetes.Interface, ns, secretNa
 	switch {
 	case apierrors.IsNotFound(err):
 		_, err = cms.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: ns}, Data: want}, metav1.CreateOptions{})
-	case err == nil && (cm.Data["ed25519.pub"] != want["ed25519.pub"] || cm.Data["fingerprint"] != want["fingerprint"]):
-		cm.Data = want
+	case err != nil: // reported below
+	case !publishedKeyMatches(cm.Data, pub):
+		return nil, fmt.Errorf("gateway: published public key in ConfigMap %s/%s does not match signing key Secret %s/%s; refusing to start — restore the original Secret, or delete the ConfigMap to deliberately rotate", ns, cmName, ns, secretName)
+	case cm.Data["ed25519.pub"] == "" || cm.Data["fingerprint"] == "":
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		maps.Copy(cm.Data, want)
 		_, err = cms.Update(ctx, cm, metav1.UpdateOptions{})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gateway: publish public key: %w", err)
 	}
 	return key, nil
+}
+
+// publishedKeyMatches reports whether every non-empty published value identifies pub.
+func publishedKeyMatches(data map[string]string, pub ed25519.PublicKey) bool {
+	if p := data["ed25519.pub"]; p != "" {
+		published, err := audit.ParsePublicKeyPEM([]byte(p))
+		if err != nil || !published.Equal(pub) {
+			return false
+		}
+	}
+	if fp := data["fingerprint"]; fp != "" && fp != audit.Fingerprint(pub) {
+		return false
+	}
+	return true
 }
 
 func loadOrCreateKey(ctx context.Context, cs kubernetes.Interface, ns, name, cmName string) (ed25519.PrivateKey, error) {

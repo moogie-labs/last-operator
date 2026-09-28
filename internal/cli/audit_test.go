@@ -105,3 +105,34 @@ func TestAuditLogFiltersByIntent(t *testing.T) {
 		t.Fatalf("output = %s", s)
 	}
 }
+
+// F2: verify prints the fingerprint of the key it verified against, on its own line
+// after the (unchanged) OK/FAILED line, so it can be checked out of band.
+func TestAuditVerifyPrintsKeyFingerprint(t *testing.T) {
+	sink, pub := writeChain(t)
+	pemBytes, _ := os.ReadFile(pub)
+	key, err := audit.ParsePublicKeyPEM(pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "key fingerprint: " + audit.Fingerprint(key)
+
+	var out bytes.Buffer
+	if err := execute(testDeps(sink, &out), "audit", "verify", "--chain", "c1", "--pubkey-file", pub); err != nil {
+		t.Fatalf("verify: %v\n%s", err, out.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "OK: verified 4 entries (seq 0..3), head sha256:") || lines[1] != want {
+		t.Fatalf("output = %q, want the OK line then %q", out.String(), want)
+	}
+
+	sink.TamperDelete(audit.EntryKey("c1", 2))
+	out.Reset()
+	if err := execute(testDeps(sink, &out), "audit", "verify", "--chain", "c1", "--pubkey-file", pub); !errors.Is(err, ErrVerifyFailed) {
+		t.Fatalf("err = %v, want ErrVerifyFailed", err)
+	}
+	lines = strings.Split(strings.TrimSpace(out.String()), "\n")
+	if !strings.HasPrefix(lines[0], "FAILED: first problem at seq 2") || len(lines) < 2 || lines[1] != want {
+		t.Fatalf("output = %q, want the FAILED line then %q", out.String(), want)
+	}
+}

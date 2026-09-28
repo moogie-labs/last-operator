@@ -177,3 +177,40 @@ func TestLeadUsesLongerBucketDefaultRetention(t *testing.T) {
 		}
 	}
 }
+
+// startPayload runs one lead cycle and returns the gateway.start payload at seq.
+func startPayload(t *testing.T, g *Gateway, sink audit.Sink, seq uint64) map[string]json.RawMessage {
+	t.Helper()
+	cancel, done := startLead(t, g)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("lead: %v", err)
+	}
+	body, err := sink.Get(context.Background(), audit.EntryKey("chain-1", seq), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e audit.Entry
+	if err := json.Unmarshal(body, &e); err != nil || e.Type != audit.TypeGatewayStart {
+		t.Fatalf("seq %d: type %s (%v)", seq, e.Type, err)
+	}
+	var p map[string]json.RawMessage
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// F2: gateway.start anchors the full public key (and its fingerprint) in WORM storage.
+func TestLeadStartPayloadRecordsPublicKey(t *testing.T) {
+	sink := audittest.NewMemSink()
+	g := testGateway(t, sink)
+	p := startPayload(t, g, sink, 0)
+	var pemStr, fp string
+	_ = json.Unmarshal(p["publicKey"], &pemStr)
+	_ = json.Unmarshal(p["keyFingerprint"], &fp)
+	pub, err := audit.ParsePublicKeyPEM([]byte(pemStr))
+	if err != nil || !pub.Equal(g.signer.Public()) || fp != audit.Fingerprint(g.signer.Public()) {
+		t.Fatalf("publicKey/keyFingerprint do not identify the signing key: %v (err=%v)", p, err)
+	}
+}

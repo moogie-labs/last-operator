@@ -87,8 +87,10 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			keyLine := "key fingerprint: " + audit.Fingerprint(pub)
 			if first, bad := rep.FirstBad(); bad {
 				_, _ = fmt.Fprintf(out, "FAILED: first problem at seq %d (%s): %s\n", first.Seq, first.Kind, first.Detail)
+				_, _ = fmt.Fprintln(out, keyLine)
 				for _, p := range rep.Problems {
 					_, _ = fmt.Fprintf(out, "  seq %-8d %-15s %s\n", p.Seq, p.Kind, p.Detail)
 				}
@@ -96,9 +98,11 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 			}
 			if rep.Head == nil {
 				_, _ = fmt.Fprintln(out, "OK: chain is empty")
+				_, _ = fmt.Fprintln(out, keyLine)
 				return nil
 			}
 			_, _ = fmt.Fprintf(out, "OK: verified %d entries (seq %d..%d), head %s\n", rep.Entries, rep.First.Seq, rep.Head.Seq, rep.Head.Hash)
+			_, _ = fmt.Fprintln(out, keyLine)
 			return nil
 		},
 	}

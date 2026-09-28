@@ -121,10 +121,16 @@ func (g *Gateway) lead(ctx context.Context) error {
 	// entry for the longer of the two rather than silently undercutting the bucket.
 	retention := max(g.cfg.Retention, lc.DefaultRetention)
 	slog.Info("audit retention", "configured", g.cfg.Retention, "bucketDefault", lc.DefaultRetention, "effective", retention)
+	pubPEM, err := audit.MarshalPublicKeyPEM(g.signer.Public())
+	if err != nil {
+		return err
+	}
 	w, err := audit.Open(ctx, g.sink, g.signer, audit.WriterConfig{
 		ChainID: g.cfg.ChainID, Retention: retention, Actor: "gateway",
 	}, map[string]string{
-		"pod": g.cfg.PodName, "version": Version, "keyFingerprint": audit.Fingerprint(g.signer.Public()),
+		"pod": g.cfg.PodName, "version": Version,
+		// Anchor the full verifier key in WORM storage, not only in a mutable ConfigMap.
+		"publicKey": string(pubPEM), "keyFingerprint": audit.Fingerprint(g.signer.Public()),
 	})
 	if err != nil {
 		return err

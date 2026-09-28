@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"maps"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -40,23 +42,57 @@ func TestEnsureSigningKeyCreatesThenReuses(t *testing.T) {
 	}
 }
 
-func TestEnsureSigningKeyRepairsPublishedKey(t *testing.T) {
-	ctx := context.Background()
-	cs := fake.NewClientset()
-	key, _ := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey")
+// F2: a published key that differs from the Secret's key is never overwritten: it may
+// be the only verifier key for the historical chain, or evidence of a key swap.
+func TestEnsureSigningKeyRefusesMismatchedPublishedKey(t *testing.T) {
 	other, _, _ := ed25519.GenerateKey(rand.Reader)
 	otherPEM, _ := audit.MarshalPublicKeyPEM(other)
-	cm, _ := cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
-	cm.Data["ed25519.pub"] = string(otherPEM)
-	_, _ = cs.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{})
+	for name, tamper := range map[string]func(map[string]string){
+		"public key":  func(d map[string]string) { d["ed25519.pub"] = string(otherPEM) },
+		"fingerprint": func(d map[string]string) { d["fingerprint"] = audit.Fingerprint(other) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := fake.NewClientset()
+			if _, err := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey"); err != nil {
+				t.Fatal(err)
+			}
+			cm, _ := cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
+			tamper(cm.Data)
+			if _, err := cs.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			want := maps.Clone(cm.Data)
 
-	if _, err := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey"); err != nil {
+			_, err := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey")
+			if err == nil || !strings.Contains(err.Error(), "does not match") ||
+				!strings.Contains(err.Error(), "last-audit-signing") || !strings.Contains(err.Error(), "last-audit-pubkey") {
+				t.Fatalf("err = %v, want a refusal naming the ConfigMap and the Secret", err)
+			}
+			cm, _ = cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
+			if !maps.Equal(cm.Data, want) {
+				t.Fatalf("ConfigMap changed despite the refusal: %v", cm.Data)
+			}
+		})
+	}
+}
+
+func TestEnsureSigningKeyFillsEmptyConfigMap(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	if _, err := cs.CoreV1().ConfigMaps(ns).Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "last-audit-pubkey", Namespace: ns},
+	}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	cm, _ = cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
-	pub, _ := audit.ParsePublicKeyPEM([]byte(cm.Data["ed25519.pub"]))
-	if !pub.Equal(key.Public()) {
-		t.Fatal("published key was not repaired to match the signing key")
+	key, err := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, _ := cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
+	pub, err := audit.ParsePublicKeyPEM([]byte(cm.Data["ed25519.pub"]))
+	if err != nil || !pub.Equal(key.Public()) || cm.Data["fingerprint"] != audit.Fingerprint(pub) {
+		t.Fatalf("empty ConfigMap not filled with the signing key: %v (err=%v)", cm.Data, err)
 	}
 }
 
