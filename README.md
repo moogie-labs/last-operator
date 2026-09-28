@@ -38,13 +38,25 @@ go run ./cmd/kubectl-last audit verify --pubkey-file pub.pem
 
 The bundled RustFS store is the easy default. For production compliance use,
 point the chart at an external S3 bucket (or Ceph RGW) that has Object Lock in
-compliance mode, and run `kubectl last audit conformance` against it:
+compliance mode, and run `kubectl last audit conformance` against it. The
+writer credentials must be in a Secret in the `last-gateway` namespace before
+install, so pre-create that namespace yourself and turn off `namespaces.create`
+(the bundled `last-audit` namespace isn't used in external mode, so it doesn't
+need to be pre-created):
 
 ```bash
+kubectl create namespace last-gateway
+
+kubectl create secret generic last-audit-writer -n last-gateway \
+  --from-literal=accessKey=<your-access-key> \
+  --from-literal=secretKey=<your-secret-key>
+
 helm install last charts/last-operator -n last-system --create-namespace \
   --set audit.bundled.enabled=false \
   --set audit.external.endpoint=https://s3.us-east-1.amazonaws.com \
-  --set audit.external.existingSecret=last-audit-writer   # keys: accessKey, secretKey
+  --set audit.external.existingSecret=last-audit-writer \
+  --set namespaces.create=false \
+  --set audit.bucket=<your-object-lock-bucket>
 ```
 
 ## Development
