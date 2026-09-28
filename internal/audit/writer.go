@@ -15,6 +15,9 @@ var (
 	ErrWriterBroken     = errors.New("audit: writer is broken; restart the gateway to resynchronize")
 	ErrChainConflict    = errors.New("audit: chain conflict: a different entry already exists at this seq")
 	ErrAuditUnavailable = errors.New("audit: entry could not be recorded; action refused")
+	// ErrCheckpointFailed wraps a checkpoint failure that followed a successfully
+	// stored entry: the entry Append returns alongside it IS durable.
+	ErrCheckpointFailed = errors.New("audit: entry stored but the following checkpoint failed")
 )
 
 // WriterConfig configures a Writer. Zero values get defaults except Retention, which is required.
@@ -126,8 +129,9 @@ func (w *Writer) Head() (uint64, string, bool) {
 	return w.nextSeq - 1, w.prevHash, true
 }
 
-// Append seals d as the next entry and stores it. A checkpoint may follow it;
-// if that checkpoint fails, the error is returned even though d was stored.
+// Append seals d as the next entry and stores it. A checkpoint may follow it; if
+// that checkpoint fails, Append returns the stored entry together with an error
+// wrapping ErrCheckpointFailed. Any other error means d was not recorded.
 func (w *Writer) Append(ctx context.Context, d Draft) (Entry, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -135,7 +139,10 @@ func (w *Writer) Append(ctx context.Context, d Draft) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	return e, w.checkpointLocked(ctx, false)
+	if err := w.checkpointLocked(ctx, false); err != nil {
+		return e, fmt.Errorf("%w: %w", ErrCheckpointFailed, err)
+	}
+	return e, nil
 }
 
 // CheckpointIfDue writes a checkpoint if CheckpointInterval has passed since the

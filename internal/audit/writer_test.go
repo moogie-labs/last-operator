@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,8 +244,8 @@ func TestChainConflictBreaksWriter(t *testing.T) {
 	}
 }
 
-func after(result any, err error) audit.Draft {
-	payload := map[string]any{"result": result}
+func after(before audit.Entry, result any, err error) audit.Draft {
+	payload := map[string]any{"beforeSeq": before.Seq, "beforeHash": before.Hash, "result": result}
 	if err != nil {
 		payload["error"] = err.Error()
 	}
@@ -433,5 +434,148 @@ func TestDoRefusesActionWithUnsafeNumberInBefore(t *testing.T) {
 	err := w.Do(bg, before, func(context.Context) (any, error) { called = true; return nil, nil }, after)
 	if !errors.Is(err, audit.ErrAuditUnavailable) || called {
 		t.Fatalf("err=%v called=%v; want ErrAuditUnavailable and no action", err, called)
+	}
+}
+
+// F7: after receives the durable before-entry so the outcome can reference it.
+func TestDoPassesDurableBeforeEntryToAfter(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	var got audit.Entry
+	err := w.Do(bg, cmd(1), func(context.Context) (any, error) { return nil, nil },
+		func(before audit.Entry, result any, actionErr error) audit.Draft {
+			got = before
+			return after(before, result, actionErr)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := readEntry(t, sink, 1)
+	if got.Seq != 1 || got.Hash == "" || got.Hash != stored.Hash || got.Type != audit.TypeCommandStart {
+		t.Fatalf("after got before=%+v, want the stored seq-1 entry %+v", got, stored)
+	}
+	var p map[string]any
+	_ = json.Unmarshal(readEntry(t, sink, 2).Payload, &p)
+	if p["beforeHash"] != stored.Hash {
+		t.Fatalf("outcome payload = %v, want it to reference the before-entry hash", p)
+	}
+}
+
+// F7: concurrent appends must serialize into one contiguous, verifiable chain.
+func TestConcurrentAppendsFormOneChain(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	cfg := writerConfig(newClock())
+	cfg.CheckpointEvery = 100 // exercise checkpoints under contention too
+	w := openWriter(t, sink, s, cfg)
+	const goroutines, perG = 16, 50
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines*perG)
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range perG {
+				if _, err := w.Append(bg, cmd(g*perG+i)); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("append: %v", err)
+	}
+	rep := verifyChain(t, sink, s, audit.VerifyOptions{})
+	// 1 gateway.start + 800 appends + one checkpoint after every 100 non-checkpoint entries.
+	const want = 1 + goroutines*perG + (1+goroutines*perG)/100
+	if !rep.OK() || rep.Entries != want || rep.First.Seq != 0 || rep.Head.Seq != want-1 {
+		t.Fatalf("entries=%d head=%v problems=%+v; want %d contiguous entries", rep.Entries, rep.Head, rep.Problems, want)
+	}
+	seen := map[int]bool{}
+	for seq := uint64(0); seq < want; seq++ {
+		e := readEntry(t, sink, seq)
+		if e.Type != audit.TypeCommandStart {
+			continue
+		}
+		var p map[string]int
+		_ = json.Unmarshal(e.Payload, &p)
+		seen[p["n"]] = true
+	}
+	if len(seen) != goroutines*perG {
+		t.Fatalf("recorded %d distinct appends, want %d", len(seen), goroutines*perG)
+	}
+}
+
+// F7: the outcome entry itself fails -> "outcome not recorded", action ran once, writer broken.
+func TestDoReportsOutcomeNotRecorded(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	calls := 0
+	err := w.Do(bg, cmd(1), func(context.Context) (any, error) {
+		calls++
+		sink.SetFailPuts(true) // the store fails after the before-entry landed
+		return nil, nil
+	}, after)
+	if err == nil || !strings.Contains(err.Error(), "outcome not recorded") || strings.Contains(err.Error(), "outcome recorded") {
+		t.Fatalf("Do = %v, want an error saying the outcome was not recorded", err)
+	}
+	if errors.Is(err, audit.ErrCheckpointFailed) {
+		t.Fatalf("Do = %v; the outcome entry itself failed, not a checkpoint", err)
+	}
+	if calls != 1 || !w.Broken() {
+		t.Fatalf("calls=%d broken=%v; want the action run once and the writer broken", calls, w.Broken())
+	}
+	if _, getErr := sink.Get(bg, audit.EntryKey(chainID, 2), ""); getErr == nil {
+		t.Fatal("an outcome entry exists although Do said it was not recorded")
+	}
+}
+
+// failKeySink fails every Put to one key.
+type failKeySink struct {
+	*audittest.MemSink
+	key string
+}
+
+func (f *failKeySink) Put(ctx context.Context, key string, body []byte, until time.Time) error {
+	if key == f.key {
+		return errors.New("store unavailable")
+	}
+	return f.MemSink.Put(ctx, key, body, until)
+}
+
+// F7: the outcome entry lands but the checkpoint after it fails -> Do must say the
+// outcome WAS recorded, and Append reports ErrCheckpointFailed with the stored entry.
+func TestDoReportsOutcomeRecordedButCheckpointFailed(t *testing.T) {
+	s := newSigner(t)
+	sink := &failKeySink{MemSink: audittest.NewMemSink(), key: audit.EntryKey(chainID, 3)}
+	cfg := writerConfig(newClock())
+	cfg.CheckpointEvery = 3 // gateway.start(0), before(1), outcome(2) -> checkpoint due at seq 3
+	w := openWriter(t, sink, s, cfg)
+	calls := 0
+	err := w.Do(bg, cmd(1), func(context.Context) (any, error) { calls++; return nil, nil }, after)
+	if err == nil || !strings.Contains(err.Error(), "outcome recorded but checkpoint failed") || strings.Contains(err.Error(), "outcome not recorded") {
+		t.Fatalf("Do = %v, want an error saying the outcome was recorded but the checkpoint failed", err)
+	}
+	if !errors.Is(err, audit.ErrCheckpointFailed) {
+		t.Fatalf("Do = %v, want it to wrap ErrCheckpointFailed", err)
+	}
+	if readEntry(t, sink, 2).Type != audit.TypeCommandResult || calls != 1 || !w.Broken() {
+		t.Fatalf("calls=%d broken=%v; want the outcome stored, the action run once, and the writer broken", calls, w.Broken())
+	}
+}
+
+func TestAppendReturnsStoredEntryWhenCheckpointFails(t *testing.T) {
+	s := newSigner(t)
+	sink := &failKeySink{MemSink: audittest.NewMemSink(), key: audit.EntryKey(chainID, 2)}
+	cfg := writerConfig(newClock())
+	cfg.CheckpointEvery = 2 // gateway.start(0), append(1) -> checkpoint due at seq 2
+	w := openWriter(t, sink, s, cfg)
+	e, err := w.Append(bg, cmd(1))
+	if !errors.Is(err, audit.ErrCheckpointFailed) {
+		t.Fatalf("Append = %v, want ErrCheckpointFailed", err)
+	}
+	if e.Seq != 1 || e.Hash != readEntry(t, sink, 1).Hash {
+		t.Fatalf("Append returned %+v, want the stored seq-1 entry", e)
 	}
 }
