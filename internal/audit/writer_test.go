@@ -1,6 +1,7 @@
 package audit_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -362,5 +363,75 @@ func TestOpenRefusesZeroRetention(t *testing.T) {
 	// Ensure no entry was written
 	if len(sink.Keys()) != 0 {
 		t.Fatalf("open with Retention 0 wrote entries, want none: %v", sink.Keys())
+	}
+}
+
+// F6: the Writer stores the RFC 8785 canonical bytes of a version-1 entry.
+func TestWriterStoresCanonicalVersion1Body(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	if _, err := w.Append(bg, cmd(1)); err != nil {
+		t.Fatal(err)
+	}
+	for seq := uint64(0); seq <= 1; seq++ {
+		body, err := sink.Get(bg, audit.EntryKey(chainID, seq), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := readEntry(t, sink, seq)
+		if e.V != 1 {
+			t.Fatalf("seq %d: v = %d, want 1", seq, e.V)
+		}
+		if want := mustCanonical(t, e); !bytes.Equal(body, want) {
+			t.Fatalf("seq %d: stored body is not canonical:\n got %s\nwant %s", seq, body, want)
+		}
+	}
+}
+
+// F6: numbers that RFC 8785 would alter (non-integral, or |n| > 2^53) must be
+// rejected, because the signed canonical form would differ from what the caller meant.
+func TestAppendRejectsNumbersCanonicalJSONWouldAlter(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	for name, payload := range map[string]any{
+		"int above 2^53":       map[string]uint64{"n": 9007199254740993},
+		"negative below -2^53": map[string]int64{"n": -9007199254740993},
+		"fraction":             map[string]float64{"n": 0.5},
+		"nested":               map[string]any{"a": []any{1, map[string]uint64{"b": 1 << 60}}},
+		"raw exponent":         json.RawMessage(`{"n":1e3}`),
+		"raw big":              json.RawMessage(`[18446744073709551615]`),
+	} {
+		_, err := w.Append(bg, audit.Draft{Type: audit.TypeCommandStart, Actor: actorOperator, Payload: payload})
+		if err == nil || !strings.Contains(err.Error(), "encode it as a string") {
+			t.Errorf("%s: Append = %v, want a rejection telling the caller to use a string", name, err)
+		}
+	}
+	if w.Broken() {
+		t.Fatal("a rejected payload must not break the writer")
+	}
+	for name, payload := range map[string]any{
+		"small int": map[string]int{"n": 12345},
+		"2^53":      map[string]uint64{"n": 1 << 53},
+		"-2^53":     map[string]int64{"n": -(1 << 53)},
+		"string":    map[string]string{"n": "9007199254740993"},
+		"raw":       json.RawMessage(`{"n":-7,"s":"1.5"}`),
+	} {
+		if _, err := w.Append(bg, audit.Draft{Type: audit.TypeCommandStart, Actor: actorOperator, Payload: payload}); err != nil {
+			t.Errorf("%s: Append = %v, want success", name, err)
+		}
+	}
+	if rep := verifyChain(t, sink, s, audit.VerifyOptions{}); !rep.OK() || rep.Head.Seq != 5 {
+		t.Fatalf("report = %+v", rep)
+	}
+}
+
+func TestDoRefusesActionWithUnsafeNumberInBefore(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	before := audit.Draft{Type: audit.TypeCommandStart, Actor: actorOperator, Payload: map[string]uint64{"n": 9007199254740993}}
+	called := false
+	err := w.Do(bg, before, func(context.Context) (any, error) { called = true; return nil, nil }, after)
+	if !errors.Is(err, audit.ErrAuditUnavailable) || called {
+		t.Fatalf("err=%v called=%v; want ErrAuditUnavailable and no action", err, called)
 	}
 }

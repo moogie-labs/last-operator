@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
+
+	"github.com/gowebpki/jcs"
 )
 
 // ProblemKind classifies a verification failure.
@@ -111,18 +114,9 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 		if err != nil {
 			return rep, fmt.Errorf("audit: read %s: %w", o.Key, err)
 		}
-		var e Entry
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&e); err != nil {
-			rep.add(seq, ProblemMalformed, "%v", err)
-			prev = nil
-			continue
-		}
-		// Verify the body is the canonical encoding of the entry.
-		canonical, _ := json.Marshal(e)
-		if !bytes.Equal(body, canonical) {
-			rep.add(seq, ProblemMalformed, "body is not the canonical encoding of the entry")
+		e, problem := decodeEntry(body)
+		if problem != "" {
+			rep.add(seq, ProblemMalformed, "%s", problem)
 			prev = nil
 			continue
 		}
@@ -174,6 +168,35 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 	}
 	slices.SortStableFunc(rep.Problems, func(a, b Problem) int { return cmp.Compare(a.Seq, b.Seq) })
 	return rep, nil
+}
+
+// decodeEntry strictly decodes a stored entry body. It returns a non-empty problem
+// unless the body is exactly the RFC 8785 canonical encoding of a version-1 entry
+// with no unknown fields and no trailing data.
+func decodeEntry(body []byte) (Entry, string) {
+	var e Entry
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&e); err != nil {
+		return Entry{}, err.Error()
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return Entry{}, "trailing data after the entry"
+	}
+	if canonical, err := jcs.Transform(body); err != nil || !bytes.Equal(body, canonical) {
+		return Entry{}, "body is not RFC 8785 canonical"
+	}
+	if e.V != EntryVersion {
+		return Entry{}, fmt.Sprintf("unsupported entry version %d", e.V)
+	}
+	// A canonical body can still carry keys that encoding/json folds onto the same
+	// field (e.g. "chainId" and "chainid"), so a case-sensitive reader would see
+	// values the signature does not cover. Require the body to be exactly the
+	// canonical encoding of the decoded entry.
+	if canonical, err := Canonical(e); err != nil || !bytes.Equal(body, canonical) {
+		return Entry{}, "body is not the canonical encoding of the entry"
+	}
+	return e, ""
 }
 
 func verifyCheckpointIndex(ctx context.Context, sink Sink, chainID string, fromSeq uint64, hashes, types map[uint64]string, rep *Report) error {

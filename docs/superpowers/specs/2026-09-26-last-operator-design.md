@@ -964,6 +964,7 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 
 ```json
 {
+  "v": 1,
   "seq": 1042,
   "chainId": "3f1c…",
   "prevHash": "sha256:…",
@@ -980,8 +981,17 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 }
 ```
 
+- `v` is the entry format version (currently `1`); verifiers reject any
+  other value. It is covered by `hash`.
 - `hash` is the SHA-256 of the RFC 8785 canonical JSON of every field
   except `hash` and `sig`. `sig` is an Ed25519 signature over `hash`.
+- The stored object body is the RFC 8785 canonical JSON of the whole
+  entry (including `hash` and `sig`), byte for byte; verifiers reject any
+  other encoding, unknown fields, and trailing data. (The example above is
+  pretty-printed for reading.)
+- Payload numbers must be integers with magnitude at most 2^53, which RFC
+  8785 serializes unchanged; larger or non-integral numbers must be
+  encoded as strings, and the writer rejects them otherwise.
 - `authorizedBy` records what allowed the action: an `IntentApproval`,
   a rule, or an Auto mode (with the policy it came from).
 - The signing key is a Secret in `last-gateway`, and the public key is

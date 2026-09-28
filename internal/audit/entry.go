@@ -41,8 +41,13 @@ type Authorization struct {
 	Name string `json:"name,omitempty"`
 }
 
-// Entry is one signed link in the audit chain.
+// EntryVersion is the entry format version this package writes and verifies.
+const EntryVersion = 1
+
+// Entry is one signed link in the audit chain. It is stored as its RFC 8785
+// canonical JSON encoding (spec §14.2); V is covered by the hash.
 type Entry struct {
+	V            int             `json:"v"`
 	Seq          uint64          `json:"seq"`
 	ChainID      string          `json:"chainId"`
 	PrevHash     string          `json:"prevHash"`

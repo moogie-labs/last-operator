@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -154,7 +155,7 @@ func (w *Writer) appendLocked(ctx context.Context, d Draft) (Entry, error) {
 		return Entry{}, err
 	}
 	e := Entry{
-		Seq: w.nextSeq, ChainID: w.cfg.ChainID, PrevHash: w.prevHash,
+		V: EntryVersion, Seq: w.nextSeq, ChainID: w.cfg.ChainID, PrevHash: w.prevHash,
 		TS:   w.cfg.Now().UTC().Format(TimeFormat),
 		Type: d.Type, Actor: d.Actor, Intent: d.Intent, Stage: d.Stage,
 		SubjectHash: d.SubjectHash, AuthorizedBy: d.AuthorizedBy, Payload: payload,
@@ -162,7 +163,7 @@ func (w *Writer) appendLocked(ctx context.Context, d Draft) (Entry, error) {
 	if err := w.signer.Seal(&e); err != nil {
 		return Entry{}, err
 	}
-	body, err := json.Marshal(e)
+	body, err := Canonical(e)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -243,17 +244,59 @@ func (w *Writer) fail(err error) error {
 	return err
 }
 
+// maxExactJSONInt is 2^53: every integer with a magnitude up to this is exactly
+// representable as an IEEE 754 double, so RFC 8785 serializes it unchanged.
+var maxExactJSONInt = new(big.Int).Lsh(big.NewInt(1), 53)
+
+// marshalPayload encodes a payload and rejects any JSON number RFC 8785 would
+// alter when the entry is canonicalized for hashing and storage: the signed
+// bytes must mean exactly what the caller wrote (spec §14.2).
 func marshalPayload(p any) (json.RawMessage, error) {
+	var b []byte
 	switch v := p.(type) {
 	case nil:
 		return nil, nil
 	case json.RawMessage:
-		return v, nil
+		b = v
 	default:
-		b, err := json.Marshal(v)
-		if err != nil {
+		var err error
+		if b, err = json.Marshal(v); err != nil {
 			return nil, fmt.Errorf("audit: marshal payload: %w", err)
 		}
-		return b, nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var doc any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("audit: payload is not valid JSON: %w", err)
+	}
+	if err := checkExactNumbers(doc); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// checkExactNumbers walks a decoded JSON value and rejects numbers that are
+// not integer literals or whose magnitude exceeds 2^53.
+func checkExactNumbers(v any) error {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, x := range v {
+			if err := checkExactNumbers(x); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, x := range v {
+			if err := checkExactNumbers(x); err != nil {
+				return err
+			}
+		}
+	case json.Number:
+		n, ok := new(big.Int).SetString(string(v), 10)
+		if !ok || n.CmpAbs(maxExactJSONInt) > 0 {
+			return fmt.Errorf("audit: payload number %s is non-integral or exceeds 2^53 in magnitude, so RFC 8785 canonical JSON would alter it; encode it as a string", v)
+		}
+	}
+	return nil
 }

@@ -39,9 +39,19 @@ func mustMarshal(t *testing.T, v any) []byte {
 	return b
 }
 
+// mustCanonical returns the stored form of an entry: RFC 8785 canonical JSON (spec §14.2).
+func mustCanonical(t *testing.T, e audit.Entry) []byte {
+	t.Helper()
+	b, err := audit.Canonical(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func putEntry(t *testing.T, sink *audittest.MemSink, e audit.Entry) {
 	t.Helper()
-	if err := sink.Put(bg, audit.EntryKey(chainID, e.Seq), mustMarshal(t, e), time.Time{}); err != nil {
+	if err := sink.Put(bg, audit.EntryKey(chainID, e.Seq), mustCanonical(t, e), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -54,7 +64,7 @@ func buildChain(t *testing.T, sink *audittest.MemSink, s *audit.Signer, n int, m
 	out := make([]audit.Entry, 0, n)
 	for i := range n {
 		e := audit.Entry{
-			Seq: uint64(i), ChainID: chainID, PrevHash: prev,
+			V: 1, Seq: uint64(i), ChainID: chainID, PrevHash: prev,
 			TS: "2026-09-27T00:00:00.000000000Z", Type: audit.TypeCommandStart,
 			Actor: actorOperator, Intent: intentTeamXWeb,
 			Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
@@ -119,8 +129,8 @@ func TestVerifyDetectsDeletedEntry(t *testing.T) {
 func TestVerifyDetectsReorderedEntries(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	es := buildChain(t, sink, s, 10, nil)
-	sink.TamperReplace(audit.EntryKey(chainID, 2), mustMarshal(t, es[3]))
-	sink.TamperReplace(audit.EntryKey(chainID, 3), mustMarshal(t, es[2]))
+	sink.TamperReplace(audit.EntryKey(chainID, 2), mustCanonical(t, es[3]))
+	sink.TamperReplace(audit.EntryKey(chainID, 3), mustCanonical(t, es[2]))
 	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemSeqMismatch)
 }
 
@@ -129,7 +139,7 @@ func TestVerifyDetectsModifiedPayload(t *testing.T) {
 	es := buildChain(t, sink, s, 10, nil)
 	e := es[4]
 	e.Payload = json.RawMessage(`{"n":999}`)
-	sink.TamperReplace(audit.EntryKey(chainID, 4), mustMarshal(t, e))
+	sink.TamperReplace(audit.EntryKey(chainID, 4), mustCanonical(t, e))
 	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 4, audit.ProblemBadHash)
 }
 
@@ -138,7 +148,7 @@ func TestVerifyDetectsInvalidSignature(t *testing.T) {
 	es := buildChain(t, sink, s, 10, nil)
 	e := es[5]
 	e.Sig = "ed25519:" + base64.StdEncoding.EncodeToString(make([]byte, 64))
-	sink.TamperReplace(audit.EntryKey(chainID, 5), mustMarshal(t, e))
+	sink.TamperReplace(audit.EntryKey(chainID, 5), mustCanonical(t, e))
 	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadSignature)
 }
 
@@ -150,7 +160,7 @@ func TestVerifyDetectsEntryResignedWithAnotherKey(t *testing.T) {
 	if err := newSigner(t).Seal(&e); err != nil {
 		t.Fatal(err)
 	}
-	sink.TamperReplace(audit.EntryKey(chainID, 6), mustMarshal(t, e))
+	sink.TamperReplace(audit.EntryKey(chainID, 6), mustCanonical(t, e))
 	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 6, audit.ProblemBadSignature)
 }
 
@@ -198,9 +208,9 @@ func TestVerifyDetectsMalformedEntry(t *testing.T) {
 func TestVerifyRejectsUnknownFields(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	es := buildChain(t, sink, s, 5, nil)
-	raw := strings.TrimSuffix(string(mustMarshal(t, es[1])), "}") + `,"evil":true}`
+	raw := strings.TrimSuffix(string(mustCanonical(t, es[1])), "}") + `,"zzz":true}`
 	sink.TamperReplace(audit.EntryKey(chainID, 1), []byte(raw))
-	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 1, audit.ProblemMalformed)
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 1, audit.ProblemMalformed, "unknown field")
 }
 
 func checkpointAt(seq uint64) func(*audit.Entry) {
@@ -270,26 +280,76 @@ func TestVerifyFromSeqSkipsEarlierEntries(t *testing.T) {
 	}
 }
 
-// Regression tests for Finding 1: canonical encoding validation.
+// Regression tests for Finding 1 / F6: the stored body must be exactly the RFC 8785
+// canonical encoding of a version-1 entry. Each test asserts the Detail so it fails
+// for the intended reason, not an earlier incidental one.
+
+// requireProblemDetail is requireProblem plus a check that the first problem's
+// Detail contains want.
+func requireProblemDetail(t *testing.T, rep audit.Report, seq uint64, kind audit.ProblemKind, want string) {
+	t.Helper()
+	requireProblem(t, rep, seq, kind)
+	if p, _ := rep.FirstBad(); !strings.Contains(p.Detail, want) {
+		t.Fatalf("first problem detail = %q, want it to contain %q", p.Detail, want)
+	}
+}
 
 func TestVerifyDetectsTrailingDataAfterEntry(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	es := buildChain(t, sink, s, 5, nil)
-	// Append trailing junk to the entry body.
-	e := es[2]
-	body := mustMarshal(t, e)
-	body = append(body, []byte(`{"actor":"attacker"}`)...)
+	// Append trailing junk to an otherwise valid canonical entry body.
+	body := append(mustCanonical(t, es[2]), []byte(`{"actor":"attacker"}`)...)
 	sink.TamperReplace(audit.EntryKey(chainID, 2), body)
-	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemMalformed)
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemMalformed, "trailing data")
 }
 
 func TestVerifyDetectsNonCanonicalEncoding(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	es := buildChain(t, sink, s, 5, nil)
-	// Add a duplicate key with different casing.
-	raw := strings.TrimSuffix(string(mustMarshal(t, es[1])), "}") + `,"ACTOR":"x"}`
+	// Add a case-variant duplicate key out of canonical key order.
+	raw := strings.TrimSuffix(string(mustCanonical(t, es[1])), "}") + `,"ACTOR":"x"}`
 	sink.TamperReplace(audit.EntryKey(chainID, 1), []byte(raw))
-	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 1, audit.ProblemMalformed)
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 1, audit.ProblemMalformed, "body is not RFC 8785 canonical")
+}
+
+func TestVerifyRejectsLegacyNonCanonicalBody(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 5, nil)
+	// A correctly sealed entry stored as encoding/json output (struct field order,
+	// the pre-F6 format) is not canonical and must be rejected.
+	sink.TamperReplace(audit.EntryKey(chainID, 3), mustMarshal(t, es[3]))
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 3, audit.ProblemMalformed, "body is not RFC 8785 canonical")
+}
+
+func TestVerifyRejectsUnsupportedVersion(t *testing.T) {
+	for _, v := range []int{0, 2} {
+		t.Run(fmt.Sprint(v), func(t *testing.T) {
+			s, sink := newSigner(t), audittest.NewMemSink()
+			// Correctly sealed and canonical, but not a version this verifier understands.
+			buildChain(t, sink, s, 5, func(e *audit.Entry) {
+				if e.Seq == 2 {
+					e.V = v
+				}
+			})
+			requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemMalformed,
+				fmt.Sprintf("unsupported entry version %d", v))
+		})
+	}
+}
+
+func TestVerifyRejectsCanonicalBodyWithShadowedKey(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, sink, s, 5, nil)
+	// "chainId" sorts before "chainid", so this body is still RFC 8785 canonical.
+	// encoding/json matches "chainid" case-insensitively and lets it win, so the
+	// decoded (signed) entry has the real chain ID while a case-sensitive reader
+	// of the stored bytes sees "forged". The body must equal the canonical
+	// encoding of the decoded entry, so this is rejected.
+	body := strings.Replace(string(mustCanonical(t, es[2])), `"chainId":"`+chainID+`"`,
+		`"chainId":"forged","chainid":"`+chainID+`"`, 1)
+	sink.TamperReplace(audit.EntryKey(chainID, 2), []byte(body))
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 2, audit.ProblemMalformed,
+		"body is not the canonical encoding of the entry")
 }
 
 // Focused tests for Finding 2: checkpoint validation conditions.
