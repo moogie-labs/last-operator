@@ -1,0 +1,6 @@
+apiVersion: v2
+name: last-operator
+description: AI-driven Kubernetes provisioning operator with a write-once audit log
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

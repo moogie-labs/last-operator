@@ -1,0 +1,110 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: intentapprovals.last.moogie-labs.com
+spec:
+  group: last.moogie-labs.com
+  names:
+    kind: IntentApproval
+    listKind: IntentApprovalList
+    plural: intentapprovals
+    singular: intentapproval
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.intentRef.name
+      name: Intent
+      type: string
+    - jsonPath: .spec.stage
+      name: Stage
+      type: string
+    - jsonPath: .spec.decision
+      name: Decision
+      type: string
+    - jsonPath: .spec.approvedBy
+      name: By
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: IntentApproval is an immutable approval or denial of one plan
+          or discovery command.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: IntentApprovalSpec binds a human decision to exactly one
+              approval subject.
+            properties:
+              approvedBy:
+                description: ApprovedBy must equal the creating user; enforced by
+                  admission policy in M2.
+                minLength: 1
+                type: string
+              decision:
+                description: Decision is an approver's verdict.
+                enum:
+                - Approve
+                - Deny
+                type: string
+              intentRef:
+                description: LocalRef names an object in the same namespace (or a
+                  cluster-scoped object).
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              reason:
+                type: string
+              stage:
+                description: Stage identifies what an approval subject or allow rule
+                  applies to.
+                enum:
+                - Discovery
+                - Create
+                - Update
+                - Remediate
+                - Delete
+                type: string
+              subjectHash:
+                description: SubjectHash is the plan hash, or the pending command
+                  hash for Discovery.
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
+            required:
+            - approvedBy
+            - decision
+            - intentRef
+            - stage
+            - subjectHash
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

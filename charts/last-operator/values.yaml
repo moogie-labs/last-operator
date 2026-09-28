@@ -1,0 +1,30 @@
+image:
+  registry: ghcr.io/moogie-labs
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+namespaces:
+  gateway: last-gateway
+  audit: last-audit
+
+audit:
+  bucket: last-audit
+  retentionDays: 365
+  bundled:
+    enabled: true
+    image: rustfs/rustfs:1.0.0
+    storageClassName: ""   # "" = cluster default
+    size: 10Gi
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
+      limits: {memory: 2Gi}
+  external:
+    endpoint: ""
+    region: us-east-1
+    pathStyle: false
+    existingSecret: ""     # Secret in the gateway namespace with keys accessKey, secretKey
+
+gateway:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}

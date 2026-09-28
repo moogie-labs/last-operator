@@ -1,0 +1,46 @@
+{{- if .Values.audit.bundled.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # A new Job per revision: Job templates are immutable, and init is idempotent.
+  name: last-audit-init-{{ .Release.Revision }}
+  namespace: {{ .Values.namespaces.audit }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: last-audit-init
+        {{- include "last.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: init
+          image: {{ include "last.image" (list . "audit-init") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - {name: LAST_AUDIT_ENDPOINT, value: {{ include "last.auditEndpoint" . | quote }}}
+            - {name: LAST_AUDIT_BUCKET, value: {{ .Values.audit.bucket | quote }}}
+            - {name: LAST_AUDIT_RETENTION_DAYS, value: {{ .Values.audit.retentionDays | quote }}}
+            - name: RUSTFS_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-root, key: RUSTFS_ACCESS_KEY}}
+            - name: RUSTFS_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-root, key: RUSTFS_SECRET_KEY}}
+            - name: LAST_AUDIT_WRITER_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-writer, key: accessKey}}
+            - name: LAST_AUDIT_WRITER_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-writer, key: secretKey}}
+            - name: LAST_AUDIT_READER_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-reader, key: accessKey}}
+            - name: LAST_AUDIT_READER_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: last-audit-reader, key: secretKey}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+{{- end }}

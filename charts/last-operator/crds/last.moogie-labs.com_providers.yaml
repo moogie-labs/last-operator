@@ -1,0 +1,110 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: providers.last.moogie-labs.com
+spec:
+  group: last.moogie-labs.com
+  names:
+    kind: Provider
+    listKind: ProviderList
+    plural: providers
+    singular: provider
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .spec.description
+      name: Description
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Provider is a set of platform credentials held only by the gateway.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ProviderSpec describes one set of platform credentials (spec
+              §13).
+            properties:
+              description:
+                type: string
+              env:
+                additionalProperties:
+                  type: string
+                description: Env maps sandbox env var name -> Secret key.
+                type: object
+              files:
+                additionalProperties:
+                  type: string
+                description: Files maps Secret key -> file path in the sandbox.
+                type: object
+              kubernetes:
+                description: KubernetesProvider mints short-lived tokens for a ServiceAccount
+                  in last-gateway.
+                properties:
+                  serviceAccountRef:
+                    description: LocalRef names an object in the same namespace (or
+                      a cluster-scoped object).
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tokenTTL:
+                    type: string
+                required:
+                - serviceAccountRef
+                type: object
+              secretRef:
+                description: SecretRef names a Secret in last-gateway.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              type:
+                description: ProviderType selects how credentials are materialized
+                  in a sandbox.
+                enum:
+                - kubernetes
+                - env-secret
+                type: string
+            required:
+            - type
+            type: object
+            x-kubernetes-validations:
+            - message: kubernetes is required when type is kubernetes
+              rule: self.type != 'kubernetes' || has(self.kubernetes)
+            - message: secretRef is required when type is env-secret
+              rule: self.type != 'env-secret' || has(self.secretRef)
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

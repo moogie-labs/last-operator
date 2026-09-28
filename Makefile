@@ -268,3 +268,31 @@ endef
 envtest-assets: ## Print the KUBEBUILDER_ASSETS path (downloads envtest binaries if needed).
 	@$(MAKE) -s envtest >/dev/null
 	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
+
+##@ Images and Helm
+
+IMAGE_REGISTRY ?= ghcr.io/moogie-labs
+IMAGE_TAG ?= dev
+COMPONENTS ?= operator gateway audit-init
+
+.PHONY: images
+images: ## Build container images for all components.
+	@for c in $(COMPONENTS); do \
+		$(CONTAINER_TOOL) build --build-arg CMD=$$c --build-arg VERSION=$(IMAGE_TAG) \
+			-t $(IMAGE_REGISTRY)/last-$$c:$(IMAGE_TAG) . || exit 1; \
+	done
+
+.PHONY: helm-crds
+helm-crds: manifests ## Copy generated CRDs into the Helm chart.
+	mkdir -p charts/last-operator/crds
+	rm -f charts/last-operator/crds/*.yaml
+	cp config/crd/bases/*.yaml charts/last-operator/crds/
+
+.PHONY: helm-lint
+helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external modes.
+	helm lint --strict charts/last-operator
+	helm template last charts/last-operator -n last-system >/dev/null
+	helm template last charts/last-operator -n last-system \
+		--set audit.bundled.enabled=false \
+		--set audit.external.endpoint=https://s3.example.com \
+		--set audit.external.existingSecret=audit-creds >/dev/null

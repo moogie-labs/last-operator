@@ -1,0 +1,223 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: operatorconfigs.last.moogie-labs.com
+spec:
+  group: last.moogie-labs.com
+  names:
+    kind: OperatorConfig
+    listKind: OperatorConfigList
+    plural: operatorconfigs
+    singular: operatorconfig
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OperatorConfig is the cluster-wide singleton configuration.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OperatorConfigSpec holds cluster defaults.
+            properties:
+              defaults:
+                description: IntentPolicySpec can only tighten OperatorConfig.defaults
+                  (spec §6).
+                properties:
+                  allowAutoModes:
+                    description: StageFlags sets a boolean per lifecycle stage.
+                    properties:
+                      create:
+                        type: boolean
+                      delete:
+                        type: boolean
+                      discovery:
+                        type: boolean
+                      reconcile:
+                        type: boolean
+                    type: object
+                  allowScripts:
+                    type: boolean
+                  egress:
+                    description: EgressPolicy bounds sandbox egress.
+                    properties:
+                      allowed:
+                        description: Allowed lists CIDR:port or host:port patterns
+                          (host names need Cilium).
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  modes:
+                    description: StageModes sets Auto/Manual per lifecycle stage.
+                      Create covers the Create and Update stages.
+                    properties:
+                      create:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      delete:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      discovery:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                      reconcile:
+                        description: Mode selects whether a lifecycle stage needs
+                          human approval.
+                        enum:
+                        - Auto
+                        - Manual
+                        type: string
+                    type: object
+                  probes:
+                    description: ProbePolicy sets drift-check cadence (spec §10.1).
+                    properties:
+                      fastInterval:
+                        description: Interval used right after a change or drift.
+                        type: string
+                      interval:
+                        description: Steady-state interval (the adaptive ceiling).
+                        type: string
+                    type: object
+                  providers:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              images:
+                description: ImagesConfig configures automatic image builds.
+                properties:
+                  buildEgress:
+                    items:
+                      type: string
+                    type: array
+                  unusedRetention:
+                    type: string
+                type: object
+              llmProviderRef:
+                description: LocalRef names an object in the same namespace (or a
+                  cluster-scoped object).
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              probes:
+                description: ProbeLimits bounds probe intervals cluster-wide.
+                properties:
+                  minInterval:
+                    type: string
+                type: object
+              registry:
+                description: RegistryConfig configures where built images live (spec
+                  §11.3).
+                properties:
+                  external:
+                    description: ExternalRegistry points at a customer-managed registry.
+                    properties:
+                      pullSecretRef:
+                        description: LocalRef names an object in the same namespace
+                          (or a cluster-scoped object).
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      pushSecretRef:
+                        description: LocalRef names an object in the same namespace
+                          (or a cluster-scoped object).
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      repository:
+                        minLength: 1
+                        type: string
+                    required:
+                    - pullSecretRef
+                    - pushSecretRef
+                    - repository
+                    type: object
+                  mode:
+                    default: bundled
+                    description: RegistryMode selects the bundled or an external image
+                      registry.
+                    enum:
+                    - bundled
+                    - external
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: external is required when mode is external
+                  rule: self.mode != 'external' || has(self.external)
+              sandbox:
+                description: SandboxConfig configures sandbox pods.
+                properties:
+                  baseImage:
+                    description: BaseImage must be pinned by digest.
+                    pattern: '@sha256:[0-9a-f]{64}$'
+                    type: string
+                  maxConcurrent:
+                    default: 20
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - baseImage
+                type: object
+              suggestions:
+                description: SuggestionsConfig tunes rule suggestions (spec §9.5).
+                properties:
+                  repeatThreshold:
+                    default: 3
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  reviewInterval:
+                    type: string
+                type: object
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: OperatorConfig must be named 'default'
+          rule: self.metadata.name == 'default'
+    served: true
+    storage: true
