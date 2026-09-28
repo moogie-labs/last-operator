@@ -4,6 +4,7 @@ package audit_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,13 +44,11 @@ func TestIntegrationConformanceRejectsBucketWithoutLock(t *testing.T) {
 		Bucket:                  aws.String(bucket),
 		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
 	})
-	results, err := audit.RunConformance(context.Background(), client, bucket, time.Hour)
+	_, err := audit.RunConformance(context.Background(), client, bucket, time.Hour)
 	if err == nil {
-		for _, r := range results {
-			if !r.Passed {
-				return // a failed check is also an acceptable outcome
-			}
-		}
 		t.Fatal("conformance passed on a bucket without Object Lock")
+	}
+	if !strings.Contains(err.Error(), "conformance setup") {
+		t.Fatalf("err = %v, want it to contain %q", err, "conformance setup")
 	}
 }

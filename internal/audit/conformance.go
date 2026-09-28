@@ -25,9 +25,30 @@ type CheckResult struct {
 	Detail string
 }
 
+// refusalCodes maps each "-refused" check to the S3 API error codes that count as a
+// genuine refusal, matched on smithy.APIError.ErrorCode() only (never HTTP status,
+// so a 403 from bad credentials such as SignatureDoesNotMatch/InvalidAccessKeyId can
+// never masquerade as a WORM refusal). Probed live against RustFS 1.0.0 with root
+// credentials (see task-10-report.md, "Fix round 1" section) before being finalized;
+// every refusal RustFS returned is already covered by these lists.
+var refusalCodes = map[string][]string{
+	"delete-version-refused":        {"AccessDenied"},
+	"shorten-retention-refused":     {"AccessDenied"},
+	"switch-to-governance-refused":  {"AccessDenied"},
+	"conditional-overwrite-refused": {"PreconditionFailed", "ConditionalRequestConflict"},
+	"delete-bucket-refused":         {"BucketNotEmpty", "AccessDenied"},
+}
+
 // RunConformance checks whether bucket really enforces compliance-mode Object Lock
 // (spec §14.4). It writes one probe object under conformance/ that stays locked for
 // retention. Run it with each set of credentials you want to evaluate.
+//
+// Every "-refused" check only passes when the store's error carries one of that
+// check's allowed API error codes (refusalCodes); any other error, or none at all,
+// is not treated as a pass. This exists specifically so a broken or overly permissive
+// store cannot produce a false PASS: a store that fails closed for the wrong reason
+// (e.g. a 500) or doesn't fail at all is reported honestly as inconclusive or failed,
+// never as a working WORM guarantee.
 func RunConformance(ctx context.Context, client *s3.Client, bucket string, retention time.Duration) ([]CheckResult, error) {
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
@@ -45,14 +66,36 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 	}
 
 	var results []CheckResult
+
+	// refused records a "-refused" check. It only passes when err's API error code
+	// is in that check's allowlist (refusalCodes) -- any other error, or a nil
+	// error, is not a pass.
 	refused := func(name string, err error) {
-		detail := "allowed (should have been refused)"
-		if err != nil {
-			detail = "refused: " + errorCode(err)
+		if err == nil {
+			results = append(results, CheckResult{Name: name, Passed: false, Detail: "allowed (should have been refused)"})
+			return
 		}
-		results = append(results, CheckResult{Name: name, Passed: err != nil, Detail: detail})
+		code := errorCode(err)
+		for _, allowed := range refusalCodes[name] {
+			if code == allowed {
+				results = append(results, CheckResult{Name: name, Passed: true, Detail: "refused: " + code})
+				return
+			}
+		}
+		results = append(results, CheckResult{Name: name, Passed: false, Detail: "inconclusive: " + code})
 	}
-	intact := func(name string) {
+
+	// intact records a check that a mutation must not have altered the original
+	// version. mutationErr is the error (if any) from the mutation itself: any
+	// error other than AccessDenied makes the check's outcome inconclusive rather
+	// than checking bytes that may not reflect what actually happened.
+	intact := func(name string, mutationErr error) {
+		if mutationErr != nil {
+			if code := errorCode(mutationErr); code != "AccessDenied" {
+				results = append(results, CheckResult{Name: name, Passed: false, Detail: "inconclusive: mutation failed: " + code})
+				return
+			}
+		}
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
 		if err != nil {
 			results = append(results, CheckResult{Name: name, Detail: "original version unreadable: " + errorCode(err)})
@@ -61,21 +104,23 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 		body, _ := io.ReadAll(out.Body)
 		out.Body.Close()
 		ok := bytes.Equal(body, original)
-		detail := "original version intact"
-		if !ok {
+		var detail string
+		switch {
+		case !ok:
 			detail = "original version changed"
+		case mutationErr != nil:
+			detail = "mutation refused (AccessDenied); original intact"
+		default:
+			detail = "original version intact"
 		}
 		results = append(results, CheckResult{Name: name, Passed: ok, Detail: detail})
 	}
 
-	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
-	refused("delete-version-refused", err)
-
 	_, err = client.PutObject(ctx, putInput(bucket, key, []byte(`{"tampered":true}`), true, retainUntil))
 	refused("conditional-overwrite-refused", err)
 
-	_, _ = client.PutObject(ctx, putInput(bucket, key, []byte(`{"tampered":true}`), false, retainUntil))
-	intact("plain-overwrite-preserves-original")
+	_, mutErr := client.PutObject(ctx, putInput(bucket, key, []byte(`{"tampered":true}`), false, retainUntil))
+	intact("plain-overwrite-preserves-original", mutErr)
 
 	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
 		Bucket: aws.String(bucket), Key: aws.String(key), VersionId: aws.String(versionID),
@@ -89,8 +134,11 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 	})
 	refused("switch-to-governance-refused", err)
 
-	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
-	intact("delete-marker-preserves-original")
+	_, mutErr = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	intact("delete-marker-preserves-original", mutErr)
+
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
+	refused("delete-version-refused", err)
 
 	_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	refused("delete-bucket-refused", err)
