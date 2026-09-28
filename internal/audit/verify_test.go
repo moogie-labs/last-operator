@@ -405,10 +405,10 @@ func TestVerifyDetectsCheckpointPayloadWithWrongPrevHash(t *testing.T) {
 // a suffix of the chain.
 func TestVerifyFromSeqMustBeACheckpoint(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
-	buildChain(t, sink, s, 10, checkpointAt(5))
+	buildChain(t, sink, s, 10, checkpointAt(7))
 	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 3}), 3, audit.ProblemBadCheckpoint, "not a checkpoint")
 	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 42}), 42, audit.ProblemBadCheckpoint, "no entry")
-	if rep := verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 5}); !rep.OK() || rep.First.Seq != 5 {
+	if rep := verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 7}); !rep.OK() || rep.First.Seq != 7 {
 		t.Fatalf("from the checkpoint: %+v", rep)
 	}
 }

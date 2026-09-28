@@ -472,15 +472,13 @@ func TestConcurrentAppendsFormOneChain(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, goroutines*perG)
 	for g := range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range perG {
 				if _, err := w.Append(bg, cmd(g*perG+i)); err != nil {
 					errs <- err
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -494,7 +492,7 @@ func TestConcurrentAppendsFormOneChain(t *testing.T) {
 		t.Fatalf("entries=%d head=%v problems=%+v; want %d contiguous entries", rep.Entries, rep.Head, rep.Problems, want)
 	}
 	seen := map[int]bool{}
-	for seq := uint64(0); seq < want; seq++ {
+	for seq := range uint64(want) {
 		e := readEntry(t, sink, seq)
 		if e.Type != audit.TypeCommandStart {
 			continue
