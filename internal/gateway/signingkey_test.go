@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,5 +57,38 @@ func TestEnsureSigningKeyRepairsPublishedKey(t *testing.T) {
 	pub, _ := audit.ParsePublicKeyPEM([]byte(cm.Data["ed25519.pub"]))
 	if !pub.Equal(key.Public()) {
 		t.Fatal("published key was not repaired to match the signing key")
+	}
+}
+
+func TestEnsureSigningKeyRefusesToRegenerateWhenSecretMissingButKeyPublished(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	if _, err := EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey"); err != nil {
+		t.Fatal(err)
+	}
+	cmBefore, err := cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPub, wantFingerprint := cmBefore.Data["ed25519.pub"], cmBefore.Data["fingerprint"]
+
+	if err := cs.CoreV1().Secrets(ns).Delete(ctx, "last-audit-signing", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = EnsureSigningKey(ctx, cs, ns, "last-audit-signing", "last-audit-pubkey")
+	if err == nil {
+		t.Fatal("want an error when the Secret is missing but a public key is already published")
+	}
+	if !strings.Contains(err.Error(), "last-audit-signing") || !strings.Contains(err.Error(), "last-audit-pubkey") {
+		t.Fatalf("err = %v, want it to name the missing Secret and the published ConfigMap", err)
+	}
+
+	cmAfter, err := cs.CoreV1().ConfigMaps(ns).Get(ctx, "last-audit-pubkey", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmAfter.Data["ed25519.pub"] != wantPub || cmAfter.Data["fingerprint"] != wantFingerprint {
+		t.Fatal("published key was overwritten despite the missing-Secret error")
 	}
 }

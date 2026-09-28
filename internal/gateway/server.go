@@ -71,14 +71,20 @@ func (g *Gateway) Run(ctx context.Context) error {
 		LockConfig: resourcelock.ResourceLockConfig{Identity: g.cfg.PodName},
 	}
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:            lock,
-		ReleaseOnCancel: true,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
+		Lock: lock,
+		// ReleaseOnCancel defaults to false: on shutdown or a failed renewal we let the
+		// lease expire naturally after LeaseDuration instead of releasing it early. A
+		// successor otherwise could acquire the lease and call audit.Open while our own
+		// detached in-flight write (up to PutTimeout) might still land. The lease is only
+		// a contention-reducer, not the correctness guarantee — the real single-writer
+		// fence is the create-only (If-None-Match) write of each chain entry key, which
+		// makes a losing concurrent writer fail closed rather than corrupt the chain.
+		LeaseDuration: 15 * time.Second,
+		RenewDeadline: 10 * time.Second,
+		RetryPeriod:   2 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(lctx context.Context) {
-				if err := g.lead(lctx); err != nil {
+				if err := g.lead(lctx); shouldReportLeadError(lctx, err) {
 					cancel(err)
 				}
 			},
@@ -89,6 +95,16 @@ func (g *Gateway) Run(ctx context.Context) error {
 		return cause
 	}
 	return nil
+}
+
+// shouldReportLeadError reports whether an error returned by lead should cancel the
+// outer context. It is false once lctx is already canceled: OnStoppedLeading cancels
+// the outer context (with errLostLeadership) as soon as leadership is lost, and lead
+// itself typically returns promptly afterward with an error that wraps context.Canceled.
+// Without this check, that race could let a lead error "win" over errLostLeadership and
+// make Run return nil (a clean exit) when leadership was actually lost.
+func shouldReportLeadError(lctx context.Context, err error) bool {
+	return err != nil && lctx.Err() == nil
 }
 
 // lead checks the bucket's lock, opens the chain (verifying it), and writes

@@ -17,7 +17,7 @@ import (
 // EnsureSigningKey loads the audit signing key from its Secret, creating it on first
 // start, and publishes the public key to a ConfigMap for verifiers.
 func EnsureSigningKey(ctx context.Context, cs kubernetes.Interface, ns, secretName, cmName string) (ed25519.PrivateKey, error) {
-	key, err := loadOrCreateKey(ctx, cs, ns, secretName)
+	key, err := loadOrCreateKey(ctx, cs, ns, secretName, cmName)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +42,7 @@ func EnsureSigningKey(ctx context.Context, cs kubernetes.Interface, ns, secretNa
 	return key, nil
 }
 
-func loadOrCreateKey(ctx context.Context, cs kubernetes.Interface, ns, name string) (ed25519.PrivateKey, error) {
+func loadOrCreateKey(ctx context.Context, cs kubernetes.Interface, ns, name, cmName string) (ed25519.PrivateKey, error) {
 	secrets := cs.CoreV1().Secrets(ns)
 	sec, err := secrets.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
@@ -50,6 +50,17 @@ func loadOrCreateKey(ctx context.Context, cs kubernetes.Interface, ns, name stri
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("gateway: read signing key: %w", err)
+	}
+	// The Secret is gone. If a public key is already published, generating and
+	// publishing a fresh one here would silently replace the only verifier key for
+	// the historical chain. Refuse and require an operator to restore the Secret
+	// (or delete the ConfigMap too, to rotate deliberately).
+	cm, cmErr := cs.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
+	if cmErr == nil && (cm.Data["ed25519.pub"] != "" || cm.Data["fingerprint"] != "") {
+		return nil, fmt.Errorf("gateway: signing key Secret %s/%s is missing but a public key is already published in ConfigMap %s; restore the Secret (or, to rotate deliberately, delete the ConfigMap too)", ns, name, cmName)
+	}
+	if cmErr != nil && !apierrors.IsNotFound(cmErr) {
+		return nil, fmt.Errorf("gateway: read public key configmap: %w", cmErr)
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -66,7 +77,7 @@ func loadOrCreateKey(ctx context.Context, cs kubernetes.Interface, ns, name stri
 		Data:       map[string][]byte{"ed25519.pem": pemBytes},
 	}, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		return loadOrCreateKey(ctx, cs, ns, name) // lost a creation race; use the winner's key
+		return loadOrCreateKey(ctx, cs, ns, name, cmName) // lost a creation race; use the winner's key
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gateway: create signing key: %w", err)

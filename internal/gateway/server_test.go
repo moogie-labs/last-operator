@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,5 +85,30 @@ func TestLeadOpensChainAndReportsReady(t *testing.T) {
 	}
 	if code, _ := get(t, g, "/readyz"); code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz after stepping down = %d, want 503", code)
+	}
+}
+
+// TestShouldReportLeadError exercises the guard in OnStartedLeading (server.go) that
+// stops a lead error from beating OnStoppedLeading's own cancel(errLostLeadership) when
+// leadership is lost: once lctx is canceled, a lead error must not be reported even if
+// it wraps context.Canceled. This is a pure-function check (no leader-election timing
+// involved) so it isn't flaky.
+func TestShouldReportLeadError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if !shouldReportLeadError(ctx, errors.New("boom")) {
+		t.Error("want true: live context, real error")
+	}
+	if shouldReportLeadError(ctx, nil) {
+		t.Error("want false: no error")
+	}
+
+	cancel()
+	if shouldReportLeadError(ctx, fmt.Errorf("gateway: checkpoint: %w", context.Canceled)) {
+		t.Error("want false: lctx already canceled, even though err wraps context.Canceled")
+	}
+	if shouldReportLeadError(ctx, errors.New("unrelated failure")) {
+		t.Error("want false: lctx already canceled, regardless of the error's content")
 	}
 }
