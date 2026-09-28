@@ -126,11 +126,17 @@ func (g *Gateway) lead(ctx context.Context) error {
 		return err
 	}
 	w, err := audit.Open(ctx, g.sink, g.signer, audit.WriterConfig{
-		ChainID: g.cfg.ChainID, Retention: retention, Actor: "gateway",
-	}, map[string]string{
-		"pod": g.cfg.PodName, "version": Version,
-		// Anchor the full verifier key in WORM storage, not only in a mutable ConfigMap.
-		"publicKey": string(pubPEM), "keyFingerprint": audit.Fingerprint(g.signer.Public()),
+		ChainID: g.cfg.ChainID, Retention: retention, Actor: "gateway", AllowNewChain: g.cfg.AllowNewChain,
+	}, func(info audit.StartInfo) any {
+		p := map[string]any{
+			"pod": g.cfg.PodName, "version": Version,
+			// Anchor the full verifier key in WORM storage, not only in a mutable ConfigMap.
+			"publicKey": string(pubPEM), "keyFingerprint": audit.Fingerprint(g.signer.Public()),
+		}
+		if info.ResumedFrom != nil { // omitted on a new chain
+			p["resumedFrom"] = info.ResumedFrom
+		}
+		return p
 	})
 	if err != nil {
 		return err

@@ -214,3 +214,44 @@ func TestLeadStartPayloadRecordsPublicKey(t *testing.T) {
 		t.Fatalf("publicKey/keyFingerprint do not identify the signing key: %v (err=%v)", p, err)
 	}
 }
+
+// F3: gateway.start records the verified head it resumed from (absent on a new chain).
+func TestLeadStartPayloadRecordsResumption(t *testing.T) {
+	sink := audittest.NewMemSink()
+	g := testGateway(t, sink)
+	if p := startPayload(t, g, sink, 0); p["resumedFrom"] != nil {
+		t.Fatalf("new chain recorded resumedFrom %s", p["resumedFrom"])
+	}
+	body, _ := sink.Get(context.Background(), audit.EntryKey("chain-1", 0), "")
+	var first audit.Entry
+	_ = json.Unmarshal(body, &first)
+	p := startPayload(t, g, sink, 1) // restart on the same chain
+	if want := fmt.Sprintf(`{"hash":%q,"seq":0}`, first.Hash); string(p["resumedFrom"]) != want {
+		t.Fatalf("resumedFrom = %s, want %s", p["resumedFrom"], want)
+	}
+}
+
+// F3: lead refuses to start a new chain in a bucket that already holds another one,
+// unless AllowNewChain is set.
+func TestLeadRefusesSilentNewChain(t *testing.T) {
+	sink := audittest.NewMemSink()
+	old := testGateway(t, sink)
+	old.cfg.ChainID = "chain-0"
+	cancel, done := startLead(t, old)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	g := testGateway(t, sink)
+	ctx, cancelLead := context.WithTimeout(context.Background(), 3*time.Second) // bound the test if lead does not refuse
+	defer cancelLead()
+	if err := g.lead(ctx); err == nil || !strings.Contains(err.Error(), "chain-0") {
+		t.Fatalf("lead = %v, want a refusal naming chain-0", err)
+	}
+	g.cfg.AllowNewChain = true
+	cancel, done = startLead(t, g)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func writerConfig(c *fakeClock) audit.WriterConfig {
 
 func openWriter(t *testing.T, sink audit.Sink, s *audit.Signer, cfg audit.WriterConfig) *audit.Writer {
 	t.Helper()
-	w, err := audit.Open(bg, sink, s, cfg, map[string]string{"pod": testValue})
+	w, err := audit.Open(bg, sink, s, cfg, func(audit.StartInfo) any { return map[string]string{"pod": testValue} })
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -577,5 +578,72 @@ func TestAppendReturnsStoredEntryWhenCheckpointFails(t *testing.T) {
 	}
 	if e.Seq != 1 || e.Hash != readEntry(t, sink, 1).Hash {
 		t.Fatalf("Append returned %+v, want the stored seq-1 entry", e)
+	}
+}
+
+// F3: a new (empty) chain must not be started silently in a bucket that already
+// holds another chain — e.g. after the chain-ID ConfigMap was lost or re-rendered.
+func TestOpenRefusesNewChainWhenBucketHoldsAnotherChain(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	for _, other := range []string{"old-chain-a", "old-chain-b"} {
+		cfg := writerConfig(newClock())
+		cfg.ChainID, cfg.AllowNewChain = other, true
+		openWriter(t, sink, s, cfg)
+	}
+	before := sink.Keys()
+
+	_, err := audit.Open(bg, sink, s, writerConfig(newClock()), nil)
+	if err == nil || !strings.Contains(err.Error(), "old-chain-a") || !strings.Contains(err.Error(), "old-chain-b") ||
+		!strings.Contains(err.Error(), "LAST_AUDIT_ALLOW_NEW_CHAIN=true") {
+		t.Fatalf("Open = %v, want a refusal naming the existing chains and the override", err)
+	}
+	if after := sink.Keys(); len(after) != len(before) {
+		t.Fatalf("refused Open wrote entries: %v", after)
+	}
+
+	cfg := writerConfig(newClock())
+	cfg.AllowNewChain = true
+	openWriter(t, sink, s, cfg)
+	if readEntry(t, sink, 0).Type != audit.TypeGatewayStart {
+		t.Fatal("AllowNewChain did not start the new chain")
+	}
+	// Once the chain exists, reopening it is a resumption and needs no override.
+	openWriter(t, sink, s, writerConfig(newClock()))
+}
+
+func TestOpenStartsNewChainInEmptyBucket(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	cfg := writerConfig(newClock())
+	cfg.AllowNewChain = false
+	openWriter(t, sink, s, cfg)
+	if keys := sink.Keys(); len(keys) != 1 || keys[0] != audit.EntryKey(chainID, 0) {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+// F3: Open tells the start-payload builder which verified head it resumed from.
+func TestOpenReportsResumedFrom(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	cfg := writerConfig(newClock())
+	var infos []audit.StartInfo
+	record := func(info audit.StartInfo) any {
+		infos = append(infos, info)
+		return map[string]any{"resumedFrom": info.ResumedFrom}
+	}
+	w, err := audit.Open(bg, sink, s, cfg, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Append(bg, cmd(1))
+	if _, err := audit.Open(bg, sink, s, cfg, record); err != nil {
+		t.Fatal(err)
+	}
+	head := readEntry(t, sink, 1)
+	if len(infos) != 2 || infos[0].ResumedFrom != nil || infos[1].ResumedFrom == nil ||
+		*infos[1].ResumedFrom != (audit.ChainHead{Seq: 1, Hash: head.Hash}) {
+		t.Fatalf("start infos = %+v, want nil then {1 %s}", infos, head.Hash)
+	}
+	if got, want := string(readEntry(t, sink, 2).Payload), fmt.Sprintf(`{"resumedFrom":{"hash":%q,"seq":1}}`, head.Hash); got != want {
+		t.Fatalf("gateway.start payload = %s, want %s", got, want)
 	}
 }

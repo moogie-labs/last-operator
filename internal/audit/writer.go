@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +33,22 @@ type WriterConfig struct {
 	PutTimeout         time.Duration // default 10s
 	Now                func() time.Time
 	Actor              string
+	// AllowNewChain lets Open start a new (empty) chain even though the bucket
+	// already holds entries of other chains. Leave it false so that a lost or
+	// regenerated chain ID is refused rather than silently forking the log.
+	AllowNewChain bool
+}
+
+// ChainHead identifies one entry of a chain.
+type ChainHead struct {
+	Seq  uint64 `json:"seq"`
+	Hash string `json:"hash"`
+}
+
+// StartInfo is what Open knows when it records gateway.start.
+type StartInfo struct {
+	// ResumedFrom is the verified head the chain resumed after; nil for a new chain.
+	ResumedFrom *ChainHead
 }
 
 func (c WriterConfig) withDefaults() WriterConfig {
@@ -76,8 +94,12 @@ type Writer struct {
 }
 
 // Open verifies the chain from its latest checkpoint, resumes after its head, and
-// records a gateway.start entry. It refuses a chain that fails verification.
-func Open(ctx context.Context, sink Sink, signer *Signer, cfg WriterConfig, startPayload any) (*Writer, error) {
+// records a gateway.start entry whose payload is built by startPayload (nil means
+// no payload). startPayload receives a StartInfo carrying the verified head the
+// chain resumed from, so callers can record it. Open refuses a chain that fails
+// verification, and refuses to start a new chain in a bucket that already holds
+// other chains unless cfg.AllowNewChain is set.
+func Open(ctx context.Context, sink Sink, signer *Signer, cfg WriterConfig, startPayload func(StartInfo) any) (*Writer, error) {
 	if cfg.Retention <= 0 {
 		return nil, errors.New("audit: WriterConfig.Retention must be positive")
 	}
@@ -93,14 +115,48 @@ func Open(ctx context.Context, sink Sink, signer *Signer, cfg WriterConfig, star
 	if p, bad := rep.FirstBad(); bad {
 		return nil, fmt.Errorf("audit: chain failed verification at seq %d (%s): %s", p.Seq, p.Kind, p.Detail)
 	}
+	var info StartInfo
+	if rep.Head != nil {
+		info.ResumedFrom = &ChainHead{Seq: rep.Head.Seq, Hash: rep.Head.Hash}
+	} else if !cfg.AllowNewChain {
+		others, err := otherChains(ctx, sink, cfg.ChainID)
+		if err != nil {
+			return nil, err
+		}
+		if len(others) > 0 {
+			return nil, fmt.Errorf("audit: bucket already holds chain(s) %v; refusing to start a new chain %q (set LAST_AUDIT_ALLOW_NEW_CHAIN=true to override)", others, cfg.ChainID)
+		}
+	}
 	w := &Writer{cfg: cfg, sink: sink, signer: signer, prevHash: GenesisHash, lastCheckpoint: cfg.Now()}
 	if rep.Head != nil {
 		w.nextSeq, w.prevHash = rep.Head.Seq+1, rep.Head.Hash
 	}
-	if _, err := w.Append(ctx, Draft{Type: TypeGatewayStart, Actor: cfg.Actor, Payload: startPayload}); err != nil {
+	var payload any
+	if startPayload != nil {
+		payload = startPayload(info)
+	}
+	if _, err := w.Append(ctx, Draft{Type: TypeGatewayStart, Actor: cfg.Actor, Payload: payload}); err != nil {
 		return nil, err
 	}
 	return w, nil
+}
+
+// otherChains returns the sorted IDs of chains other than chainID that have
+// objects under chains/.
+func otherChains(ctx context.Context, sink Sink, chainID string) ([]string, error) {
+	objs, err := sink.List(ctx, "chains/", "")
+	if err != nil {
+		return nil, fmt.Errorf("audit: list chains: %w", err)
+	}
+	var ids []string
+	for _, o := range objs {
+		id, _, _ := strings.Cut(strings.TrimPrefix(o.Key, "chains/"), "/")
+		if id != chainID && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
 }
 
 func latestCheckpointSeq(ctx context.Context, sink Sink, chainID string) (uint64, error) {

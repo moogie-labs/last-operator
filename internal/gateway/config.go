@@ -19,6 +19,9 @@ type Config struct {
 	PublicKeyConfigMap string
 	LeaseName          string
 	HTTPAddr           string
+	// AllowNewChain (LAST_AUDIT_ALLOW_NEW_CHAIN) permits starting a new chain in a
+	// bucket that already holds other chains.
+	AllowNewChain bool
 }
 
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
@@ -57,6 +60,10 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("gateway: LAST_AUDIT_PATH_STYLE: %w", err)
 	}
 	cfg.Audit.PathStyle = pathStyle
+	cfg.AllowNewChain, err = strconv.ParseBool(or("LAST_AUDIT_ALLOW_NEW_CHAIN", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("gateway: LAST_AUDIT_ALLOW_NEW_CHAIN: %w", err)
+	}
 	cfg.Retention, err = time.ParseDuration(or("LAST_AUDIT_RETENTION", "8760h"))
 	if err != nil || cfg.Retention <= 0 {
 		return Config{}, fmt.Errorf("gateway: LAST_AUDIT_RETENTION must be a positive duration: %v", err)

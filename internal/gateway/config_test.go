@@ -49,3 +49,19 @@ func TestConfigFromEnvRejectsBadValues(t *testing.T) {
 		t.Error("accepted path style=maybe")
 	}
 }
+
+func TestConfigFromEnvAllowNewChain(t *testing.T) {
+	env := baseEnv()
+	cfg, err := ConfigFromEnv(func(k string) string { return env[k] })
+	if err != nil || cfg.AllowNewChain {
+		t.Fatalf("default AllowNewChain = %v (err=%v), want false", cfg.AllowNewChain, err)
+	}
+	env["LAST_AUDIT_ALLOW_NEW_CHAIN"] = "true"
+	if cfg, err = ConfigFromEnv(func(k string) string { return env[k] }); err != nil || !cfg.AllowNewChain {
+		t.Fatalf("AllowNewChain = %v (err=%v), want true", cfg.AllowNewChain, err)
+	}
+	env["LAST_AUDIT_ALLOW_NEW_CHAIN"] = "maybe"
+	if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
+		t.Error("accepted LAST_AUDIT_ALLOW_NEW_CHAIN=maybe")
+	}
+}
