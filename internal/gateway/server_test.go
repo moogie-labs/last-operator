@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,5 +111,69 @@ func TestShouldReportLeadError(t *testing.T) {
 	}
 	if shouldReportLeadError(ctx, errors.New("unrelated failure")) {
 		t.Error("want false: lctx already canceled, regardless of the error's content")
+	}
+}
+
+// startLead runs g.lead in the background and waits until the gateway is ready.
+func startLead(t *testing.T, g *Gateway) (context.CancelFunc, <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.lead(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if code, _ := get(t, g, "/readyz"); code == http.StatusOK {
+			return cancel, done
+		}
+		select {
+		case err := <-done:
+			cancel()
+			t.Fatalf("lead returned before becoming ready: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("gateway never became ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// recordingSink records the retainUntil of every Put.
+type recordingSink struct {
+	*audittest.MemSink
+	mu          sync.Mutex
+	retainUntil []time.Time
+}
+
+func (r *recordingSink) Put(ctx context.Context, key string, body []byte, until time.Time) error {
+	r.mu.Lock()
+	r.retainUntil = append(r.retainUntil, until)
+	r.mu.Unlock()
+	return r.MemSink.Put(ctx, key, body, until)
+}
+
+// F1: an explicit per-object retention overrides the bucket default, so the gateway
+// must lock entries for max(configured, bucket default).
+func TestLeadUsesLongerBucketDefaultRetention(t *testing.T) {
+	const year = 365 * 24 * time.Hour
+	sink := &recordingSink{MemSink: audittest.NewMemSink()}
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: 2 * year})
+	g := testGateway(t, sink) // configured retention: 1 year
+	start := time.Now()
+	cancel, done := startLead(t, g)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("lead: %v", err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.retainUntil) == 0 {
+		t.Fatal("no Put recorded")
+	}
+	for _, until := range sink.retainUntil {
+		if d := until.Sub(start); d < 2*year-time.Minute || d > 2*year+time.Minute {
+			t.Fatalf("retainUntil = now+%s, want now+%s (the bucket default)", d, 2*year)
+		}
 	}
 }

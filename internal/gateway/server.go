@@ -117,8 +117,12 @@ func (g *Gateway) lead(ctx context.Context) error {
 	if err := audit.CheckLockConfig(lc, g.cfg.Retention); err != nil {
 		return err
 	}
+	// An explicit per-object retain-until overrides the bucket default, so lock each
+	// entry for the longer of the two rather than silently undercutting the bucket.
+	retention := max(g.cfg.Retention, lc.DefaultRetention)
+	slog.Info("audit retention", "configured", g.cfg.Retention, "bucketDefault", lc.DefaultRetention, "effective", retention)
 	w, err := audit.Open(ctx, g.sink, g.signer, audit.WriterConfig{
-		ChainID: g.cfg.ChainID, Retention: g.cfg.Retention, Actor: "gateway",
+		ChainID: g.cfg.ChainID, Retention: retention, Actor: "gateway",
 	}, map[string]string{
 		"pod": g.cfg.PodName, "version": Version, "keyFingerprint": audit.Fingerprint(g.signer.Public()),
 	})
