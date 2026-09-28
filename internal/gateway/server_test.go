@@ -255,3 +255,27 @@ func TestLeadRefusesSilentNewChain(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// F5: once the writer breaks, lead must return an error so Run exits and the pod
+// restarts (Open then re-reads and re-verifies the chain) instead of staying unready.
+func TestLeadReturnsErrorWhenWriterBreaks(t *testing.T) {
+	sink := audittest.NewMemSink()
+	g := testGateway(t, sink)
+	cancel, done := startLead(t, g)
+	defer cancel()
+	sink.SetFailPuts(true)
+	if _, err := g.writer.Load().Append(context.Background(), audit.Draft{Type: audit.TypeCommandStart, Actor: "operator"}); err == nil {
+		t.Fatal("append succeeded on a failing store")
+	}
+	select {
+	case err := <-done:
+		if err == nil || !errors.Is(err, audit.ErrWriterBroken) {
+			t.Fatalf("lead = %v, want an error wrapping ErrWriterBroken", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lead kept running with a broken writer")
+	}
+	if code, _ := get(t, g, "/readyz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz after the writer broke = %d, want 503", code)
+	}
+}

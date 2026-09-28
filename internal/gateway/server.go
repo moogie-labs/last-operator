@@ -108,8 +108,12 @@ func shouldReportLeadError(lctx context.Context, err error) bool {
 }
 
 // lead checks the bucket's lock, opens the chain (verifying it), and writes
-// checkpoints until ctx ends. It refuses to write to a non-compliant bucket.
-func (g *Gateway) lead(ctx context.Context) error {
+// checkpoints until ctx ends. It refuses to write to a non-compliant bucket, and
+// returns an error as soon as the writer breaks so the process restarts and Open
+// re-reads the chain.
+func (g *Gateway) lead(parent context.Context) error {
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
 	lc, err := g.sink.LockConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("gateway: read bucket lock config: %w", err)
@@ -146,7 +150,11 @@ func (g *Gateway) lead(ctx context.Context) error {
 		g.metrics.ObserveWrite(audit.Entry{Seq: seq, Type: audit.TypeGatewayStart})
 	}
 	w.SetOnWrite(g.metrics.ObserveWrite)
-	w.SetOnFailure(g.metrics.ObserveFailure)
+	// The hook runs under the writer's mutex: only record the metric and cancel here.
+	w.SetOnFailure(func(err error) {
+		g.metrics.ObserveFailure(err)
+		cancel(fmt.Errorf("gateway: audit writer failed: %w", err))
+	})
 	g.writer.Store(w)
 	defer g.writer.Store(nil)
 	slog.Info("audit writer ready", "chain", g.cfg.ChainID, "pod", g.cfg.PodName)
@@ -156,7 +164,10 @@ func (g *Gateway) lead(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			if parent.Err() != nil {
+				return nil // stepping down or shutting down
+			}
+			return context.Cause(ctx)
 		case <-ticker.C:
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)
