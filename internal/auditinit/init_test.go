@@ -3,7 +3,7 @@ package auditinit_test
 import (
 	"encoding/json"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +31,7 @@ func actions(t *testing.T, doc []byte) []string {
 		}
 		out = append(out, s.Action...)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 

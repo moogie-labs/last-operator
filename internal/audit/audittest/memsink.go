@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +98,7 @@ func (m *MemSink) List(_ context.Context, prefix, startAfter string) ([]audit.Ob
 		}
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	slices.SortFunc(out, func(a, b audit.ObjectInfo) int { return strings.Compare(a.Key, b.Key) })
 	return out, nil
 }
 
@@ -116,7 +116,7 @@ func (m *MemSink) Keys() []string {
 	for k := range m.objects {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return keys
 }
 

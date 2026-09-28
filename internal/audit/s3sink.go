@@ -9,7 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -115,7 +116,7 @@ func (s *S3Sink) Get(ctx context.Context, key, versionID string) ([]byte, error)
 		}
 		return nil, fmt.Errorf("audit: get %s: %w", key, err)
 	}
-	defer out.Body.Close()
+	defer func() { _ = out.Body.Close() }()
 	return io.ReadAll(out.Body)
 }
 
@@ -161,7 +162,7 @@ func (s *S3Sink) List(ctx context.Context, prefix, startAfter string) ([]ObjectI
 		}
 		out = append(out, *o)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	slices.SortFunc(out, func(a, b ObjectInfo) int { return strings.Compare(a.Key, b.Key) })
 	return out, nil
 }
 
@@ -193,14 +194,13 @@ func IsAccessDenied(err error) bool { return hasCode(err, http.StatusForbidden, 
 
 // hasCode matches an S3 error by API error code or, if status > 0, HTTP status.
 func hasCode(err error, status int, codes ...string) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		for _, c := range codes {
 			if apiErr.ErrorCode() == c {
 				return true
 			}
 		}
 	}
-	var re *awshttp.ResponseError
-	return status > 0 && errors.As(err, &re) && re.HTTPStatusCode() == status
+	re, ok := errors.AsType[*awshttp.ResponseError](err)
+	return status > 0 && ok && re.HTTPStatusCode() == status
 }

@@ -129,7 +129,7 @@ func waitReady(ctx context.Context, endpoint string, timeout time.Duration) erro
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health/ready", nil)
 		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}

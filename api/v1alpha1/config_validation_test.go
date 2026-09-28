@@ -31,7 +31,7 @@ func TestOperatorConfigMustBeNamedDefault(t *testing.T) {
 	bad := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "other"}}
 	expectInvalid(t, k8sClient.Create(ctx, bad), "OperatorConfig must be named 'default'")
 
-	good := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	good := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: nameDefault}}
 	if err := k8sClient.Create(ctx, good); err != nil {
 		t.Fatalf("create default: %v", err)
 	}
@@ -39,21 +39,21 @@ func TestOperatorConfigMustBeNamedDefault(t *testing.T) {
 }
 
 func TestOperatorConfigRequiresDigestPinnedBaseImage(t *testing.T) {
-	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}, Spec: lastv1alpha1.OperatorConfigSpec{
+	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: nameDefault}, Spec: lastv1alpha1.OperatorConfigSpec{
 		Sandbox: &lastv1alpha1.SandboxConfig{BaseImage: "ghcr.io/moogie-labs/last-sandbox-base:latest"},
 	}}
 	expectInvalid(t, k8sClient.Create(ctx, obj), "spec.sandbox.baseImage")
 }
 
 func TestOperatorConfigExternalRegistryRequiresDetails(t *testing.T) {
-	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}, Spec: lastv1alpha1.OperatorConfigSpec{
+	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: nameDefault}, Spec: lastv1alpha1.OperatorConfigSpec{
 		Registry: &lastv1alpha1.RegistryConfig{Mode: lastv1alpha1.RegistryExternal},
 	}}
 	expectInvalid(t, k8sClient.Create(ctx, obj), "external is required when mode is external")
 }
 
 func TestOperatorConfigDefaults(t *testing.T) {
-	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}, Spec: lastv1alpha1.OperatorConfigSpec{
+	obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: nameDefault}, Spec: lastv1alpha1.OperatorConfigSpec{
 		Sandbox:  &lastv1alpha1.SandboxConfig{BaseImage: pinnedImage},
 		Registry: &lastv1alpha1.RegistryConfig{},
 	}}

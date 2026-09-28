@@ -24,13 +24,13 @@ func writerConfig(c *fakeClock) audit.WriterConfig {
 		ChainID: chainID, Retention: time.Hour,
 		CheckpointEvery: 1000, CheckpointInterval: 10 * time.Minute,
 		PutAttempts: 3, RetryBackoff: time.Millisecond,
-		Now: c.Now, Actor: "gateway",
+		Now: c.Now, Actor: actorGateway,
 	}
 }
 
 func openWriter(t *testing.T, sink audit.Sink, s *audit.Signer, cfg audit.WriterConfig) *audit.Writer {
 	t.Helper()
-	w, err := audit.Open(bg, sink, s, cfg, map[string]string{"pod": "test"})
+	w, err := audit.Open(bg, sink, s, cfg, map[string]string{"pod": testValue})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -51,14 +51,14 @@ func readEntry(t *testing.T, sink audit.Sink, seq uint64) audit.Entry {
 }
 
 func cmd(n int) audit.Draft {
-	return audit.Draft{Type: audit.TypeCommandStart, Actor: "operator", Intent: "team-x/web", Payload: map[string]int{"n": n}}
+	return audit.Draft{Type: audit.TypeCommandStart, Actor: actorOperator, Intent: intentTeamXWeb, Payload: map[string]int{"n": n}}
 }
 
 func TestOpenEmptyChainStartsAtGenesis(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	openWriter(t, sink, s, writerConfig(newClock()))
 	e := readEntry(t, sink, 0)
-	if e.Type != audit.TypeGatewayStart || e.PrevHash != audit.GenesisHash || e.Actor != "gateway" {
+	if e.Type != audit.TypeGatewayStart || e.PrevHash != audit.GenesisHash || e.Actor != actorGateway {
 		t.Fatalf("first entry = %+v", e)
 	}
 	if e.TS != "2026-09-27T12:00:00.000000000Z" {
@@ -69,7 +69,7 @@ func TestOpenEmptyChainStartsAtGenesis(t *testing.T) {
 func TestAppendChainsAndVerifies(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	w := openWriter(t, sink, s, writerConfig(newClock()))
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if _, err := w.Append(bg, cmd(i)); err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +87,7 @@ func TestOpenResumesAfterHead(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	cfg := writerConfig(newClock())
 	w := openWriter(t, sink, s, cfg)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, _ = w.Append(bg, cmd(i))
 	}
 	openWriter(t, sink, s, cfg)
@@ -104,7 +104,7 @@ func TestOpenRefusesTamperedChain(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
 	cfg := writerConfig(newClock())
 	w := openWriter(t, sink, s, cfg)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, _ = w.Append(bg, cmd(i))
 	}
 	sink.TamperReplace(audit.EntryKey(chainID, 2), []byte("garbage"))
@@ -119,7 +119,7 @@ func TestCheckpointEveryN(t *testing.T) {
 	cfg := writerConfig(newClock())
 	cfg.CheckpointEvery = 5
 	w := openWriter(t, sink, s, cfg) // seq 0
-	for i := 0; i < 4; i++ {         // seq 1..4, then checkpoint at 5
+	for i := range 4 {               // seq 1..4, then checkpoint at 5
 		_, _ = w.Append(bg, cmd(i))
 	}
 	cp := readEntry(t, sink, 5)
@@ -167,7 +167,7 @@ func TestOpenVerifiesFromLatestCheckpoint(t *testing.T) {
 	cfg := writerConfig(newClock())
 	cfg.CheckpointEvery = 4
 	w := openWriter(t, sink, s, cfg) // seq 0
-	for i := 0; i < 5; i++ {         // seq 1,2,3 -> checkpoint 4 -> seq 5,6
+	for i := range 5 {               // seq 1,2,3 -> checkpoint 4 -> seq 5,6
 		_, _ = w.Append(bg, cmd(i))
 	}
 	if readEntry(t, sink, 4).Type != audit.TypeCheckpoint {
@@ -247,7 +247,7 @@ func after(result any, err error) audit.Draft {
 	if err != nil {
 		payload["error"] = err.Error()
 	}
-	return audit.Draft{Type: audit.TypeCommandResult, Actor: "gateway", Payload: payload}
+	return audit.Draft{Type: audit.TypeCommandResult, Actor: actorGateway, Payload: payload}
 }
 
 func TestDoRecordsBeforeRunningAction(t *testing.T) {

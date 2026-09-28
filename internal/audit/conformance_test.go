@@ -47,7 +47,7 @@ func (f *fakeS3) nextVersion() string {
 func writeS3Error(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>%s</Code><Message>%s</Message><RequestId>test</RequestId></Error>`, code, code)
+	_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>%s</Code><Message>%s</Message><RequestId>test</RequestId></Error>`, code, code)
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +75,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPut && r.URL.Query().Has("retention"):
 		// PutObjectRetention: the leaky store just accepts it.
-		io.Copy(io.Discard, r.Body)
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusOK)
 
 	case r.Method == http.MethodPut && key != "":
@@ -104,7 +104,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write(body)
+		_, _ = w.Write(body)
 
 	case r.Method == http.MethodDelete && key != "":
 		vid := r.URL.Query().Get("versionId")
@@ -131,7 +131,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func noRetryClient(t *testing.T, srv *httptest.Server) *s3.Client {
 	t.Helper()
 	base, err := audit.NewS3Client(context.Background(), audit.S3Config{
-		Endpoint: srv.URL, PathStyle: true, AccessKey: "test", SecretKey: "test",
+		Endpoint: srv.URL, PathStyle: true, AccessKey: testValue, SecretKey: testValue,
 	})
 	if err != nil {
 		t.Fatal(err)

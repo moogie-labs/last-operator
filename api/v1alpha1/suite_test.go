@@ -22,6 +22,10 @@ var (
 	ctx       = context.Background()
 )
 
+// nameDefault is the singleton name OperatorConfig must use, and the namespace
+// most test objects are created in.
+const nameDefault = "default"
+
 func TestMain(m *testing.M) {
 	env := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
@@ -47,7 +51,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func meta() metav1.ObjectMeta        { return metav1.ObjectMeta{GenerateName: "t-", Namespace: "default"} }
+func meta() metav1.ObjectMeta        { return metav1.ObjectMeta{GenerateName: "t-", Namespace: nameDefault} }
 func clusterMeta() metav1.ObjectMeta { return metav1.ObjectMeta{GenerateName: "t-"} }
 
 // expectInvalid asserts err is an API "Invalid" error whose message contains substr.

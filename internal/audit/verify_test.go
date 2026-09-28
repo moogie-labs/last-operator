@@ -13,7 +13,20 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit/audittest"
 )
 
-const chainID = "test-chain"
+const (
+	chainID = "test-chain"
+
+	// actorOperator and actorGateway are the Actor values used across these tests.
+	actorOperator = "operator"
+	actorGateway  = "gateway"
+
+	// testValue is a placeholder value used wherever a test needs some string
+	// but not a meaningful one.
+	testValue = "test"
+
+	// intentTeamXWeb is the Intent value used across these tests.
+	intentTeamXWeb = "team-x/web"
+)
 
 var bg = context.Background()
 
@@ -39,11 +52,11 @@ func buildChain(t *testing.T, sink *audittest.MemSink, s *audit.Signer, n int, m
 	t.Helper()
 	prev := audit.GenesisHash
 	out := make([]audit.Entry, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e := audit.Entry{
 			Seq: uint64(i), ChainID: chainID, PrevHash: prev,
 			TS: "2026-09-27T00:00:00.000000000Z", Type: audit.TypeCommandStart,
-			Actor: "operator", Intent: "team-x/web",
+			Actor: actorOperator, Intent: intentTeamXWeb,
 			Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
 		}
 		if mutate != nil {

@@ -88,17 +88,17 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if first, bad := rep.FirstBad(); bad {
-				fmt.Fprintf(out, "FAILED: first problem at seq %d (%s): %s\n", first.Seq, first.Kind, first.Detail)
+				_, _ = fmt.Fprintf(out, "FAILED: first problem at seq %d (%s): %s\n", first.Seq, first.Kind, first.Detail)
 				for _, p := range rep.Problems {
-					fmt.Fprintf(out, "  seq %-8d %-15s %s\n", p.Seq, p.Kind, p.Detail)
+					_, _ = fmt.Fprintf(out, "  seq %-8d %-15s %s\n", p.Seq, p.Kind, p.Detail)
 				}
 				return ErrVerifyFailed
 			}
 			if rep.Head == nil {
-				fmt.Fprintln(out, "OK: chain is empty")
+				_, _ = fmt.Fprintln(out, "OK: chain is empty")
 				return nil
 			}
-			fmt.Fprintf(out, "OK: verified %d entries (seq %d..%d), head %s\n", rep.Entries, rep.First.Seq, rep.Head.Seq, rep.Head.Hash)
+			_, _ = fmt.Fprintf(out, "OK: verified %d entries (seq %d..%d), head %s\n", rep.Entries, rep.First.Seq, rep.Head.Seq, rep.Head.Hash)
 			return nil
 		},
 	}
@@ -141,7 +141,7 @@ func newLogCommand(d Deps, f *auditFlags) *cobra.Command {
 					}
 					var e audit.Entry
 					if err := json.Unmarshal(body, &e); err != nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "%s  <malformed: %v>\n", o.Key, err)
+						_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  <malformed: %v>\n", o.Key, err)
 						continue
 					}
 					if intent == "" || e.Intent == intent {
@@ -170,7 +170,7 @@ func printEntry(w io.Writer, e audit.Entry) {
 	if len(payload) > 120 {
 		payload = payload[:117] + "..."
 	}
-	fmt.Fprintf(w, "%8d  %s  %-20s %-28s %-10s %s\n", e.Seq, e.TS, e.Type, e.Intent, e.Stage, payload)
+	_, _ = fmt.Fprintf(w, "%8d  %s  %-20s %-28s %-10s %s\n", e.Seq, e.TS, e.Type, e.Intent, e.Stage, payload)
 }
 
 func newConformanceCommand(d Deps, f *auditFlags) *cobra.Command {
@@ -198,7 +198,7 @@ func newConformanceCommand(d Deps, f *auditFlags) *cobra.Command {
 				}
 				results, err := audit.RunConformance(cmd.Context(), client, f.bucket, retention)
 				if err != nil {
-					fmt.Fprintf(out, "[%s] SETUP FAILED: %v\n", cs.name, err)
+					_, _ = fmt.Fprintf(out, "[%s] SETUP FAILED: %v\n", cs.name, err)
 					failed = true
 					continue
 				}
@@ -207,7 +207,7 @@ func newConformanceCommand(d Deps, f *auditFlags) *cobra.Command {
 					if !r.Passed {
 						status, failed = "FAIL", true
 					}
-					fmt.Fprintf(out, "[%s] %s  %-36s %s\n", cs.name, status, r.Name, r.Detail)
+					_, _ = fmt.Fprintf(out, "[%s] %s  %-36s %s\n", cs.name, status, r.Name, r.Detail)
 				}
 			}
 			if failed {

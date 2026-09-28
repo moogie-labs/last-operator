@@ -2,12 +2,13 @@ package audit
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 )
 
 // ProblemKind classifies a verification failure.
@@ -68,6 +69,8 @@ func (r *Report) add(seq uint64, kind ProblemKind, format string, args ...any) {
 // one version and no delete markers per entry, hashes, signatures, hash links,
 // checkpoint payloads, and checkpoint index objects. It returns an error only
 // when the store itself cannot be read.
+//
+//nolint:gocyclo // security-critical: each branch is a distinct chain-integrity check (spec §14.5); splitting it up would risk silently dropping a check during refactor.
 func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID string, opts VerifyOptions) (Report, error) {
 	var rep Report
 	startAfter := ""
@@ -169,7 +172,7 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 		}
 		rep.add(*want, ProblemTruncated, "chain ends at seq %s, expected at least %d", head, *want)
 	}
-	sort.SliceStable(rep.Problems, func(i, j int) bool { return rep.Problems[i].Seq < rep.Problems[j].Seq })
+	slices.SortStableFunc(rep.Problems, func(a, b Problem) int { return cmp.Compare(a.Seq, b.Seq) })
 	return rep, nil
 }
 

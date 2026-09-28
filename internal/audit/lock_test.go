@@ -8,6 +8,8 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit"
 )
 
+const modeCompliance = "COMPLIANCE"
+
 func TestCheckLockConfig(t *testing.T) {
 	year := 365 * 24 * time.Hour
 	cases := []struct {
@@ -15,11 +17,11 @@ func TestCheckLockConfig(t *testing.T) {
 		lc   audit.LockConfig
 		want string // substring of the error; "" = ok
 	}{
-		{"compliant", audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: year}, ""},
-		{"longer is fine", audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: 2 * year}, ""},
+		{"compliant", audit.LockConfig{Enabled: true, Mode: modeCompliance, DefaultRetention: year}, ""},
+		{"longer is fine", audit.LockConfig{Enabled: true, Mode: modeCompliance, DefaultRetention: 2 * year}, ""},
 		{"not enabled", audit.LockConfig{}, "Object Lock"},
-		{"governance", audit.LockConfig{Enabled: true, Mode: "GOVERNANCE", DefaultRetention: year}, "COMPLIANCE"},
-		{"too short", audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: 24 * time.Hour}, "shorter"},
+		{"governance", audit.LockConfig{Enabled: true, Mode: "GOVERNANCE", DefaultRetention: year}, modeCompliance},
+		{"too short", audit.LockConfig{Enabled: true, Mode: modeCompliance, DefaultRetention: 24 * time.Hour}, "shorter"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

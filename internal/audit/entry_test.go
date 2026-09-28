@@ -23,7 +23,7 @@ func sampleEntry() audit.Entry {
 	return audit.Entry{
 		Seq: 7, ChainID: "c1", PrevHash: audit.GenesisHash,
 		TS: "2026-09-27T00:00:00.000000000Z", Type: audit.TypeCommandStart,
-		Actor: "operator", Intent: "team-x/web",
+		Actor: actorOperator, Intent: intentTeamXWeb,
 		Payload: json.RawMessage(`{"argv":["kubectl","get","pods"]}`),
 	}
 }

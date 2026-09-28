@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -31,12 +32,15 @@ type CheckResult struct {
 // never masquerade as a WORM refusal). Probed live against RustFS 1.0.0 with root
 // credentials (see task-10-report.md, "Fix round 1" section) before being finalized;
 // every refusal RustFS returned is already covered by these lists.
+// codeAccessDenied is the S3 API error code for an authorization refusal.
+const codeAccessDenied = "AccessDenied"
+
 var refusalCodes = map[string][]string{
-	"delete-version-refused":        {"AccessDenied"},
-	"shorten-retention-refused":     {"AccessDenied"},
-	"switch-to-governance-refused":  {"AccessDenied"},
+	"delete-version-refused":        {codeAccessDenied},
+	"shorten-retention-refused":     {codeAccessDenied},
+	"switch-to-governance-refused":  {codeAccessDenied},
 	"conditional-overwrite-refused": {"PreconditionFailed", "ConditionalRequestConflict"},
-	"delete-bucket-refused":         {"BucketNotEmpty", "AccessDenied"},
+	"delete-bucket-refused":         {"BucketNotEmpty", codeAccessDenied},
 }
 
 // RunConformance checks whether bucket really enforces compliance-mode Object Lock
@@ -76,11 +80,9 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 			return
 		}
 		code := errorCode(err)
-		for _, allowed := range refusalCodes[name] {
-			if code == allowed {
-				results = append(results, CheckResult{Name: name, Passed: true, Detail: "refused: " + code})
-				return
-			}
+		if slices.Contains(refusalCodes[name], code) {
+			results = append(results, CheckResult{Name: name, Passed: true, Detail: "refused: " + code})
+			return
 		}
 		results = append(results, CheckResult{Name: name, Passed: false, Detail: "inconclusive: " + code})
 	}
@@ -91,7 +93,7 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 	// than checking bytes that may not reflect what actually happened.
 	intact := func(name string, mutationErr error) {
 		if mutationErr != nil {
-			if code := errorCode(mutationErr); code != "AccessDenied" {
+			if code := errorCode(mutationErr); code != codeAccessDenied {
 				results = append(results, CheckResult{Name: name, Passed: false, Detail: "inconclusive: mutation failed: " + code})
 				return
 			}
@@ -102,7 +104,7 @@ func RunConformance(ctx context.Context, client *s3.Client, bucket string, reten
 			return
 		}
 		body, _ := io.ReadAll(out.Body)
-		out.Body.Close()
+		_ = out.Body.Close()
 		ok := bytes.Equal(body, original)
 		var detail string
 		switch {
@@ -162,8 +164,7 @@ func putInput(bucket, key string, body []byte, ifNoneMatch bool, retainUntil tim
 }
 
 func errorCode(err error) string {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		return apiErr.ErrorCode()
 	}
 	return err.Error()
