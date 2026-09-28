@@ -40,7 +40,8 @@ type Problem struct {
 
 // VerifyOptions narrows or strengthens verification.
 type VerifyOptions struct {
-	// FromSeq starts verification at this seq (normally a checkpoint).
+	// FromSeq, if non-zero, starts verification at this seq, which must be a
+	// checkpoint entry (otherwise ProblemBadCheckpoint is reported at FromSeq).
 	FromSeq uint64
 	// ExpectHeadAtLeast, if set, fails verification when the chain ends before this seq.
 	ExpectHeadAtLeast *uint64
@@ -153,6 +154,17 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 		}
 		rep.Head, prev = &entry, &entry
 		rep.Entries++
+	}
+
+	// Starting mid-chain is only sound from a checkpoint entry: anything else would
+	// silently verify an arbitrary suffix of the chain.
+	if opts.FromSeq > 0 {
+		switch t, ok := types[opts.FromSeq]; {
+		case !ok:
+			rep.add(opts.FromSeq, ProblemBadCheckpoint, "no entry at start seq %d", opts.FromSeq)
+		case t != TypeCheckpoint:
+			rep.add(opts.FromSeq, ProblemBadCheckpoint, "start seq %d is a %s entry, not a checkpoint", opts.FromSeq, t)
+		}
 	}
 
 	if err := verifyCheckpointIndex(ctx, sink, chainID, opts.FromSeq, hashes, types, &rep); err != nil {

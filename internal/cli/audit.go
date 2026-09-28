@@ -58,6 +58,7 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 	var pubkeyFile string
 	var fromSeq uint64
 	var expectHead int64
+	var allowEmpty bool
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify signatures, hash links, and sequence continuity of the audit chain",
@@ -97,6 +98,11 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 				return ErrVerifyFailed
 			}
 			if rep.Head == nil {
+				if !allowEmpty {
+					_, _ = fmt.Fprintln(out, "FAILED: chain is empty (wrong --chain or --bucket?)")
+					_, _ = fmt.Fprintln(out, keyLine)
+					return ErrVerifyFailed
+				}
 				_, _ = fmt.Fprintln(out, "OK: chain is empty")
 				_, _ = fmt.Fprintln(out, keyLine)
 				return nil
@@ -108,8 +114,9 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&pubkeyFile, "pubkey-file", "", "PEM Ed25519 public key (ConfigMap last-gateway/last-audit-pubkey, key ed25519.pub)")
 	_ = cmd.MarkFlagRequired("pubkey-file")
-	cmd.Flags().Uint64Var(&fromSeq, "from-checkpoint", 0, "start verification at this seq (a checkpoint)")
+	cmd.Flags().Uint64Var(&fromSeq, "from-checkpoint", 0, "start verification at this seq, which must be a checkpoint entry")
 	cmd.Flags().Int64Var(&expectHead, "expect-head", -1, "fail if the chain ends before this seq")
+	cmd.Flags().BoolVar(&allowEmpty, "allow-empty", false, "report an empty chain as OK instead of failing")
 	return cmd
 }
 

@@ -136,3 +136,30 @@ func TestAuditVerifyPrintsKeyFingerprint(t *testing.T) {
 		t.Fatalf("output = %q, want the FAILED line then %q", out.String(), want)
 	}
 }
+
+// F4: an empty chain usually means a wrong --chain or --bucket, so it fails unless
+// the caller says an empty chain is expected.
+func TestAuditVerifyEmptyChain(t *testing.T) {
+	_, pub := writeChain(t)
+	empty := audittest.NewMemSink()
+	var out bytes.Buffer
+	err := execute(testDeps(empty, &out), "audit", "verify", "--chain", "c1", "--pubkey-file", pub)
+	if !errors.Is(err, ErrVerifyFailed) || !strings.HasPrefix(out.String(), "FAILED: chain is empty (wrong --chain or --bucket?)\n") {
+		t.Fatalf("err=%v output=%q", err, out.String())
+	}
+	out.Reset()
+	if err := execute(testDeps(empty, &out), "audit", "verify", "--chain", "c1", "--pubkey-file", pub, "--allow-empty"); err != nil ||
+		!strings.HasPrefix(out.String(), "OK: chain is empty\n") {
+		t.Fatalf("--allow-empty: err=%v output=%q", err, out.String())
+	}
+}
+
+// F4: --from-checkpoint must name a checkpoint entry.
+func TestAuditVerifyFromCheckpointMustBeACheckpoint(t *testing.T) {
+	sink, pub := writeChain(t) // no checkpoints: seq 2 is a command entry
+	var out bytes.Buffer
+	err := execute(testDeps(sink, &out), "audit", "verify", "--chain", "c1", "--pubkey-file", pub, "--from-checkpoint", "2")
+	if !errors.Is(err, ErrVerifyFailed) || !strings.Contains(out.String(), "first problem at seq 2 (bad-checkpoint)") {
+		t.Fatalf("err=%v output=%s", err, out.String())
+	}
+}

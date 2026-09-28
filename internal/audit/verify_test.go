@@ -272,7 +272,7 @@ func TestVerifyDetectsTruncatedTailOnlyWithExpectation(t *testing.T) {
 
 func TestVerifyFromSeqSkipsEarlierEntries(t *testing.T) {
 	s, sink := newSigner(t), audittest.NewMemSink()
-	buildChain(t, sink, s, 10, nil)
+	buildChain(t, sink, s, 10, checkpointAt(5)) // FromSeq must name a checkpoint (F4)
 	sink.TamperReplace(audit.EntryKey(chainID, 2), []byte("garbage"))
 	rep := verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 5})
 	if !rep.OK() || rep.Entries != 5 || rep.First.Seq != 5 {
@@ -398,4 +398,17 @@ func TestVerifyDetectsCheckpointPayloadWithWrongPrevHash(t *testing.T) {
 		}
 	})
 	requireProblem(t, verifyChain(t, sink, s, audit.VerifyOptions{}), 5, audit.ProblemBadCheckpoint)
+}
+
+// F4: verification may only start at a checkpoint entry; anything else (a plain
+// entry, or no entry at all) is reported at that seq instead of silently verifying
+// a suffix of the chain.
+func TestVerifyFromSeqMustBeACheckpoint(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	buildChain(t, sink, s, 10, checkpointAt(5))
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 3}), 3, audit.ProblemBadCheckpoint, "not a checkpoint")
+	requireProblemDetail(t, verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 42}), 42, audit.ProblemBadCheckpoint, "no entry")
+	if rep := verifyChain(t, sink, s, audit.VerifyOptions{FromSeq: 5}); !rep.OK() || rep.First.Seq != 5 {
+		t.Fatalf("from the checkpoint: %+v", rep)
+	}
 }
