@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 // EnsureLockedBucket creates bucket with Object Lock enabled if it is missing, and
 // sets a compliance-mode default retention of at least retentionDays. It is idempotent.
 func EnsureLockedBucket(ctx context.Context, client *s3.Client, bucket string, retentionDays int32) error {
+	if retentionDays <= 0 {
+		return errors.New("audit: retentionDays must be positive")
+	}
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket:                     aws.String(bucket),
 		ObjectLockEnabledForBucket: aws.Bool(true),

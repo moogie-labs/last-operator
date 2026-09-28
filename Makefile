@@ -95,8 +95,8 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-integration
-test-integration: ## Run integration tests (requires Docker).
-	go test -tags integration ./... -run Integration -count=1 -v -timeout 20m
+test-integration: setup-envtest ## Run integration tests (requires Docker).
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags integration ./... -run Integration -count=1 -v -timeout 20m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
