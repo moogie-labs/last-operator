@@ -125,7 +125,7 @@ func TestRunProbesFailsClosedWithoutAudit(t *testing.T) {
 	sink.SetFailPuts(true)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "a"})).RunProbes(context.Background(),
 		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("a", "true")}})
-	if !errors.Is(err, audit.ErrAuditUnavailable) || countPods(*created) != 0 {
+	if !errors.Is(err, audit.ErrAuditUnavailable) || len(*created) != 0 {
 		t.Fatalf("err=%v created=%v", err, *created)
 	}
 }

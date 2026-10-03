@@ -97,3 +97,31 @@ func TestEvaluateHonorsContextCancellation(t *testing.T) {
 		t.Fatalf("Evaluate = %v, %v; want a cancellation error", got, err)
 	}
 }
+
+// A nested macro over a list just under the node cap stays within the cost limit
+// but runs far longer than EvalTimeout, so only the interrupt can stop it.
+const slowExpr = "result.json.exists(a, result.json.exists(b, a + b == -1))"
+
+func TestEvaluateInterruptsAtEvalTimeout(t *testing.T) {
+	start := time.Now()
+	got, err := probe.Evaluate(context.Background(), slowExpr, probe.Result{Stdout: flatList(9000)})
+	if elapsed := time.Since(start); elapsed > probe.EvalTimeout+time.Second {
+		t.Fatalf("Evaluate took %v, want at most about %v", elapsed, probe.EvalTimeout)
+	}
+	if err == nil || got || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Evaluate = %v, %v; want a timeout error", got, err)
+	}
+}
+
+func TestEvaluateStopsWhenTheCallerCancelsMidEvaluation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	got, err := probe.Evaluate(ctx, slowExpr, probe.Result{Stdout: flatList(9000)})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Evaluate took %v after the caller's 100ms deadline", elapsed)
+	}
+	if err == nil || got {
+		t.Fatalf("Evaluate = %v, %v; want a cancellation error", got, err)
+	}
+}
