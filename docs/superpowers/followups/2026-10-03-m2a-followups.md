@@ -58,6 +58,22 @@ during M2a are not listed.
   `probe.result` write fails — callers must treat the error as
   authoritative.
 
+## From the final fix-wave re-review
+
+- `expires-at` is stamped from launch start, but the pod wait starts at pod
+  creation and cleanup can take up to 30s afterwards: the reap margin must
+  exceed ~1m (5m recommended).
+- The capped-token check compares the API server's `ExpirationTimestamp` with
+  the gateway clock; more than ~1m of skew fails every kubernetes-provider
+  run (fails closed — an ops note).
+- A whitespace-only `Actor` is accepted; `command.start.command.providers`
+  still records the raw (possibly duplicated) list next to the deduplicated
+  top-level `providers`.
+- Tests: assert all four `expires-at` values are equal and absent from the
+  NetworkPolicy pod selector; assert the granted duration in the capped-token
+  error; no test for `classifyAudit` on the executor's `egress.revoked`
+  append; no probe-path twin of the slot-release test.
+
 ## Sandbox runner
 
 - A same-UID child can forge the result envelope (documented in spec §17.2).
