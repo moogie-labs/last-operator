@@ -11,7 +11,7 @@ func baseEnv() map[string]string {
 		"POD_NAMESPACE": "last-gateway", "POD_NAME": "gw-0",
 		"LAST_AUDIT_ENDPOINT": "http://last-rustfs.last-audit.svc:9000",
 		"LAST_AUDIT_BUCKET":   "last-audit", "LAST_AUDIT_CHAIN_ID": testChainID,
-		"LAST_OPERATOR_IDENTITY": "system:serviceaccount:last-system:last-operator",
+		"LAST_OPERATOR_IDENTITY": operatorID,
 	}
 }
 
@@ -73,7 +73,7 @@ func TestConfigFromEnvGRPCDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GRPCAddr != ":9090" || cfg.OperatorIdentity != "system:serviceaccount:last-system:last-operator" {
+	if cfg.GRPCAddr != ":9090" || cfg.OperatorIdentity != operatorID {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -93,5 +93,18 @@ func TestConfigFromEnvTreatsBlankAsMissingAndReportsFirstInFixedOrder(t *testing
 	env["LAST_OPERATOR_IDENTITY"] = "   "
 	if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "LAST_OPERATOR_IDENTITY") {
 		t.Fatalf("whitespace-only identity: err = %v", err)
+	}
+}
+
+func TestConfigFromEnvTrimsIdentityAndHonorsGRPCAddr(t *testing.T) {
+	env := baseEnv()
+	env["LAST_OPERATOR_IDENTITY"] = " " + operatorID + "\n"
+	env["LAST_GRPC_ADDR"] = ":7070"
+	cfg, err := ConfigFromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OperatorIdentity != operatorID || cfg.GRPCAddr != ":7070" {
+		t.Fatalf("cfg = %+v", cfg)
 	}
 }

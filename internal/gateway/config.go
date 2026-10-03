@@ -52,7 +52,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		LeaseName:          "last-gateway-audit-writer",
 		HTTPAddr:           or("LAST_HTTP_ADDR", ":8080"),
 		GRPCAddr:           or("LAST_GRPC_ADDR", ":9090"),
-		OperatorIdentity:   getenv("LAST_OPERATOR_IDENTITY"),
+		OperatorIdentity:   strings.TrimSpace(getenv("LAST_OPERATOR_IDENTITY")),
 	}
 	// A fixed-order slice keeps the reported variable deterministic.
 	for _, req := range []struct{ name, value string }{

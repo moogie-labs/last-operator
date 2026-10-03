@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -52,19 +55,37 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (string,
 	}
 	a.mu.Unlock()
 
-	res, err := a.kube.AuthenticationV1().TokenReviews().Create(ctx, &authnv1.TokenReview{
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := a.kube.AuthenticationV1().TokenReviews().Create(rctx, &authnv1.TokenReview{
 		Spec: authnv1.TokenReviewSpec{Token: token, Audiences: []string{a.audience}},
 	}, metav1.CreateOptions{})
 	if err != nil {
+		slog.Warn("Could not review token", "err", err)
 		return "", status.Error(codes.Unavailable, "token review failed")
 	}
 	switch {
 	case !res.Status.Authenticated:
+		slog.Warn("Rejected gRPC caller", "reason", "token not authenticated")
+		return "", status.Error(codes.Unauthenticated, "token not authenticated")
+	case res.Status.Error != "":
+		slog.Warn("Rejected gRPC caller", "reason", "token review reported an error")
 		return "", status.Error(codes.Unauthenticated, "token not authenticated")
 	case !slices.Contains(res.Status.Audiences, a.audience):
+		slog.Warn("Rejected gRPC caller", "reason", "wrong audience")
 		return "", status.Error(codes.Unauthenticated, "token audience is not "+a.audience)
 	case res.Status.User.Username != a.allowed:
+		slog.Warn("Rejected gRPC caller", "user", res.Status.User.Username)
 		return "", status.Errorf(codes.PermissionDenied, "caller %s is not allowed", res.Status.User.Username)
+	}
+	expiry := now.Add(a.ttl)
+	if exp, ok := tokenExpiry(token); ok {
+		if !exp.After(now) {
+			return a.allowed, nil // already expired by its own claim: never cache
+		}
+		if exp.Before(expiry) {
+			expiry = exp
+		}
 	}
 	a.mu.Lock()
 	for k, exp := range a.cache {
@@ -72,9 +93,29 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (string,
 			delete(a.cache, k)
 		}
 	}
-	a.cache[key] = now.Add(a.ttl)
+	a.cache[key] = expiry
 	a.mu.Unlock()
 	return a.allowed, nil
+}
+
+// tokenExpiry reads the unverified "exp" claim of a JWT. It only ever shortens a
+// cache entry; TokenReview alone decides whether the token is valid.
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(*claims.Exp), 0), true
 }
 
 type callerKey struct{}
@@ -96,12 +137,32 @@ func (a *Authenticator) UnaryInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
+// StreamInterceptor authenticates every streaming call the same way.
+func (a *Authenticator) StreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		user, err := a.Authenticate(ss.Context(), bearerToken(ss.Context()))
+		if err != nil {
+			return err
+		}
+		return handler(srv, &callerStream{ServerStream: ss, ctx: context.WithValue(ss.Context(), callerKey{}, user)})
+	}
+}
+
+type callerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (c *callerStream) Context() context.Context { return c.ctx }
+
 func bearerToken(ctx context.Context) string {
 	md, _ := metadata.FromIncomingContext(ctx)
-	for _, v := range md.Get("authorization") {
-		if scheme, token, ok := strings.Cut(v, " "); ok && strings.EqualFold(scheme, "Bearer") {
-			return strings.TrimSpace(token)
-		}
+	vals := md.Get("authorization")
+	if len(vals) != 1 {
+		return ""
+	}
+	if scheme, token, ok := strings.Cut(vals[0], " "); ok && strings.EqualFold(scheme, "Bearer") {
+		return strings.TrimSpace(token)
 	}
 	return ""
 }

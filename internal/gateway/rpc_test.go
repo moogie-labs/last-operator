@@ -61,3 +61,27 @@ func TestPingRequiresABearerToken(t *testing.T) {
 		t.Fatalf("other SA: code %v", codeOf(err))
 	}
 }
+
+func TestPingBearerSchemeIsCaseInsensitive(t *testing.T) {
+	c := pingClient(t)
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "bearer good")
+	if _, err := c.Ping(ctx, &gatewayv1.PingRequest{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPingRejectsMultipleAuthorizationValues(t *testing.T) {
+	c := pingClient(t)
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer good", "authorization", "Bearer good")
+	if _, err := c.Ping(ctx, &gatewayv1.PingRequest{}); codeOf(err) != codes.Unauthenticated {
+		t.Fatalf("code %v", codeOf(err))
+	}
+}
+
+func TestPingFailsClosedWhenTokenReviewErrors(t *testing.T) {
+	c := pingClient(t)
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer boom")
+	if _, err := c.Ping(ctx, &gatewayv1.PingRequest{}); codeOf(err) != codes.Unavailable {
+		t.Fatalf("code %v", codeOf(err))
+	}
+}

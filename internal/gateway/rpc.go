@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
@@ -22,7 +24,17 @@ func (s *rpcServer) Ping(ctx context.Context, _ *gatewayv1.PingRequest) (*gatewa
 
 // GRPCServer builds the gateway's gRPC server; every call is authenticated.
 func (g *Gateway) GRPCServer(auth *Authenticator) *grpc.Server {
-	srv := grpc.NewServer(grpc.UnaryInterceptor(auth.UnaryInterceptor()))
+	if auth == nil {
+		panic("gateway: GRPCServer requires an Authenticator")
+	}
+	srv := grpc.NewServer(
+		grpc.UnaryInterceptor(auth.UnaryInterceptor()),
+		grpc.StreamInterceptor(auth.StreamInterceptor()),
+		grpc.MaxRecvMsgSize(1<<20),
+		grpc.MaxConcurrentStreams(100),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 30 * time.Second}),
+		grpc.ConnectionTimeout(10*time.Second),
+	)
 	gatewayv1.RegisterGatewayServiceServer(srv, &rpcServer{g: g})
 	return srv
 }
