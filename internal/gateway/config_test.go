@@ -10,7 +10,8 @@ func baseEnv() map[string]string {
 	return map[string]string{
 		"POD_NAMESPACE": "last-gateway", "POD_NAME": "gw-0",
 		"LAST_AUDIT_ENDPOINT": "http://last-rustfs.last-audit.svc:9000",
-		"LAST_AUDIT_BUCKET":   "last-audit", "LAST_AUDIT_CHAIN_ID": "chain-1",
+		"LAST_AUDIT_BUCKET":   "last-audit", "LAST_AUDIT_CHAIN_ID": testChainID,
+		"LAST_OPERATOR_IDENTITY": "system:serviceaccount:last-system:last-operator",
 	}
 }
 
@@ -28,7 +29,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 }
 
 func TestConfigFromEnvRequiresChainAndBucket(t *testing.T) {
-	for _, missing := range []string{"LAST_AUDIT_CHAIN_ID", "LAST_AUDIT_BUCKET", "POD_NAMESPACE", "POD_NAME"} {
+	for _, missing := range []string{"LAST_AUDIT_CHAIN_ID", "LAST_AUDIT_BUCKET", "POD_NAMESPACE", "POD_NAME", "LAST_OPERATOR_IDENTITY"} {
 		env := baseEnv()
 		delete(env, missing)
 		if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), missing) {
@@ -63,5 +64,34 @@ func TestConfigFromEnvAllowNewChain(t *testing.T) {
 	env["LAST_AUDIT_ALLOW_NEW_CHAIN"] = "maybe"
 	if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
 		t.Error("accepted LAST_AUDIT_ALLOW_NEW_CHAIN=maybe")
+	}
+}
+
+func TestConfigFromEnvGRPCDefaults(t *testing.T) {
+	env := baseEnv()
+	cfg, err := ConfigFromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GRPCAddr != ":9090" || cfg.OperatorIdentity != "system:serviceaccount:last-system:last-operator" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestConfigFromEnvTreatsBlankAsMissingAndReportsFirstInFixedOrder(t *testing.T) {
+	env := baseEnv()
+	for k := range env {
+		env[k] = "  \t"
+	}
+	for range 20 {
+		_, err := ConfigFromEnv(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "POD_NAMESPACE") {
+			t.Fatalf("err = %v, want deterministic POD_NAMESPACE", err)
+		}
+	}
+	env = baseEnv()
+	env["LAST_OPERATOR_IDENTITY"] = "   "
+	if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "LAST_OPERATOR_IDENTITY") {
+		t.Fatalf("whitespace-only identity: err = %v", err)
 	}
 }

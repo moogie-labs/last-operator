@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,26 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}
 	}()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	lis, err := net.Listen("tcp", g.cfg.GRPCAddr)
+	if err != nil {
+		return fmt.Errorf("gateway: grpc listen: %w", err)
+	}
+	grpcSrv := g.GRPCServer(NewAuthenticator(g.kube, GRPCAudience, g.cfg.OperatorIdentity))
+	go func() {
+		if err := grpcSrv.Serve(lis); err != nil {
+			cancel(fmt.Errorf("gateway: grpc server: %w", err))
+		}
+	}()
+	defer func() {
+		done := make(chan struct{})
+		go func() { grpcSrv.GracefulStop(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			grpcSrv.Stop()
+		}
+	}()
 
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta:  metav1.ObjectMeta{Name: g.cfg.LeaseName, Namespace: g.cfg.Namespace},

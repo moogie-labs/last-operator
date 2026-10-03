@@ -20,10 +20,12 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit/audittest"
 )
 
+const testChainID = "chain-1"
+
 func testGateway(t *testing.T, sink audit.Sink) *Gateway {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	cfg := Config{Namespace: ns, PodName: "gw-0", ChainID: "chain-1", Retention: 365 * 24 * time.Hour, HTTPAddr: ":0", LeaseName: "l"}
+	cfg := Config{Namespace: ns, PodName: "gw-0", ChainID: testChainID, Retention: 365 * 24 * time.Hour, HTTPAddr: ":0", LeaseName: "l"}
 	return New(cfg, fake.NewClientset(), sink, audit.NewSigner(key))
 }
 

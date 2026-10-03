@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package last.gateway.v1;
+
+option go_package = "github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1";
+
+// GatewayService is the trusted gateway's API. Only the operator's ServiceAccount
+// may call it (spec §4.2). Command-running methods arrive with enforcement in M2b.
+service GatewayService {
+  // Ping reports the authenticated caller and whether the audit log is writable.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+// PingRequest has no fields.
+message PingRequest {}
+
+// PingResponse describes the caller and the gateway.
+message PingResponse {
+  // The caller's authenticated Kubernetes username.
+  string caller = 1;
+  // The gateway build version.
+  string version = 2;
+  // The audit chain this gateway writes.
+  string chain_id = 3;
+  // Whether this gateway currently holds a healthy audit writer.
+  bool audit_ready = 4;
+}
