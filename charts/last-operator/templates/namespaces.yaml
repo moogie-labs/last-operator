@@ -18,4 +18,10 @@ metadata:
     # Deleting this namespace would delete the audit store's volume.
     helm.sh/resource-policy: keep
 {{- end }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaces.sandbox }}
+  labels: {{- include "last.labels" . | nindent 4 }}
 {{- end }}

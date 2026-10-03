@@ -1,0 +1,19 @@
+# Sandbox pods get no network access unless the gateway grants it per run (spec §11.1).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: last-sandbox-default-deny
+  namespace: {{ .Values.namespaces.sandbox }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: last-sandbox-runner
+  namespace: {{ .Values.namespaces.sandbox }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+

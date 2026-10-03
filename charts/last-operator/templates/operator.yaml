@@ -1,0 +1,8 @@
+# The operator's identity. The gateway accepts gRPC calls only from this
+# ServiceAccount's projected token (audience last-gateway; spec §4.2).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: last-operator
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "last.labels" . | nindent 4 }}

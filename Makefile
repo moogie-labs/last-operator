@@ -300,3 +300,8 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 		--set audit.external.endpoint=https://s3.example.com \
 		--set audit.external.existingSecret=audit-creds \
 		--set namespaces.create=false >/dev/null
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-sandbox-default-deny'
+	helm template last charts/last-operator -n last-system | grep -q 'value: "system:serviceaccount:last-system:last-operator"'
+	helm template last charts/last-operator -n last-system | grep -q 'containerPort: 9090'
+	helm template last charts/last-operator -n last-system | grep -q 'resources: \["tokenreviews"\]'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-sandbox-runner'

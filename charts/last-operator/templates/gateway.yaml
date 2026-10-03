@@ -106,8 +106,11 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ include "last.writerSecret" . }}, key: accessKey}}
             - name: LAST_AUDIT_SECRET_KEY
               valueFrom: {secretKeyRef: {name: {{ include "last.writerSecret" . }}, key: secretKey}}
+            - {name: LAST_GRPC_ADDR, value: ":9090"}
+            - {name: LAST_OPERATOR_IDENTITY, value: {{ printf "system:serviceaccount:%s:last-operator" .Release.Namespace | quote }}}
           ports:
             - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 5
@@ -131,3 +134,49 @@ spec:
     app.kubernetes.io/name: last-gateway
   ports:
     - {name: http, port: 8080, targetPort: http}
+    - {name: grpc, port: 9090, targetPort: grpc}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: last-gateway
+  namespace: {{ .Values.namespaces.gateway }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: last-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - {port: 9090, protocol: TCP}
+    - ports:
+        - {port: 8080, protocol: TCP}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: last-gateway-tokenreview
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: last-gateway-tokenreview
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: last-gateway-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: last-gateway
+    namespace: {{ .Values.namespaces.gateway }}
