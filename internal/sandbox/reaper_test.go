@@ -3,6 +3,7 @@ package sandbox_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
 const foreignManagedBy = "someone-else"
@@ -265,5 +267,125 @@ func TestReapOrphansReportsAuditFailure(t *testing.T) {
 	// cleanup failed due to audit error, so count is 0
 	if n != 0 {
 		t.Fatalf("reaped=%d, want 0 (cleanup failed due to audit)", n)
+	}
+}
+
+func expMeta(name, id string, created, expires time.Time) metav1.ObjectMeta {
+	m := runMeta(name, id, created)
+	m.Labels[sandbox.LabelExpiresAt] = strconv.FormatInt(expires.Unix(), 10)
+	return m
+}
+
+func TestReapOrphansKeepsARunWhoseExpiryIsInTheFuture(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	created := now.Add(-3 * time.Hour) // far older than any age guess
+	expires := now.Add(2 * time.Hour)  // a long-running run, still within its deadline
+	kube, _ := fakeCluster(corev1.PodSucceeded,
+		&corev1.Pod{ObjectMeta: expMeta("pod-long", "long", created, expires)},
+		&corev1.Secret{ObjectMeta: expMeta("secret-long", "long", created, expires)},
+	)
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), 5*time.Minute, now)
+	if err != nil || n != 0 {
+		t.Fatalf("reaped=%d err=%v, want 0", n, err)
+	}
+	if _, err := kube.CoreV1().Pods(sandboxNS).Get(context.Background(), "pod-long", metav1.GetOptions{}); err != nil {
+		t.Fatal("a run inside its deadline was reaped")
+	}
+}
+
+func TestReapOrphansReapsAnExpiredRun(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	created := now.Add(-time.Hour)
+	expires := now.Add(-10 * time.Minute) // past expiry + 5m margin
+	kube, _ := fakeCluster(corev1.PodSucceeded, &corev1.Pod{ObjectMeta: expMeta("pod-x", "x", created, expires)})
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), 5*time.Minute, now)
+	if err != nil || n != 1 {
+		t.Fatalf("reaped=%d err=%v, want 1", n, err)
+	}
+}
+
+func TestReapOrphansHonorsTheMarginAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	expires := now.Add(-2 * time.Minute) // expired, but inside the 5m margin
+	kube, _ := fakeCluster(corev1.PodSucceeded, &corev1.Pod{ObjectMeta: expMeta("pod-x", "x", now.Add(-time.Hour), expires)})
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), 5*time.Minute, now)
+	if err != nil || n != 0 {
+		t.Fatalf("reaped=%d err=%v, want 0 (cleanup may still be running)", n, err)
+	}
+}
+
+func TestReapOrphansUsesTheLatestExpiryAmongObjects(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	created := now.Add(-3 * time.Hour)
+	kube, _ := fakeCluster(corev1.PodSucceeded,
+		&corev1.Secret{ObjectMeta: expMeta("secret-m", "mixed", created, now.Add(-time.Hour))},
+		&corev1.Pod{ObjectMeta: expMeta("pod-m", "mixed", created, now.Add(time.Hour))},
+	)
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), 5*time.Minute, now)
+	if err != nil || n != 0 {
+		t.Fatalf("reaped=%d err=%v, want 0 (the pod has not expired)", n, err)
+	}
+}
+
+func TestReapOrphansFallsBackToCreationTimeWithoutAValidExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	old, recent := now.Add(-2*time.Hour), now.Add(-time.Minute)
+	bad := runMeta("pod-bad", "bad", old)
+	bad.Labels[sandbox.LabelExpiresAt] = "not-a-number"
+	kube, _ := fakeCluster(corev1.PodSucceeded,
+		&corev1.Pod{ObjectMeta: bad},                                       // unparsable, old: reaped
+		&corev1.Pod{ObjectMeta: runMeta("pod-missing", "missing", old)},    // missing, old: reaped
+		&corev1.Pod{ObjectMeta: runMeta("pod-fresh", "fresh", recent)},     // missing, recent: kept
+		&corev1.Secret{ObjectMeta: expMeta("s-old", "partial", old, old)},  // expired
+		&corev1.Pod{ObjectMeta: runMeta("pod-partial", "partial", recent)}, // unlabelled but newest: run kept
+	)
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), 5*time.Minute, now)
+	if err != nil || n != 2 {
+		t.Fatalf("reaped=%d err=%v, want 2 (bad, missing)", n, err)
+	}
+	ctx := context.Background()
+	for name, want := range map[string]bool{"pod-bad": false, "pod-missing": false, "pod-fresh": true, "pod-partial": true} {
+		_, err := kube.CoreV1().Pods(sandboxNS).Get(ctx, name, metav1.GetOptions{})
+		if (err == nil) != want {
+			t.Errorf("pod %s present=%v, want %v", name, err == nil, want)
+		}
+	}
+}
+
+func TestRunStampsExpiryOnEveryRunObjectButNotTheSelector(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	labels := map[string]map[string]string{}
+	kube.PrependReactor("create", "*", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if m, ok := a.(k8stesting.CreateAction).GetObject().(metav1.Object); ok {
+			labels[a.GetResource().Resource+"/"+m.GetName()] = m.GetLabels()
+		}
+		return false, nil, nil
+	})
+	aud, _ := newAudit(t)
+	before := time.Now()
+	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})}); err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 4 {
+		t.Fatalf("created %d labelled objects, want 4 (creds, spec, policy, pod): %v", len(labels), labels)
+	}
+	for name, l := range labels {
+		secs, err := strconv.ParseInt(l[sandbox.LabelExpiresAt], 10, 64)
+		if err != nil {
+			t.Errorf("%s: expires-at %q: %v", name, l[sandbox.LabelExpiresAt], err)
+			continue
+		}
+		if secs < before.Unix() {
+			t.Errorf("%s: expires-at %d is before the run started", name, secs)
+		}
+	}
+	if _, ok := sandbox.RunLabels(runID)[sandbox.LabelExpiresAt]; ok {
+		t.Fatal("RunLabels (the selector) must not carry expires-at")
 	}
 }

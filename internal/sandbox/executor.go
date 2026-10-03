@@ -260,6 +260,9 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 // and that every command is audited.
 func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks launchHooks) ([]runnerapi.Result, error) {
 	ns := e.cfg.Pod.Namespace
+	deadline := p.total + e.cfg.DeadlineOverhead
+	// Every object records when the run is orphaned, so the reaper never guesses.
+	expires := time.Now().Add(deadline + e.cfg.StartupGrace)
 	for _, cp := range p.plans { // record each issuance before the credential is read or minted
 		if hooks.beforeCredential != nil {
 			if err := hooks.beforeCredential(ctx, cp); err != nil {
@@ -272,11 +275,13 @@ func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks l
 		return nil, err
 	}
 	if creds.Secret != nil {
+		stampExpiry(&creds.Secret.ObjectMeta, expires)
 		if _, err := e.kube.CoreV1().Secrets(ns).Create(ctx, creds.Secret, metav1.CreateOptions{}); err != nil {
 			return nil, fmt.Errorf("sandbox: create credential secret: %w", err)
 		}
 	}
 	if np := EgressPolicy(ns, runID, p.rules); np != nil {
+		stampExpiry(&np.ObjectMeta, expires)
 		if hooks.beforeEgress != nil {
 			if err := hooks.beforeEgress(ctx, p.rules); err != nil {
 				return nil, err
@@ -290,11 +295,12 @@ func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks l
 	if err != nil {
 		return nil, err
 	}
+	stampExpiry(&specSecret.ObjectMeta, expires)
 	if _, err := e.kube.CoreV1().Secrets(ns).Create(ctx, specSecret, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("sandbox: create spec secret: %w", err)
 	}
-	deadline := p.total + e.cfg.DeadlineOverhead
 	pod := SandboxPod(e.cfg.Pod, runID, creds, deadline)
+	stampExpiry(&pod.ObjectMeta, expires)
 	if _, err := e.kube.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("sandbox: create pod: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,28 +18,36 @@ type reapedRef struct {
 	Reason string `json:"reason"`
 }
 
-// ReapOrphans deletes sandbox runs whose objects were created more than olderThan
-// before now: leftovers of a gateway that stopped mid-run. Credentials and egress
-// grants must not outlive their run (spec §11.1).
+// ReapOrphans deletes sandbox runs that outlived their deadline: leftovers of a
+// gateway that stopped mid-run. Credentials and egress grants must not outlive their
+// run (spec §11.1).
 //
-// A run is identified by its newest object: if any object of the run has a
-// creationTimestamp after the cutoff (now - olderThan), the run is not reaped.
-// With olderThan > 0, the age is compared to API-server timestamps; callers
-// should choose olderThan well above the maximum run lifetime plus skew.
-// With olderThan <= 0, all objects are considered old, skipping the age check.
-func (e *Executor) ReapOrphans(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
+// Every object of a run carries LabelExpiresAt (launch start + activeDeadline +
+// StartupGrace), so a live run is never mistaken for an orphan, however long its
+// commands run. A run is reaped when the latest expiry among its objects, plus margin,
+// is before now. An object without a parsable expiry counts from its creationTimestamp
+// instead, so the newest such object keeps a run alive. margin covers clock skew
+// between the gateway and the API server plus the time cleanup takes; 5m is recommended.
+// With margin <= 0 every run is reaped (leader start: no run of a previous gateway
+// is still supervised).
+func (e *Executor) ReapOrphans(ctx context.Context, margin time.Duration, now time.Time) (int, error) {
 	ns := e.cfg.Pod.Namespace
 	opts := metav1.ListOptions{LabelSelector: LabelManagedBy + "=" + ManagedByValue}
 
-	// Group objects by run ID, tracking the newest timestamp per run.
-	// A run is reaped only if ALL its objects are old (at or before cutoff).
-	runs := make(map[string]time.Time) // run ID -> newest object timestamp
+	// Group objects by run ID, tracking the latest point at which any object of the
+	// run is still due: its expiry, or its creation time when it has no valid expiry.
+	runs := make(map[string]time.Time)
 	record := func(meta metav1.ObjectMeta) {
-		if id := meta.Labels[LabelRun]; id != "" {
-			ts := meta.CreationTimestamp.Time
-			if newest, exists := runs[id]; !exists || ts.After(newest) {
-				runs[id] = ts
-			}
+		id := meta.Labels[LabelRun]
+		if id == "" {
+			return
+		}
+		due := meta.CreationTimestamp.Time
+		if secs, err := strconv.ParseInt(meta.Labels[LabelExpiresAt], 10, 64); err == nil {
+			due = time.Unix(secs, 0)
+		}
+		if latest, exists := runs[id]; !exists || due.After(latest) {
+			runs[id] = due
 		}
 	}
 
@@ -66,21 +75,10 @@ func (e *Executor) ReapOrphans(ctx context.Context, olderThan time.Duration, now
 		record(np.ObjectMeta)
 	}
 
-	// Determine which runs are old enough to reap.
-	var idsToReap []string
-	if olderThan <= 0 {
-		// olderThan <= 0 means reap everything; skip age check.
-		idsToReap = make([]string, 0, len(runs))
-		for id := range runs {
+	idsToReap := make([]string, 0, len(runs))
+	for id, due := range runs {
+		if margin <= 0 || due.Add(margin).Before(now) {
 			idsToReap = append(idsToReap, id)
-		}
-	} else {
-		cutoff := now.Add(-olderThan)
-		idsToReap = make([]string, 0, len(runs))
-		for id, newest := range runs {
-			if !newest.After(cutoff) {
-				idsToReap = append(idsToReap, id)
-			}
 		}
 	}
 
