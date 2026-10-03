@@ -16,6 +16,9 @@ import (
 
 // ProbeRunRequest is a set of probes for one Intent.
 type ProbeRunRequest struct {
+	// Actor names the caller the probes run for. It is required and is recorded on
+	// probe.start and probe.result. M2b fills it from gateway.CallerFrom(ctx).
+	Actor  string
 	Intent string
 	Probes []lastv1alpha1.Probe
 }
@@ -66,6 +69,9 @@ type probeResultPayload struct {
 // RunProbes runs probes grouped by identical providers and egress, one pod per group,
 // each recorded as a single probe.start/probe.result pair (spec §10.2).
 func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeOutcome, error) {
+	if req.Actor == "" {
+		return nil, errors.New("sandbox: probe request has no actor")
+	}
 	seen := map[string]bool{}
 	for _, p := range req.Probes {
 		if seen[p.ID] {
@@ -76,7 +82,7 @@ func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeO
 	byID := map[string]ProbeOutcome{}
 	var errs []error
 	for _, group := range groupProbes(req.Probes) {
-		outs, err := e.runProbeGroup(ctx, req.Intent, group)
+		outs, err := e.runProbeGroup(ctx, req.Actor, req.Intent, group)
 		for _, o := range outs {
 			byID[o.ID] = o
 		}
@@ -130,7 +136,7 @@ func truncateError(s string) string {
 	return s[:cut] + "…(truncated)"
 }
 
-func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []lastv1alpha1.Probe) ([]ProbeOutcome, error) {
+func (e *Executor) runProbeGroup(ctx context.Context, actor, intent string, probes []lastv1alpha1.Probe) ([]ProbeOutcome, error) {
 	outcomes := make([]ProbeOutcome, len(probes))
 	failAll := func(err error) ([]ProbeOutcome, error) {
 		for i, p := range probes {
@@ -165,7 +171,7 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 		issued = append(issued, cp.Issued)
 	}
 	draft := func(typ string, payload any) audit.Draft {
-		return audit.Draft{Type: typ, Actor: GatewayActor, Intent: intent, Payload: payload}
+		return audit.Draft{Type: typ, Actor: actor, Intent: intent, Payload: payload}
 	}
 	var cleanupErr string
 	var revoked bool

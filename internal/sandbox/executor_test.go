@@ -155,7 +155,7 @@ func TestRunSucceedsAndAuditsEveryStepInOrder(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
 	aud, sink := newAudit(t)
 	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", ExitCode: 0, Stdout: "ok\n"})).Run(context.Background(),
-		sandbox.RunRequest{Intent: "team-x/web", Stage: "Create", Command: cmd([]string{"demo"}, []string{testEgress})})
+		sandbox.RunRequest{Actor: testActor, Intent: "team-x/web", Stage: "Create", Command: cmd([]string{demoProvider}, []string{testEgress})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestRunReportsNonZeroExitWithoutError(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded)
 	aud, sink := newAudit(t)
 	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", ExitCode: 3, Stderr: "boom"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd(nil, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
 	if err != nil || res.Result.ExitCode != 3 {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
@@ -201,7 +201,7 @@ func TestRunTimesOutWhenThePodNeverFinishes(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodPending)
 	aud, sink := newAudit(t)
 	start := time.Now()
-	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: cmd(nil, nil)})
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
 	if err == nil || !strings.Contains(err.Error(), "did not finish") {
 		t.Fatalf("err = %v", err)
 	}
@@ -219,7 +219,7 @@ func TestRunWithoutAnEnvelopeFails(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodFailed)
 	aud, sink := newAudit(t)
 	garbage := func(context.Context, string, string) ([]byte, error) { return []byte("segfault\n"), nil }
-	_, err := newExec(kube, aud, garbage).Run(context.Background(), sandbox.RunRequest{Command: cmd(nil, nil)})
+	_, err := newExec(kube, aud, garbage).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
 	if err == nil || !strings.Contains(err.Error(), "no result envelope") {
 		t.Fatalf("err = %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
 	aud, sink := newAudit(t)
 	sink.SetFailPuts(true)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{"demo"}, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, nil)})
 	if !errors.Is(err, audit.ErrAuditUnavailable) {
 		t.Fatalf("err = %v, want ErrAuditUnavailable", err)
 	}
@@ -255,7 +255,7 @@ func TestRunWithKubernetesProviderAllowsTheAPIServer(t *testing.T) {
 	})
 	aud, sink := newAudit(t)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{clusterName}, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{clusterName}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestRunRejectsImageBuildsBeforeAuditing(t *testing.T) {
 	aud, sink := newAudit(t)
 	c := cmd(nil, nil)
 	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", "install", "x"}}}}
-	if _, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: c}); !errors.Is(err, sandbox.ErrImageBuildsUnsupported) {
+	if _, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c}); !errors.Is(err, sandbox.ErrImageBuildsUnsupported) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(entryTypes(entries(t, sink))) != 0 || len(*created) != 0 {
@@ -304,7 +304,7 @@ func TestRunRaisesTheKubernetesTokenTTLAboveThePodLifetime(t *testing.T) {
 	aud, sink := newAudit(t)
 	c := cmd([]string{clusterName}, nil)
 	c.Timeout = &metav1.Duration{Duration: 30 * time.Minute}
-	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(), sandbox.RunRequest{Command: c}); err != nil {
+	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c}); err != nil {
 		t.Fatal(err)
 	}
 	// 30m command + 1ms overhead + 50ms grace, rounded up to whole seconds.
@@ -456,7 +456,7 @@ func TestRunRedactsIssuedCredentialsFromOutput(t *testing.T) {
 		Stdout: "a " + secretValue + " b " + b64 + " c " + raw + "\n",
 		Stderr: "e " + secretValue + " " + b64, Error: "err " + secretValue}
 	res, err := newExec(kube, aud, envelopeLogs(leak)).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider}, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestRunRedactsMintedKubernetesTokens(t *testing.T) {
 	})
 	aud, sink := newAudit(t)
 	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", Stdout: "token=tok-" + secretValue})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{clusterName}, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{clusterName}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestRunDoesNotRedactValuesShorterThanEightBytes(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, sec)
 	aud, _ := newAudit(t)
 	res, err := newExecWith(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", Stdout: "v=abc1234"}), short).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{"short"}, nil)})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{"short"}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestRunFailsClosedAtCredentialIssued(t *testing.T) {
 	aud, sink, l := newRecAudit(t, 1)
 	recordKube(kube, l)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider, clusterName}, []string{testEgress})})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider, clusterName}, []string{testEgress})})
 	if !errors.Is(err, audit.ErrAuditUnavailable) {
 		t.Fatalf("err = %v, want ErrAuditUnavailable", err)
 	}
@@ -552,7 +552,7 @@ func TestRunFailsClosedAtEgressGranted(t *testing.T) {
 	aud, sink, l := newRecAudit(t, 2)
 	recordKube(kube, l)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})})
 	if !errors.Is(err, audit.ErrAuditUnavailable) {
 		t.Fatalf("err = %v, want ErrAuditUnavailable", err)
 	}
@@ -576,7 +576,7 @@ func TestRunInterleavesAuditAndKubeActionsInOrder(t *testing.T) {
 	aud, _, l := newRecAudit(t, 0)
 	recordKube(kube, l)
 	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})}); err != nil {
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})}); err != nil {
 		t.Fatal(err)
 	}
 	ev := l.all()
@@ -611,7 +611,7 @@ func TestRunCancelledWhilePendingStillCleansUpAndAudits(t *testing.T) {
 	c.Timeout = &metav1.Duration{Duration: time.Minute}
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(30*time.Millisecond, cancel)
-	res, err := newExec(kube, aud, envelopeLogs()).Run(ctx, sandbox.RunRequest{Command: c})
+	res, err := newExec(kube, aud, envelopeLogs()).Run(ctx, sandbox.RunRequest{Actor: testActor, Command: c})
 	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cancel") {
 		t.Fatalf("err = %v, want a cancellation error", err)
 	}
@@ -639,7 +639,7 @@ func TestRunRecordsCleanupErrorWithoutRevokedWhenPolicyDeleteFails(t *testing.T)
 	})
 	aud, sink := newAudit(t)
 	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestRunCleansUpWhenPodCreateFails(t *testing.T) {
 	})
 	aud, sink := newAudit(t)
 	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(),
-		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})})
 	if err == nil || !strings.Contains(err.Error(), "create pod") {
 		t.Fatalf("err = %v", err)
 	}
@@ -686,7 +686,7 @@ func TestRunFailsFastOnImagePullBackOff(t *testing.T) {
 	c := cmd(nil, nil)
 	c.Timeout = &metav1.Duration{Duration: time.Minute}
 	start := time.Now()
-	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: c})
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
 	if err == nil || !strings.Contains(err.Error(), "ImagePullBackOff") {
 		t.Fatalf("err = %v", err)
 	}
@@ -708,7 +708,7 @@ func TestRunFailsFastWhenThePodIsDeletedExternally(t *testing.T) {
 	c := cmd(nil, nil)
 	c.Timeout = &metav1.Duration{Duration: time.Minute}
 	start := time.Now()
-	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: c})
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
 	if err == nil || !strings.Contains(err.Error(), "deleted externally") {
 		t.Fatalf("err = %v", err)
 	}
@@ -722,7 +722,7 @@ func TestRunDefaultRunIDIs32HexCharacters(t *testing.T) {
 	aud, _ := newAudit(t)
 	ex := sandbox.NewExecutor(kube, providers(), aud, sandbox.NewScheduler(1), envelopeLogs(runnerapi.Result{ID: "c1"}),
 		sandbox.ExecutorConfig{Pod: sandbox.PodConfig{Namespace: sandboxNS, Image: "img:test"}, PollInterval: time.Millisecond})
-	res, err := ex.Run(context.Background(), sandbox.RunRequest{Command: cmd(nil, nil)})
+	res, err := ex.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

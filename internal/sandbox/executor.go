@@ -84,6 +84,10 @@ func NewExecutor(kube kubernetes.Interface, providers ProviderGetter, auditor Au
 
 // RunRequest is one authorized command execution.
 type RunRequest struct {
+	// Actor names the caller the run is performed for. It is required and is recorded
+	// on every entry except egress.revoked, which is gateway-initiated. M2b fills it
+	// from gateway.CallerFrom(ctx).
+	Actor        string
 	Intent       string
 	Stage        string
 	SubjectHash  string
@@ -152,6 +156,9 @@ type launchHooks struct {
 // Run executes one command. Validation failures return before anything is audited
 // or created; once command.start is durable, every path ends with command.result.
 func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if req.Actor == "" {
+		return RunResult{}, errors.New("sandbox: run request has no actor")
+	}
 	p, err := e.prepare(ctx, []lastv1alpha1.Command{req.Command}, req.Command.Providers, req.Command.Egress)
 	if err != nil {
 		return RunResult{}, err
@@ -165,7 +172,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	runID := e.cfg.NewRunID()
 	out := RunResult{RunID: runID, Result: runnerapi.Result{ID: req.Command.ID, ExitCode: -1}}
 	draft := func(typ string, payload any) audit.Draft {
-		return audit.Draft{Type: typ, Actor: GatewayActor, Intent: req.Intent, Stage: req.Stage,
+		return audit.Draft{Type: typ, Actor: req.Actor, Intent: req.Intent, Stage: req.Stage,
 			SubjectHash: req.SubjectHash, AuthorizedBy: req.AuthorizedBy, Payload: payload}
 	}
 	hooks := launchHooks{
@@ -194,7 +201,9 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				out.Result = results[0]
 			}
 			onRevoked := func(ctx context.Context) error {
-				_, err := e.auditor.Append(ctx, draft(audit.TypeEgressRevoked, runRef{RunID: runID}))
+				rev := draft(audit.TypeEgressRevoked, runRef{RunID: runID})
+				rev.Actor = GatewayActor // revocation is gateway-initiated, not the caller's act
+				_, err := e.auditor.Append(ctx, rev)
 				return err
 			}
 			if cerr := e.cleanup(ctx, runID, onRevoked); cerr != nil {

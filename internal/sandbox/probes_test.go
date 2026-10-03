@@ -56,7 +56,7 @@ func TestRunProbesGroupsByProvidersAndEgressWithCompactAudit(t *testing.T) {
 		"ready":    {ID: "ready", Stdout: `{"status":{"readyReplicas":1}}`},
 		"remote":   {ID: "remote", Stdout: "ok"},
 	})
-	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Intent: probeIntent, Probes: []lastv1alpha1.Probe{
+	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor, Intent: probeIntent, Probes: []lastv1alpha1.Probe{
 		probeOf("replicas", "result.json.spec.replicas == 2"),
 		probeOf("ready", "result.json.status.readyReplicas == 2"),
 		probeOf("remote", `result.stdout == "ok"`, testEgress),
@@ -81,7 +81,7 @@ func TestRunProbesBadAssertionIsAFailedProbeNotAnError(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded)
 	aud, _ := newAudit(t)
 	outs, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "p", Stdout: "not json"})).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("p", "result.json.x == 1")}})
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{probeOf("p", "result.json.x == 1")}})
 	if err != nil || outs[0].Passed || outs[0].Error == "" {
 		t.Fatalf("outs=%+v err=%v", outs, err)
 	}
@@ -91,7 +91,7 @@ func TestRunProbesInfrastructureFailureFailsEveryProbeInTheGroup(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodPending)
 	aud, sink := newAudit(t)
 	outs, err := newExec(kube, aud, envelopeLogs()).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("a", "true"), probeOf("b", "true")}})
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{probeOf("a", "true"), probeOf("b", "true")}})
 	var res struct{ Results []probeResultJSON }
 	if es := entries(t, sink); len(es) > 0 {
 		_ = json.Unmarshal(es[len(es)-1].Payload, &res)
@@ -113,7 +113,7 @@ func TestRunProbesRejectsDuplicateIDs(t *testing.T) {
 	kube, created := fakeCluster(corev1.PodSucceeded)
 	aud, _ := newAudit(t)
 	_, err := newExec(kube, aud, envelopeLogs()).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("a", "true"), probeOf("a", "true")}})
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{probeOf("a", "true"), probeOf("a", "true")}})
 	if err == nil || len(*created) != 0 {
 		t.Fatalf("err=%v created=%v (nothing may be created)", err, *created)
 	}
@@ -124,7 +124,7 @@ func TestRunProbesFailsClosedWithoutAudit(t *testing.T) {
 	aud, sink := newAudit(t)
 	sink.SetFailPuts(true)
 	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "a"})).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("a", "true")}})
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{probeOf("a", "true")}})
 	if !errors.Is(err, audit.ErrAuditUnavailable) || len(*created) != 0 {
 		t.Fatalf("err=%v created=%v", err, *created)
 	}
@@ -231,7 +231,7 @@ func TestRunProbesInterleavedGroupsKeepInputOrderAndPairStartWithResult(t *testi
 		probeOf("b", `result.stdout == "ok"`),
 		probeOf("c", `result.stdout == "ok"`, testEgress),
 	}
-	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Probes: probes})
+	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor, Probes: probes})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestRunProbesGroupsBySetEquality(t *testing.T) {
 			kube, created := fakeCluster(corev1.PodSucceeded, demoSecret())
 			aud, _ := newAudit(t)
 			logs := podLogs(kube, map[string]runnerapi.Result{"a": {ID: "a"}, "b": {ID: "b"}})
-			_, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{
+			_, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor,
 				Probes: []lastv1alpha1.Probe{c.a(probeOf("a", "true")), c.b(probeOf("b", "true"))}})
 			if err != nil {
 				t.Fatal(err)
@@ -335,7 +335,7 @@ func TestRunProbesRedactsIssuedCredentialsInAProviderGroup(t *testing.T) {
 	logs := podLogs(kube, map[string]runnerapi.Result{"p": {ID: "p", Stdout: "token=" + secretValue}})
 	p := probeOf("p", `result.stdout.contains("REDACTED")`)
 	p.Command.Providers = []string{demoProvider}
-	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{p}})
+	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{p}})
 	if err != nil || !outs[0].Passed {
 		t.Fatalf("outs=%+v err=%v", outs, err)
 	}
@@ -361,7 +361,7 @@ func TestRunProbesMidRunFailureDoesNotStopLaterGroups(t *testing.T) {
 	})
 	aud, sink := newAudit(t)
 	logs := podLogs(kube, map[string]runnerapi.Result{"a": {ID: "a", Stdout: "ok"}, "b": {ID: "b", Stdout: "ok"}})
-	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{
+	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{
 		probeOf("a", "true", testEgress), probeOf("b", `result.stdout == "ok"`)}})
 	if err == nil || len(outs) != 2 {
 		t.Fatalf("outs=%+v err=%v", outs, err)
@@ -391,7 +391,7 @@ func TestRunProbesCancelledRunStillPairsEveryStartWithAResult(t *testing.T) {
 	p1, p2 := probeOf("a", "true", testEgress), probeOf("b", "true")
 	p1.Command.Timeout = &metav1.Duration{Duration: time.Minute}
 	p2.Command.Timeout = &metav1.Duration{Duration: time.Minute}
-	outs, err := newProbeExec(kube, aud, envelopeLogs()).RunProbes(ctx, sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{p1, p2}})
+	outs, err := newProbeExec(kube, aud, envelopeLogs()).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{p1, p2}})
 	if !errors.Is(err, context.Canceled) || outs[0].Passed || outs[1].Passed {
 		t.Fatalf("outs=%+v err=%v", outs, err)
 	}
@@ -414,7 +414,7 @@ func TestRunProbesAuditsStartBeforeAnyCredentialReadOrCreate(t *testing.T) {
 	p := probeOf("p", "true", testEgress)
 	p.Command.Providers = []string{demoProvider}
 	if _, err := newProbeExec(kube, aud, podLogs(kube, map[string]runnerapi.Result{"p": {ID: "p"}})).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{p}}); err != nil {
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{p}}); err != nil {
 		t.Fatal(err)
 	}
 	ev := l.all()
@@ -437,7 +437,7 @@ func TestRunProbesTruncatesLongAssertionErrors(t *testing.T) {
 	aud, sink := newAudit(t)
 	assertion := `result.stdout == "` + strings.Repeat("é", 3000) + `" && nope`
 	outs, err := newProbeExec(kube, aud, podLogs(kube, map[string]runnerapi.Result{"p": {ID: "p"}})).RunProbes(context.Background(),
-		sandbox.ProbeRunRequest{Probes: []lastv1alpha1.Probe{probeOf("p", assertion)}})
+		sandbox.ProbeRunRequest{Actor: testActor, Probes: []lastv1alpha1.Probe{probeOf("p", assertion)}})
 	if err != nil || outs[0].Passed || !strings.HasSuffix(outs[0].Error, "…(truncated)") || len(outs[0].Error) > 1024+len("…(truncated)") {
 		t.Fatalf("err=%v outs=%+v", err, outs)
 	}
