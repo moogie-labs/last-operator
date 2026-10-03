@@ -148,7 +148,7 @@ func TestRunPrefixCollisionRejected(t *testing.T) {
 				},
 			},
 		},
-		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: workPath, Shell: "/bin/sh"},
+		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: workPath, Shell: shellBin},
 	)
 	r := env.Results[0]
 	if r.ExitCode != -1 || !strings.Contains(r.Error, "outside") {
@@ -157,31 +157,44 @@ func TestRunPrefixCollisionRejected(t *testing.T) {
 }
 
 func TestRunSymlinkEscapeRejected(t *testing.T) {
-	// Create a symlink and then try to write through it in the same run
+	work := t.TempDir()
 	evilDir := t.TempDir()
-	env, _ := run(t, runnerapi.MaxOutput,
-		runnerapi.Command{
-			ID:     "s",
-			Script: "ln -s " + evilDir + " $WORK/lnk",
-		},
-		runnerapi.Command{
-			ID: "e",
-			Files: map[string]string{
-				"$WORK/lnk/escape.txt": badID,
-			},
-			Argv: []string{trueCmd},
-		},
-	)
 
-	// First command should succeed (creating symlink)
-	if env.Results[0].ExitCode != 0 {
-		t.Fatalf("symlink creation failed: %+v", env.Results[0])
+	// Create symlink from work/lnk to evilDir
+	lnkPath := filepath.Join(work, "lnk")
+	if err := os.Symlink(evilDir, lnkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
 	}
 
-	// Second command should fail (trying to write through symlink)
-	r := env.Results[1]
+	// Try to write through symlink
+	env := runner.Run(context.Background(),
+		runnerapi.Spec{
+			Version: runnerapi.Version,
+			Commands: []runnerapi.Command{
+				{
+					ID: "e",
+					Files: map[string]string{
+						filepath.Join(work, "lnk", "escape.txt"): badID,
+					},
+					Argv: []string{trueCmd},
+				},
+			},
+		},
+		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: shellBin},
+	)
+
+	r := env.Results[0]
 	if r.ExitCode != -1 || r.Error == "" {
 		t.Fatalf("symlink escape not rejected: result = %+v", r)
+	}
+
+	// Verify evilDir stayed empty (write was truly blocked)
+	entries, err := os.ReadDir(evilDir)
+	if err != nil {
+		t.Fatalf("readdir evilDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("evilDir not empty, write escaped: %v", entries)
 	}
 }
 
@@ -200,7 +213,7 @@ func TestRunTimeoutWithGrandchildPipe(t *testing.T) {
 				},
 			},
 		},
-		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: "/bin/sh"},
+		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: shellBin},
 	)
 	r := env.Results[0]
 	if r.ExitCode != -1 || !strings.Contains(r.Error, "timed out") {
