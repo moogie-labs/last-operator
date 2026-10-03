@@ -2,10 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
+	"unicode/utf8"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -54,11 +55,12 @@ type probeResultEntry struct {
 }
 
 type probeResultPayload struct {
-	RunID        string             `json:"runId"`
-	StartSeq     uint64             `json:"startSeq"`
-	Results      []probeResultEntry `json:"results"`
-	Error        string             `json:"error,omitempty"`
-	CleanupError string             `json:"cleanupError,omitempty"`
+	RunID         string             `json:"runId"`
+	StartSeq      uint64             `json:"startSeq"`
+	Results       []probeResultEntry `json:"results"`
+	Error         string             `json:"error,omitempty"`
+	EgressRevoked bool               `json:"egressRevoked"`
+	CleanupError  string             `json:"cleanupError,omitempty"`
 }
 
 // RunProbes runs probes grouped by identical providers and egress, one pod per group,
@@ -89,26 +91,43 @@ func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeO
 	return outcomes, errors.Join(errs...)
 }
 
-// groupProbes groups probes by their sorted providers and egress, keeping first-seen order.
+// groupProbes groups probes by the set of their providers and the set of their egress
+// (order and duplicates ignored), keeping first-seen order.
 func groupProbes(probes []lastv1alpha1.Probe) [][]lastv1alpha1.Probe {
 	var keys []string
 	groups := map[string][]lastv1alpha1.Probe{}
 	for _, p := range probes {
-		providers := slices.Clone(p.Command.Providers)
-		egress := slices.Clone(p.Command.Egress)
-		slices.Sort(providers)
-		slices.Sort(egress)
-		key := strings.Join(providers, ",") + "|" + strings.Join(egress, ",")
-		if _, ok := groups[key]; !ok {
-			keys = append(keys, key)
+		key, _ := json.Marshal(struct{ P, E []string }{uniqueSorted(p.Command.Providers), uniqueSorted(p.Command.Egress)})
+		if _, ok := groups[string(key)]; !ok {
+			keys = append(keys, string(key))
 		}
-		groups[key] = append(groups[key], p)
+		groups[string(key)] = append(groups[string(key)], p)
 	}
 	out := make([][]lastv1alpha1.Probe, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, groups[k])
 	}
 	return out
+}
+
+func uniqueSorted(xs []string) []string {
+	out := slices.Clone(xs)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+const maxAssertErrorLen = 1024
+
+// truncateError cuts s to maxAssertErrorLen bytes on a UTF-8 boundary.
+func truncateError(s string) string {
+	if len(s) <= maxAssertErrorLen {
+		return s
+	}
+	cut := maxAssertErrorLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…(truncated)"
 }
 
 func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []lastv1alpha1.Probe) ([]ProbeOutcome, error) {
@@ -129,7 +148,8 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 		cmds[i] = c
 		refs[i] = probeRef{ID: p.ID, Command: p.Command, Assert: p.Assert}
 	}
-	prep, err := e.prepare(ctx, cmds, probes[0].Command.Providers, probes[0].Command.Egress)
+	providerNames := uniqueSorted(probes[0].Command.Providers)
+	prep, err := e.prepare(ctx, cmds, providerNames, uniqueSorted(probes[0].Command.Egress))
 	if err != nil {
 		return failAll(err)
 	}
@@ -148,16 +168,17 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 		return audit.Draft{Type: typ, Actor: "gateway", Intent: intent, Payload: payload}
 	}
 	var cleanupErr string
+	var revoked bool
 	runCtx := ctx
 	// The result entry must be written even when the request was cancelled, so the
 	// audit calls ignore cancellation while the run itself still honors it.
 	err = e.auditor.Do(context.WithoutCancel(ctx),
 		draft(audit.TypeProbeStart, probeStart{RunID: runID, Image: e.cfg.Pod.Image, Probes: refs,
-			Providers: probes[0].Command.Providers, Egress: ruleStrings(prep.rules), Credentials: issued}),
+			Providers: providerNames, Egress: ruleStrings(prep.rules), Credentials: issued}),
 		func(context.Context) (any, error) {
 			ctx := runCtx
 			results, runErr := e.launch(ctx, runID, prep, launchHooks{})
-			if cerr := e.cleanup(ctx, runID, nil); cerr != nil {
+			if cerr := e.cleanup(ctx, runID, func(context.Context) error { revoked = true; return nil }); cerr != nil {
 				cleanupErr = cerr.Error()
 			}
 			if runErr != nil {
@@ -177,10 +198,10 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 				case r.Error != "":
 					o.Error = r.Error
 				default:
-					passed, aerr := probe.Evaluate(p.Assert, probe.Result{ExitCode: r.ExitCode, Stdout: r.Stdout, Stderr: r.Stderr})
+					passed, aerr := probe.Evaluate(ctx, p.Assert, probe.Result{ExitCode: r.ExitCode, Stdout: r.Stdout, Stderr: r.Stderr})
 					o.Passed = passed && aerr == nil
 					if aerr != nil {
-						o.Error = aerr.Error()
+						o.Error = truncateError(aerr.Error())
 					}
 				}
 				outcomes[i] = o
@@ -188,13 +209,17 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 			return nil, nil
 		},
 		func(start audit.Entry, _ any, actionErr error) audit.Draft {
-			p := probeResultPayload{RunID: runID, StartSeq: start.Seq, CleanupError: cleanupErr}
+			p := probeResultPayload{RunID: runID, StartSeq: start.Seq, EgressRevoked: revoked, CleanupError: cleanupErr}
 			if actionErr != nil {
 				p.Error = actionErr.Error()
 			}
-			for _, o := range outcomes {
-				if o.ID == "" {
-					continue
+			for i, o := range outcomes {
+				if o.ID == "" { // the action failed before this probe was judged
+					msg := "sandbox: probe did not run"
+					if actionErr != nil {
+						msg = actionErr.Error()
+					}
+					o = ProbeOutcome{ID: probes[i].ID, Result: runnerapi.Result{ID: probes[i].ID, ExitCode: -1}, Error: msg}
 				}
 				p.Results = append(p.Results, probeResultEntry{ID: o.ID, ExitCode: o.Result.ExitCode,
 					Stdout: o.Result.Stdout, Stderr: o.Result.Stderr, StdoutTruncated: o.Result.StdoutTruncated,

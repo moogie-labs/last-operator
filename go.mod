@@ -3,12 +3,12 @@ module github.com/moogie-labs/last-operator
 go 1.26.0
 
 require (
+	cel.dev/cel-go v0.32.0
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
 	github.com/aws/smithy-go v1.28.2
-	github.com/google/cel-go v0.31.0
 	github.com/gowebpki/jcs v1.0.2
 	github.com/prometheus/client_golang v1.24.0
 	github.com/spf13/cobra v1.10.2
@@ -77,6 +77,7 @@ require (
 	github.com/go-openapi/swag/stringutils v0.27.1 // indirect
 	github.com/go-openapi/swag/typeutils v0.27.1 // indirect
 	github.com/go-openapi/swag/yamlutils v0.27.1 // indirect
+	github.com/google/cel-go v0.29.2 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
