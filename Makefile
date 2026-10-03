@@ -304,4 +304,4 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'value: "system:serviceaccount:last-system:last-operator"'
 	helm template last charts/last-operator -n last-system | grep -q 'containerPort: 9090'
 	helm template last charts/last-operator -n last-system | grep -q 'resources: \["tokenreviews"\]'
-	helm template last charts/last-operator -n last-system | grep -q 'name: last-sandbox-runner'
+	helm template last charts/last-operator -n last-system | awk '/name: last-sandbox-runner/{f=1} f&&/^---/{exit} f' | grep -q '^automountServiceAccountToken: false'

@@ -4,7 +4,7 @@ image:
   pullPolicy: IfNotPresent
 
 namespaces:
-  create: true          # set false to pre-create namespaces yourself (see audit.external.existingSecret)
+  create: true          # set false to pre-create the gateway, audit and sandbox namespaces yourself (see audit.external.existingSecret)
   gateway: last-gateway
   audit: last-audit
   sandbox: last-sandbox
