@@ -165,7 +165,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	runID := e.cfg.NewRunID()
 	out := RunResult{RunID: runID, Result: runnerapi.Result{ID: req.Command.ID, ExitCode: -1}}
 	draft := func(typ string, payload any) audit.Draft {
-		return audit.Draft{Type: typ, Actor: "gateway", Intent: req.Intent, Stage: req.Stage,
+		return audit.Draft{Type: typ, Actor: GatewayActor, Intent: req.Intent, Stage: req.Stage,
 			SubjectHash: req.SubjectHash, AuthorizedBy: req.AuthorizedBy, Payload: payload}
 	}
 	hooks := launchHooks{

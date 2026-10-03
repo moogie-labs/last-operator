@@ -7,6 +7,7 @@ const (
 	LabelRun       = "last.moogie-labs.com/run"
 	LabelName      = "app.kubernetes.io/name"
 	NameValue      = "last-sandbox"
+	GatewayActor   = "gateway"
 )
 
 // RunLabels are carried by every object a run creates, so cleanup and the reaper can find them.

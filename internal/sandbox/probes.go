@@ -165,7 +165,7 @@ func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []la
 		issued = append(issued, cp.Issued)
 	}
 	draft := func(typ string, payload any) audit.Draft {
-		return audit.Draft{Type: typ, Actor: "gateway", Intent: intent, Payload: payload}
+		return audit.Draft{Type: typ, Actor: GatewayActor, Intent: intent, Payload: payload}
 	}
 	var cleanupErr string
 	var revoked bool
