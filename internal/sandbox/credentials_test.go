@@ -270,6 +270,23 @@ func TestRaiseTokenTTL(t *testing.T) {
 	}
 }
 
+func TestRaiseTokenTTLGuards(t *testing.T) {
+	// Test: skips nil Provider without panicking
+	plans := []sandbox.CredentialPlan{{Provider: nil, TokenTTL: 5 * time.Minute}}
+	sandbox.RaiseTokenTTL(plans, 10*time.Minute) // should not panic
+	if plans[0].TokenTTL != 5*time.Minute {
+		t.Fatalf("nil Provider TokenTTL changed")
+	}
+
+	// Test: raises zero-TTL kubernetes plan
+	pk0 := k8sProvider("k8s-zero")
+	plans = []sandbox.CredentialPlan{{Provider: pk0, TokenTTL: 0}}
+	sandbox.RaiseTokenTTL(plans, 10*time.Minute)
+	if plans[0].TokenTTL != 10*time.Minute {
+		t.Fatalf("zero TokenTTL = %v, want raised to 10m", plans[0].TokenTTL)
+	}
+}
+
 func TestTokenTTLObservedByReactor(t *testing.T) {
 	ctx := context.Background()
 	var ttl int64
@@ -311,6 +328,10 @@ func TestTokenRequestValidation(t *testing.T) {
 		return true, tr, nil
 	})
 	plans, _ := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	// Verify the plan has the correct SA reference
+	if !strings.Contains(plans[0].Issued.ServiceAccount, "deployer") {
+		t.Fatalf("Issued.ServiceAccount = %q, should contain deployer", plans[0].Issued.ServiceAccount)
+	}
 	_, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans)
 	if err != nil {
 		t.Fatal(err)
@@ -370,22 +391,66 @@ func TestKubernetesMountsAndVolumes(t *testing.T) {
 
 func TestTokenMintErrorPath(t *testing.T) {
 	ctx := context.Background()
-	kube := fake.NewClientset()
+	// Create env-secret provider with secret
+	envP := envProvider()
+	// Create kubernetes provider that will fail
+	k8sP := k8sProvider("k8s-fail")
+
+	// Setup fake kube with env-secret and token creation that fails
+	kube := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: demoCreds, Namespace: gatewayNS},
+		Data: map[string][]byte{
+			tokenKey:  []byte(secretValue),
+			configKey: []byte("cfg-" + secretValue),
+		},
+	})
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		if a.GetSubresource() != "token" {
+		if a.GetSubresource() != tokenKey {
 			return false, nil, nil
 		}
-		return true, nil, fmt.Errorf("token creation failed")
+		// Return error with a distinctive token-like string
+		return true, nil, fmt.Errorf("denied (token=leak-me-123)")
 	})
-	plans, _ := sandbox.PlanCredentials(ctx, providers(k8sProvider("cluster")), gatewayNS, []string{"cluster"})
-	_, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans)
+
+	// Order: env-secret first, then kubernetes (so env-secret Secret is read before mint fails)
+	plans, _ := sandbox.PlanCredentials(ctx, providers(envP, k8sP), gatewayNS, []string{demoProvider, "k8s-fail"})
+	m, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans)
+
+	// Assert error is non-nil
 	if err == nil {
 		t.Fatal("expected error")
 	}
+
 	errStr := err.Error()
-	// Error must not contain token or secret values
+	// Error must not contain secret value
 	if strings.Contains(errStr, secretValue) {
 		t.Fatal("error contains secret value")
+	}
+	// Error must contain kubernetes provider name and SA reference
+	if !strings.Contains(errStr, "k8s-fail") {
+		t.Fatal("error missing provider name")
+	}
+	if !strings.Contains(errStr, gatewayNS+"/") {
+		t.Fatal("error missing namespace/SA reference")
+	}
+	// Materialized must be zero
+	if m.Secret != nil || len(m.Env) != 0 || len(m.Volumes) != 0 {
+		t.Fatalf("Materialized not zero on error: %+v", m)
+	}
+}
+
+// Verify minted token does not appear in Issued when JSON-marshalled
+func TestTokenValueNotInIssued(t *testing.T) {
+	ctx := context.Background()
+	kube := tokenClient("secret-token-xyz", nil)
+	plans, _ := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	_, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, _ := json.Marshal(plans[0].Issued)
+	if strings.Contains(string(issued), "secret-token-xyz") {
+		t.Fatalf("token value leaked in Issued: %s", issued)
 	}
 }
 

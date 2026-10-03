@@ -154,7 +154,10 @@ func RaiseTokenTTL(plans []CredentialPlan, minTTL time.Duration) {
 	minTTLRounded = time.Duration(secs) * time.Second
 
 	for i := range plans {
-		if plans[i].Provider.Spec.Type == lastv1alpha1.ProviderKubernetes && plans[i].TokenTTL > 0 && plans[i].TokenTTL < minTTL {
+		if plans[i].Provider == nil {
+			continue
+		}
+		if plans[i].Provider.Spec.Type == lastv1alpha1.ProviderKubernetes && plans[i].TokenTTL < minTTL {
 			plans[i].TokenTTL = minTTLRounded
 			plans[i].Issued.TTL = minTTLRounded.String()
 		}
