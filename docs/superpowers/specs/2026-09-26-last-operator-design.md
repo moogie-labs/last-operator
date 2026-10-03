@@ -737,8 +737,9 @@ probes:
   ManagedResource cannot change what runs.
 - The `ManagedResource` controller runs probes on the schedule in §10.1
   and does not call the LLM. All probes of one Intent that share the
-  same provider set and image run in a single sandbox pod: one **probe
-  run**.
+  same provider set, egress set, and image run in a single sandbox pod:
+  one **probe run**. (Grouping by egress as well keeps a probe from
+  receiving network access granted only to its neighbours.)
 - If an assertion fails, `InSync=False`, the Intent moves to `Drifted`,
   and the LLM builds a remediation plan.
 
@@ -1182,6 +1183,7 @@ The CRs emit standard Kubernetes Events for phase transitions.
 | Credential leakage via LLM context | Credentials are never returned to the operator; injected only into the sandbox |
 | Operator hides its tracks | Fail-closed WORM audit written by the gateway; hash chain + signatures + compliance lock |
 | Command escapes its scope | Sandbox with no API token, per-execution egress, short-lived credentials limited to the named Providers |
+| Operator reads sandbox state directly | Operator RBAC has no access to pods, `pods/log`, or Secrets in the sandbox namespace (namespaced Roles, not a ClusterRole); results reach it only through the gateway, after redaction and audit |
 
 ### 17.2 Known limitations
 
@@ -1224,6 +1226,14 @@ The CRs emit standard Kubernetes Events for phase transitions.
   must use an external registry.
 - **Built images can contain vulnerable packages.** Images are frozen at
   build time and not rescanned or rebuilt automatically.
+- **A command can falsify its own result.** The runner and the command
+  share a UID, so a command (or a child that escapes its process group)
+  can write a forged `LAST-RESULT` line to the runner's stdout and
+  override its own, or a sibling probe's, exit code and output. The
+  script itself is still recorded in `command.start`, and every such
+  command was planned and approved.
+- **Credential redaction is best-effort.** A command that re-encodes a
+  credential value defeats it (§11.1).
 - **Probe reliability** depends on the LLM writing good probes. The
   Verifying phase catches probes that fail immediately, but not probes
   that pass trivially.
