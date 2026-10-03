@@ -91,7 +91,7 @@ func TestReapOrphansReapsByNewestObjectAge(t *testing.T) {
 	}
 }
 
-func TestReapOrphansWithNegativeAgeReapsEverything(t *testing.T) {
+func TestReapOrphansWithZeroAgeReapsEverything(t *testing.T) {
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	future := now.Add(5 * time.Second)
 	kube, _ := fakeCluster(corev1.PodSucceeded, &corev1.Pod{ObjectMeta: runMeta("last-run-x", "x", future)})
@@ -107,6 +107,8 @@ func TestReapOrphansCountsOnlySuccessfulCleanups(t *testing.T) {
 	objs := []runtime.Object{
 		&corev1.Pod{ObjectMeta: runMeta("pod-a", "a", old)},
 		&corev1.Pod{ObjectMeta: runMeta("pod-b", "b", old)},
+		&corev1.Secret{ObjectMeta: runMeta("secret-b", "b", old)},
+		&networkingv1.NetworkPolicy{ObjectMeta: runMeta("policy-b", "b", old)},
 	}
 	kube, _ := fakeCluster(corev1.PodSucceeded, objs...)
 	// Make Pod deletion fail for run "a"
@@ -121,12 +123,19 @@ func TestReapOrphansCountsOnlySuccessfulCleanups(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("reaped=%d, want 1 (only run b succeeded)", n)
 	}
-	if err == nil || !strings.Contains(err.Error(), "a") {
-		t.Fatalf("error should mention run 'a': %v", err)
+	if err == nil || !strings.Contains(err.Error(), "reap run a:") {
+		t.Fatalf("error should name run a: %v", err)
 	}
-	// Run "b" should be deleted
-	if _, err := kube.CoreV1().Pods(sandboxNS).Get(context.Background(), "pod-b", metav1.GetOptions{}); err == nil {
+	// Every object of run "b" should be deleted
+	ctx := context.Background()
+	if _, err := kube.CoreV1().Pods(sandboxNS).Get(ctx, "pod-b", metav1.GetOptions{}); err == nil {
 		t.Fatal("run b pod survived")
+	}
+	if _, err := kube.CoreV1().Secrets(sandboxNS).Get(ctx, "secret-b", metav1.GetOptions{}); err == nil {
+		t.Fatal("run b secret survived")
+	}
+	if _, err := kube.NetworkingV1().NetworkPolicies(sandboxNS).Get(ctx, "policy-b", metav1.GetOptions{}); err == nil {
+		t.Fatal("run b policy survived")
 	}
 }
 
@@ -152,6 +161,10 @@ func TestReapOrphansIgnoresForeignManagedByObjects(t *testing.T) {
 			Labels:            map[string]string{sandbox.LabelRun: "x", sandbox.LabelManagedBy: foreignManagedBy},
 			CreationTimestamp: metav1.NewTime(old),
 		}},
+		// Old objects of each kind with no labels at all
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bare-pod", Namespace: sandboxNS, CreationTimestamp: metav1.NewTime(old)}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "bare-secret", Namespace: sandboxNS, CreationTimestamp: metav1.NewTime(old)}},
+		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "bare-policy", Namespace: sandboxNS, CreationTimestamp: metav1.NewTime(old)}},
 	}
 	kube, _ := fakeCluster(corev1.PodSucceeded, objs...)
 	aud, _ := newAudit(t)
@@ -168,6 +181,15 @@ func TestReapOrphansIgnoresForeignManagedByObjects(t *testing.T) {
 	}
 	if _, err := kube.NetworkingV1().NetworkPolicies(sandboxNS).Get(ctx, "foreign-policy", metav1.GetOptions{}); err != nil {
 		t.Fatal("foreign policy was deleted")
+	}
+	if _, err := kube.CoreV1().Pods(sandboxNS).Get(ctx, "bare-pod", metav1.GetOptions{}); err != nil {
+		t.Fatal("unlabelled pod was deleted")
+	}
+	if _, err := kube.CoreV1().Secrets(sandboxNS).Get(ctx, "bare-secret", metav1.GetOptions{}); err != nil {
+		t.Fatal("unlabelled secret was deleted")
+	}
+	if _, err := kube.NetworkingV1().NetworkPolicies(sandboxNS).Get(ctx, "bare-policy", metav1.GetOptions{}); err != nil {
+		t.Fatal("unlabelled policy was deleted")
 	}
 }
 
