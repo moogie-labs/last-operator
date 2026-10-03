@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -28,8 +29,17 @@ const (
 )
 
 var (
+	envNamePattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	reservedEnvNames = map[string]bool{
+		"PATH": true, "HOME": true, "KUBECONFIG": true, "SHELL": true,
+		"USER": true, "PWD": true, "TMPDIR": true,
+	}
+)
+
+var (
 	ErrMultipleKubernetesProviders = errors.New("sandbox: at most one kubernetes provider per command")
 	ErrUnsupportedProvider         = errors.New("sandbox: unsupported provider type")
+	ErrReservedEnv                 = errors.New("sandbox: reserved or invalid env var name")
 )
 
 // ProviderGetter reads a cluster-scoped Provider by name.
@@ -49,6 +59,7 @@ type IssuedCredential struct {
 type CredentialPlan struct {
 	Provider *lastv1alpha1.Provider
 	Issued   IssuedCredential
+	TokenTTL time.Duration // the effective token lifetime for kubernetes providers
 }
 
 // CredentialConfig locates the namespaces and the API server.
@@ -72,6 +83,7 @@ type Materialized struct {
 func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace string, names []string) ([]CredentialPlan, error) {
 	plans := make([]CredentialPlan, 0, len(names))
 	envSeen := map[string]string{}
+	filePathsSeen := map[string]string{}
 	kubernetesCount := 0
 	for _, name := range names {
 		p, err := get(ctx, name)
@@ -85,6 +97,9 @@ func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace 
 				return nil, fmt.Errorf("sandbox: provider %q has no secretRef", name)
 			}
 			for _, v := range sortedKeys(p.Spec.Env) {
+				if err := isValidEnvName(v); err != nil {
+					return nil, fmt.Errorf("sandbox: provider %q: %w (env var %q)", name, err, v)
+				}
 				if other, dup := envSeen[v]; dup {
 					return nil, fmt.Errorf("sandbox: env var %s is set by both provider %q and %q", v, other, name)
 				}
@@ -96,7 +111,12 @@ func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace 
 				if !underWork(path) {
 					return nil, fmt.Errorf("sandbox: provider %q file path %q must be under /work/", name, path)
 				}
-				issued.Files = append(issued.Files, path)
+				cleanPath := filepath.Clean(path)
+				if other, dup := filePathsSeen[cleanPath]; dup {
+					return nil, fmt.Errorf("sandbox: file path %q (from provider %q) conflicts with provider %q", cleanPath, name, other)
+				}
+				filePathsSeen[cleanPath] = name
+				issued.Files = append(issued.Files, cleanPath)
 			}
 		case lastv1alpha1.ProviderKubernetes:
 			kubernetesCount++
@@ -111,9 +131,34 @@ func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace 
 		default:
 			return nil, fmt.Errorf("%w: %q (provider %q)", ErrUnsupportedProvider, p.Spec.Type, name)
 		}
-		plans = append(plans, CredentialPlan{Provider: p, Issued: issued})
+		plan := CredentialPlan{Provider: p, Issued: issued}
+		if p.Spec.Type == lastv1alpha1.ProviderKubernetes {
+			plan.TokenTTL = tokenTTL(p)
+		}
+		plans = append(plans, plan)
 	}
 	return plans, nil
+}
+
+// RaiseTokenTTL adjusts the token lifetime for kubernetes providers to cover the pod's
+// activeDeadline plus startup grace. The executor calls it before the credential.issued
+// entry is written, so the audit entry records the effective lifetime.
+func RaiseTokenTTL(plans []CredentialPlan, minTTL time.Duration) {
+	// Round up to whole seconds
+	var minTTLRounded time.Duration
+	nanos := minTTL.Nanoseconds()
+	secs := nanos / int64(time.Second)
+	if nanos%int64(time.Second) != 0 {
+		secs++
+	}
+	minTTLRounded = time.Duration(secs) * time.Second
+
+	for i := range plans {
+		if plans[i].Provider.Spec.Type == lastv1alpha1.ProviderKubernetes && plans[i].TokenTTL > 0 && plans[i].TokenTTL < minTTL {
+			plans[i].TokenTTL = minTTLRounded
+			plans[i].Issued.TTL = minTTLRounded.String()
+		}
+	}
 }
 
 // Materialize reads provider secrets and mints tokens into a per-run Secret
@@ -125,10 +170,16 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 	}
 	secretName := "last-run-" + runID + "-creds"
 	data := map[string][]byte{}
-	for _, plan := range plans {
-		p := plan.Provider
+	for _, cp := range plans {
+		if cp.Provider == nil {
+			return Materialized{}, fmt.Errorf("sandbox: credential plan has nil provider")
+		}
+		p := cp.Provider
 		switch p.Spec.Type {
 		case lastv1alpha1.ProviderEnvSecret:
+			if p.Spec.SecretRef == nil {
+				return Materialized{}, fmt.Errorf("sandbox: provider %q has nil secretRef", p.Name)
+			}
 			src, err := kube.CoreV1().Secrets(cfg.ProviderNamespace).Get(ctx, p.Spec.SecretRef.Name, metav1.GetOptions{})
 			if err != nil {
 				return Materialized{}, fmt.Errorf("sandbox: provider %q secret: %w", p.Name, err)
@@ -154,8 +205,15 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 				m.Mounts = append(m.Mounts, corev1.VolumeMount{Name: credsVolume, MountPath: filepath.Clean(p.Spec.Files[srcKey]), SubPath: key, ReadOnly: true})
 			}
 		case lastv1alpha1.ProviderKubernetes:
+			if p.Spec.Kubernetes == nil {
+				return Materialized{}, fmt.Errorf("sandbox: provider %q has nil kubernetes section", p.Name)
+			}
 			sa := p.Spec.Kubernetes.ServiceAccountRef.Name
-			secs := int64(tokenTTL(p).Seconds())
+			ttl := cp.TokenTTL
+			if ttl == 0 {
+				ttl = tokenTTL(p)
+			}
+			secs := int64(ttl.Seconds())
 			tr, err := kube.CoreV1().ServiceAccounts(cfg.ProviderNamespace).CreateToken(ctx, sa,
 				&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &secs}}, metav1.CreateOptions{})
 			if err != nil {
@@ -165,6 +223,8 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 			data[p.Name+".kubeconfig"] = []byte(kubeconfig(cfg.APIServerHost, CredsMountPath+"/"+p.Name+".token"))
 			m.Env = append(m.Env, corev1.EnvVar{Name: "KUBECONFIG", Value: CredsMountPath + "/" + p.Name + ".kubeconfig"})
 			m.NeedsAPIServer = true
+		default:
+			return Materialized{}, fmt.Errorf("%w: %q (provider %q)", ErrUnsupportedProvider, p.Spec.Type, p.Name)
 		}
 	}
 	m.Secret = &corev1.Secret{
@@ -236,6 +296,19 @@ func sortedKeys(m map[string]string) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+func isValidEnvName(name string) error {
+	if !envNamePattern.MatchString(name) {
+		return ErrReservedEnv
+	}
+	if reservedEnvNames[name] {
+		return ErrReservedEnv
+	}
+	if strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") || strings.HasPrefix(name, "LAST_") {
+		return ErrReservedEnv
+	}
+	return nil
 }
 
 func ptrInt32(v int32) *int32 {
