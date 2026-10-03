@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -162,7 +163,8 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.Actor == "" {
 		return RunResult{}, errors.New("sandbox: run request has no actor")
 	}
-	p, err := e.prepare(ctx, []lastv1alpha1.Command{req.Command}, req.Command.Providers, req.Command.Egress)
+	providerNames := uniqueSorted(req.Command.Providers)
+	p, err := e.prepare(ctx, []lastv1alpha1.Command{req.Command}, providerNames, req.Command.Egress)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -193,7 +195,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	// audit calls ignore cancellation while the run itself still honors it.
 	err = e.auditor.Do(context.WithoutCancel(ctx),
 		draft(audit.TypeCommandStart, commandStart{RunID: runID, Image: e.cfg.Pod.Image, Command: req.Command,
-			Providers: req.Command.Providers, Egress: ruleStrings(p.rules)}),
+			Providers: providerNames, Egress: ruleStrings(p.rules)}),
 		func(context.Context) (any, error) {
 			ctx := runCtx
 			results, runErr := e.launch(ctx, runID, p, hooks)
@@ -240,6 +242,9 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 	}
 	plans, err := PlanCredentials(ctx, e.providers, e.cfg.ProviderNamespace, providers)
 	if err != nil {
+		return prepared{}, err
+	}
+	if err := checkFileConflicts(cmds, plans); err != nil {
 		return prepared{}, err
 	}
 	// A kubernetes token must outlive the pod: its deadline plus the startup grace.
@@ -497,6 +502,24 @@ func (r redactor) redact(s string) string {
 		s = strings.ReplaceAll(s, n, redacted)
 	}
 	return s
+}
+
+// checkFileConflicts rejects a command file that would replace, or be written inside,
+// a provider's credential file mount.
+func checkFileConflicts(cmds []lastv1alpha1.Command, plans []CredentialPlan) error {
+	for i, c := range cmds {
+		for _, path := range sortedKeys(c.Files) {
+			clean := filepath.Clean(path)
+			for _, cp := range plans {
+				for _, mount := range cp.Issued.Files {
+					if clean == mount || strings.HasPrefix(clean, mount+"/") {
+						return fmt.Errorf("sandbox: command %d: file path %q conflicts with provider %q file mount %s", i, path, cp.Issued.Provider, mount)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func parseRules(egress []string) ([]EgressRule, error) {

@@ -2,6 +2,8 @@ package sandbox_test
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -103,5 +105,62 @@ func TestExecutorEgressRevokedCarriesReasonCompleted(t *testing.T) {
 	got := revokedPayloads(t, entries(t, sink))
 	if len(got) != 1 || got[0] != `{"reason":"completed","runId":"`+runID+`"}` {
 		t.Fatalf("executor egress.revoked = %v", got)
+	}
+}
+
+func TestRunDeduplicatesProviders(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, sink := newAudit(t)
+	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider, demoProvider}, nil)})
+	if err != nil {
+		t.Fatalf("a repeated provider must be collapsed, got %v", err)
+	}
+	for _, e := range entries(t, sink) {
+		if e.Type != audit.TypeCommandStart {
+			continue
+		}
+		var p struct {
+			Providers []string `json:"providers"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Providers) != 1 || p.Providers[0] != demoProvider {
+			t.Fatalf("command.start providers = %v", p.Providers)
+		}
+	}
+}
+
+func TestRunRejectsCommandFilesOnProviderMounts(t *testing.T) {
+	providerFile := "/work/.demo/" + configKey // envProvider mounts the config key here
+	for name, path := range map[string]string{
+		"equal":  providerFile,
+		"nested": providerFile + "/child",
+		"dirty":  "/work/.demo/./" + configKey,
+	} {
+		t.Run(name, func(t *testing.T) {
+			kube, created := fakeCluster(corev1.PodSucceeded, demoSecret())
+			aud, sink := newAudit(t)
+			c := cmd([]string{demoProvider}, nil)
+			c.Files = map[string]string{path: "overwrite"}
+			_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
+			if err == nil || !strings.Contains(err.Error(), providerFile) {
+				t.Fatalf("err = %v, want a conflict naming %s", err, providerFile)
+			}
+			if len(entryTypes(entries(t, sink))) != 0 || len(*created) != 0 {
+				t.Fatal("rejected command still produced audit entries or objects")
+			}
+		})
+	}
+}
+
+func TestRunAllowsCommandFilesBesideProviderMounts(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, _ := newAudit(t)
+	c := cmd([]string{demoProvider}, nil)
+	c.Files = map[string]string{"/work/.demo/" + configKey + "-extra": "ok", "/work/app.yaml": "ok"}
+	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c}); err != nil {
+		t.Fatal(err)
 	}
 }
