@@ -155,15 +155,16 @@ func (e *Executor) runProbeGroup(ctx context.Context, actor, intent string, prob
 		refs[i] = probeRef{ID: p.ID, Command: p.Command, Assert: p.Assert}
 	}
 	providerNames := uniqueSorted(probes[0].Command.Providers)
-	prep, err := e.prepare(ctx, cmds, providerNames, uniqueSorted(probes[0].Command.Egress))
-	if err != nil {
-		return failAll(err)
-	}
+	// Take the slot first so a queued group reads fresh Provider and API server data.
 	release, err := e.sched.Acquire(ctx, PriorityProbe)
 	if err != nil {
 		return failAll(err)
 	}
 	defer release()
+	prep, err := e.prepare(ctx, cmds, providerNames, uniqueSorted(probes[0].Command.Egress))
+	if err != nil {
+		return failAll(err)
+	}
 
 	runID := e.cfg.NewRunID()
 	issued := make([]IssuedCredential, 0, len(prep.plans))

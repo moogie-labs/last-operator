@@ -164,15 +164,17 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, errors.New("sandbox: run request has no actor")
 	}
 	providerNames := uniqueSorted(req.Command.Providers)
-	p, err := e.prepare(ctx, []lastv1alpha1.Command{req.Command}, providerNames, req.Command.Egress)
-	if err != nil {
-		return RunResult{}, err
-	}
+	// Take the slot first: a queued run must read Providers and the API server when it
+	// starts, not when it was submitted.
 	release, err := e.sched.Acquire(ctx, req.Priority)
 	if err != nil {
 		return RunResult{}, err
 	}
 	defer release()
+	p, err := e.prepare(ctx, []lastv1alpha1.Command{req.Command}, providerNames, req.Command.Egress)
+	if err != nil {
+		return RunResult{}, err
+	}
 
 	runID := e.cfg.NewRunID()
 	out := RunResult{RunID: runID, Result: runnerapi.Result{ID: req.Command.ID, ExitCode: -1}}

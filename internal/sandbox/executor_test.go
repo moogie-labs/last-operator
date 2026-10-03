@@ -125,7 +125,7 @@ func newExec(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader) 
 func newExecWith(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader, ps ...*lastv1alpha1.Provider) *sandbox.Executor {
 	return sandbox.NewExecutor(kube, providers(ps...), aud, sandbox.NewScheduler(2), logs,
 		sandbox.ExecutorConfig{
-			Pod:               sandbox.PodConfig{Namespace: "last-sandbox", Image: "img:test"},
+			Pod:               sandbox.PodConfig{Namespace: "last-sandbox", Image: probeImage},
 			ProviderNamespace: "last-gateway",
 			PollInterval:      time.Millisecond,
 			DeadlineOverhead:  time.Millisecond,
@@ -721,7 +721,7 @@ func TestRunDefaultRunIDIs32HexCharacters(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded)
 	aud, _ := newAudit(t)
 	ex := sandbox.NewExecutor(kube, providers(), aud, sandbox.NewScheduler(1), envelopeLogs(runnerapi.Result{ID: "c1"}),
-		sandbox.ExecutorConfig{Pod: sandbox.PodConfig{Namespace: sandboxNS, Image: "img:test"}, PollInterval: time.Millisecond})
+		sandbox.ExecutorConfig{Pod: sandbox.PodConfig{Namespace: sandboxNS, Image: probeImage}, PollInterval: time.Millisecond})
 	res, err := ex.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
 	if err != nil {
 		t.Fatal(err)
