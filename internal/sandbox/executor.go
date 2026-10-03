@@ -133,8 +133,11 @@ type egressGranted struct {
 	Rules []string `json:"rules"`
 }
 
-type runRef struct {
-	RunID string `json:"runId"`
+// egressRevoked is the one egress.revoked payload. Reason is "completed" for the
+// executor's own cleanup and "reaped" for the reaper.
+type egressRevoked struct {
+	RunID  string `json:"runId"`
+	Reason string `json:"reason"`
 }
 
 // prepared is a validated run: nothing has been audited or created yet.
@@ -201,10 +204,10 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				out.Result = results[0]
 			}
 			onRevoked := func(ctx context.Context) error {
-				rev := draft(audit.TypeEgressRevoked, runRef{RunID: runID})
+				rev := draft(audit.TypeEgressRevoked, egressRevoked{RunID: runID, Reason: "completed"})
 				rev.Actor = GatewayActor // revocation is gateway-initiated, not the caller's act
 				_, err := e.auditor.Append(ctx, rev)
-				return err
+				return classifyAudit(err)
 			}
 			if cerr := e.cleanup(ctx, runID, onRevoked); cerr != nil {
 				out.CleanupError = cerr.Error()

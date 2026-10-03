@@ -13,11 +13,6 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit"
 )
 
-type reapedRef struct {
-	RunID  string `json:"runId"`
-	Reason string `json:"reason"`
-}
-
 // ReapOrphans deletes sandbox runs that outlived their deadline: leftovers of a
 // gateway that stopped mid-run. Credentials and egress grants must not outlive their
 // run (spec §11.1).
@@ -93,7 +88,7 @@ func (e *Executor) ReapOrphans(ctx context.Context, margin time.Duration, now ti
 
 		onRevoked := func(ctx context.Context) error {
 			_, err := e.auditor.Append(ctx, audit.Draft{Type: audit.TypeEgressRevoked, Actor: GatewayActor,
-				Payload: reapedRef{RunID: id, Reason: "reaped"}})
+				Payload: egressRevoked{RunID: id, Reason: "reaped"}})
 			return classifyAudit(err)
 		}
 		if err := e.cleanup(ctx, id, onRevoked); err != nil {

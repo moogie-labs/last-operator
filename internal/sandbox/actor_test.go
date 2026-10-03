@@ -81,3 +81,27 @@ func TestRunProbesRejectsAnEmptyActorBeforeAnythingIsWritten(t *testing.T) {
 		t.Fatal("rejected probes still produced audit entries or objects")
 	}
 }
+
+func revokedPayloads(t *testing.T, es []audit.Entry) []string {
+	t.Helper()
+	var out []string
+	for _, e := range es {
+		if e.Type == audit.TypeEgressRevoked {
+			out = append(out, string(e.Payload))
+		}
+	}
+	return out
+}
+
+func TestExecutorEgressRevokedCarriesReasonCompleted(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, sink := newAudit(t)
+	ex := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"}))
+	if _, err := ex.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd([]string{demoProvider}, []string{testEgress})}); err != nil {
+		t.Fatal(err)
+	}
+	got := revokedPayloads(t, entries(t, sink))
+	if len(got) != 1 || got[0] != `{"reason":"completed","runId":"`+runID+`"}` {
+		t.Fatalf("executor egress.revoked = %v", got)
+	}
+}

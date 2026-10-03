@@ -83,7 +83,7 @@ func TestReapOrphansReapsByNewestObjectAge(t *testing.T) {
 			revoked = append(revoked, e)
 		}
 	}
-	if len(revoked) != 1 || !strings.Contains(string(revoked[0].Payload), `"runId":"old"`) {
+	if len(revoked) != 1 || string(revoked[0].Payload) != `{"reason":"reaped","runId":"old"}` {
 		t.Fatalf("revoked entries = %+v", revoked)
 	}
 
