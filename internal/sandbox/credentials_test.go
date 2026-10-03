@@ -317,12 +317,13 @@ func TestTokenRequestValidation(t *testing.T) {
 	// The TokenRequest reactor asserts namespace and ServiceAccount name
 	ctx := context.Background()
 	kube := fake.NewClientset()
-	var gotNamespace string
+	var gotNamespace, gotSA string
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenKey {
 			return false, nil, nil
 		}
 		gotNamespace = a.GetNamespace()
+		gotSA = a.(k8stesting.CreateActionImpl).Name
 		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
 		tr.Status.Token = "test-token"
 		return true, tr, nil
@@ -338,6 +339,9 @@ func TestTokenRequestValidation(t *testing.T) {
 	}
 	if gotNamespace != gatewayNS {
 		t.Fatalf("TokenRequest namespace = %q, want %q", gotNamespace, gatewayNS)
+	}
+	if want := plans[0].Provider.Spec.Kubernetes.ServiceAccountRef.Name; gotSA != want || gotSA == "" {
+		t.Fatalf("TokenRequest service account = %q, want %q", gotSA, want)
 	}
 }
 
