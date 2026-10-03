@@ -23,6 +23,7 @@ const (
 	CredsMountPath  = "/last/creds"
 	KubeCAMountPath = "/last/kube-ca"
 	DefaultTokenTTL = 10 * time.Minute
+	tokenTTLSlack   = time.Minute // tolerated shortfall between requested and granted token lifetime
 	credsVolume     = "creds"
 	kubeCAVolume    = "kube-ca"
 	kubeRootCA      = "kube-root-ca.crt" // ConfigMap present in every namespace
@@ -217,10 +218,17 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 				ttl = tokenTTL(p)
 			}
 			secs := int64(ttl.Seconds())
+			requestedAt := time.Now()
 			tr, err := kube.CoreV1().ServiceAccounts(cfg.ProviderNamespace).CreateToken(ctx, sa,
 				&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &secs}}, metav1.CreateOptions{})
 			if err != nil {
 				return Materialized{}, fmt.Errorf("sandbox: provider %q token for %s/%s: %w", p.Name, cfg.ProviderNamespace, sa, err)
+			}
+			// The API server may cap the lifetime (e.g. --service-account-max-token-expiration);
+			// a token that expires before the pod must not be used silently.
+			if exp := tr.Status.ExpirationTimestamp.Time; !exp.IsZero() && exp.Before(requestedAt.Add(ttl-tokenTTLSlack)) {
+				return Materialized{}, fmt.Errorf("sandbox: provider %q token for %s/%s was capped: requested %s, granted %s",
+					p.Name, cfg.ProviderNamespace, sa, ttl, exp.Sub(requestedAt).Round(time.Second))
 			}
 			data[p.Name+".token"] = []byte(tr.Status.Token)
 			data[p.Name+".kubeconfig"] = []byte(kubeconfig(cfg.APIServerHost, CredsMountPath+"/"+p.Name+".token"))

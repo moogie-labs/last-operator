@@ -498,3 +498,53 @@ func TestMaterializeWithBadPlan(t *testing.T) {
 		t.Fatalf("nil kubernetes: err = %v", err)
 	}
 }
+
+// expiringClient mints tokens that the API server says expire after granted.
+func expiringClient(token string, granted time.Duration) *fake.Clientset {
+	kube := fake.NewClientset()
+	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() != "token" {
+			return false, nil, nil
+		}
+		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
+		tr.Status.Token = token
+		tr.Status.ExpirationTimestamp = metav1.NewTime(time.Now().Add(granted))
+		return true, tr, nil
+	})
+	return kube
+}
+
+func TestMaterializeRejectsATokenWhoseLifetimeWasCapped(t *testing.T) {
+	ctx := context.Background()
+	plans, err := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10m requested (DefaultTokenTTL), the server grants 2m.
+	_, err = sandbox.Materialize(ctx, expiringClient("tok-"+secretValue, 2*time.Minute), credCfg, runID, plans)
+	if err == nil {
+		t.Fatal("a capped token lifetime was accepted")
+	}
+	for _, want := range []string{clusterName, "10m0s", "capped"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), secretValue) {
+		t.Fatalf("error leaks the token: %v", err)
+	}
+}
+
+func TestMaterializeAcceptsATokenWithinTheSlack(t *testing.T) {
+	ctx := context.Background()
+	plans, err := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Full lifetime, and a lifetime shaved by well under the one-minute slack.
+	for _, granted := range []time.Duration{sandbox.DefaultTokenTTL, sandbox.DefaultTokenTTL - 30*time.Second} {
+		if _, err := sandbox.Materialize(ctx, expiringClient("tok-"+secretValue, granted), credCfg, runID, plans); err != nil {
+			t.Fatalf("granted %s: %v", granted, err)
+		}
+	}
+}
