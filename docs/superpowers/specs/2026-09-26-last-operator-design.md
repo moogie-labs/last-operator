@@ -812,7 +812,11 @@ Every command runs in a sandbox pod:
     only CIDR rules are supported.
 - **Output.** The gateway captures stdout, stderr (each truncated at
   1 MiB, with truncation recorded), and the exit code into the audit
-  log (`command.result`) and returns them to the operator.
+  log (`command.result`) and returns them to the operator. Before
+  either, it replaces every credential value it issued for that run
+  (raw, and base64-encoded) with `[REDACTED]`. This is best-effort: a
+  command that re-encodes a value defeats it, so short-lived
+  credentials and the audit trail remain the real controls.
 
 ### 11.2 Automatic image builds
 
@@ -1020,8 +1024,9 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 deleted, seen via watch), `suggestion.decided`, `policy.denied`.
 
 **Redaction:** credential values are never logged. Values written to
-output Secrets are logged as SHA-256 hashes. LLM payloads and command
-output are logged in full. Operators should treat the audit bucket as
+output Secrets are logged as SHA-256 hashes. LLM payloads are logged in
+full; command output is logged in full apart from the issued-credential
+redaction in §11.1. Operators should treat the audit bucket as
 sensitive (§17.3).
 
 ### 14.3 Chain continuity
