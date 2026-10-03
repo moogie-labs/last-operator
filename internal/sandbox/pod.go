@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +17,8 @@ import (
 
 const (
 	DefaultCommandTimeout = 5 * time.Minute
+	MaxCommandTimeout     = 6 * time.Hour
+	SandboxServiceAccount = "last-sandbox-runner"
 	sandboxUID            = int64(65532)
 	specVolume            = "spec"
 	workVolume            = "work"
@@ -24,6 +27,22 @@ const (
 
 // ErrImageBuildsUnsupported: image.install needs automatic image builds (spec §11.2, M4).
 var ErrImageBuildsUnsupported = errors.New("sandbox: image.install is not supported until image builds (M4)")
+
+// DefaultSandboxResources returns the default CPU, memory, and storage limits for a sandbox pod.
+func DefaultSandboxResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("100m"),
+			corev1.ResourceMemory:           resource.MustParse("256Mi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("256Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+		},
+	}
+}
 
 // RunnerSpec converts API commands into the runner's spec and returns the summed timeout.
 func RunnerSpec(cmds []lastv1alpha1.Command) (runnerapi.Spec, time.Duration, error) {
@@ -48,15 +67,23 @@ func RunnerSpec(cmds []lastv1alpha1.Command) (runnerapi.Spec, time.Duration, err
 		if c.Timeout != nil && c.Timeout.Duration > 0 {
 			timeout = c.Timeout.Duration
 		}
+		if timeout > MaxCommandTimeout {
+			id := c.ID
+			if id == "" {
+				id = fmt.Sprintf("cmd-%d", i)
+			}
+			return runnerapi.Spec{}, 0, fmt.Errorf("sandbox: command %q: timeout %s exceeds maximum %s", id, timeout, MaxCommandTimeout)
+		}
 		id := c.ID
 		if id == "" {
 			id = fmt.Sprintf("cmd-%d", i)
 		}
+		timeoutSeconds := int64((timeout + time.Second - 1) / time.Second) // round up; never 0
 		spec.Commands = append(spec.Commands, runnerapi.Command{
 			ID: id, Argv: c.Run.Argv, Script: c.Run.Script, Files: c.Files,
-			TimeoutSeconds: int64((timeout + time.Second - 1) / time.Second), // round up; never 0
+			TimeoutSeconds: timeoutSeconds,
 		})
-		total += timeout
+		total += time.Duration(timeoutSeconds) * time.Second
 	}
 	return spec, total, nil
 }
@@ -89,9 +116,19 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 	labels[LabelName] = NameValue
 	no, yes := false, true
 	uid := sandboxUID
-	deadline := int64(activeDeadline / time.Second)
+	// Round up to whole seconds with floor of 1
+	deadlineSecs := max(int64((activeDeadline+time.Second-1)/time.Second), 1)
 	workLimit := resource.MustParse("1Gi")
 	tmpLimit := resource.MustParse("64Mi")
+
+	// Start from defaults and overlay cfg.Resources
+	resources := DefaultSandboxResources()
+	if cfg.Resources.Requests != nil {
+		maps.Copy(resources.Requests, cfg.Resources.Requests)
+	}
+	if cfg.Resources.Limits != nil {
+		maps.Copy(resources.Limits, cfg.Resources.Limits)
+	}
 
 	mounts := make([]corev1.VolumeMount, 0, 3+len(creds.Mounts))
 	mounts = append(mounts,
@@ -114,10 +151,15 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "last-run-" + runID, Namespace: cfg.Namespace, Labels: labels},
 		Spec: corev1.PodSpec{
+			ServiceAccountName:           SandboxServiceAccount,
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: &no,
 			EnableServiceLinks:           &no,
-			ActiveDeadlineSeconds:        &deadline,
+			HostNetwork:                  false,
+			HostPID:                      false,
+			HostIPC:                      false,
+			ShareProcessNamespace:        &no,
+			ActiveDeadlineSeconds:        &deadlineSecs,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
@@ -128,7 +170,7 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 				ImagePullPolicy: cfg.ImagePullPolicy,
 				Env:             env,
 				VolumeMounts:    mounts,
-				Resources:       cfg.Resources,
+				Resources:       resources,
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &no,
 					ReadOnlyRootFilesystem:   &yes,
