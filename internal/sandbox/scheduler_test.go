@@ -152,3 +152,59 @@ func TestSchedulerUnderRace(t *testing.T) {
 		t.Fatalf("peak concurrency %d above cap 3", peak)
 	}
 }
+
+func TestSchedulerNoBargingHigherPriority(t *testing.T) {
+	s := sandbox.NewScheduler(1)
+	ctx := context.Background()
+	hold, _ := s.Acquire(ctx, sandbox.PriorityProbe)
+	order := make(chan sandbox.Priority, 2)
+	var wg sync.WaitGroup
+
+	// Queue a Probe waiter
+	wg.Go(func() {
+		r, _ := s.Acquire(ctx, sandbox.PriorityProbe)
+		order <- sandbox.PriorityProbe
+		r()
+	})
+	waitFor(t, func() bool { return s.Waiting(sandbox.PriorityProbe) == 1 })
+
+	// Release the holder, allowing Probe to acquire
+	hold()
+
+	// Queue an Execution waiter (higher priority) while Probe is running
+	wg.Go(func() {
+		r, _ := s.Acquire(ctx, sandbox.PriorityExecution)
+		order <- sandbox.PriorityExecution
+		r()
+	})
+
+	// Give Execution a chance to queue
+	time.Sleep(50 * time.Millisecond)
+
+	wg.Wait()
+
+	// Verify Probe was served first, then Execution
+	if first := <-order; first != sandbox.PriorityProbe {
+		t.Fatalf("first served = %d, want Probe", first)
+	}
+	if second := <-order; second != sandbox.PriorityExecution {
+		t.Fatalf("second served = %d, want Execution", second)
+	}
+}
+
+func TestSchedulerFastPathHonorsCtx(t *testing.T) {
+	s := sandbox.NewScheduler(10)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.Acquire(ctx, sandbox.PriorityProbe)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want Canceled", err)
+	}
+}
+
+func TestSchedulerWaitingClamps(t *testing.T) {
+	s := sandbox.NewScheduler(1)
+	if n := s.Waiting(sandbox.Priority(999)); n != 0 {
+		t.Fatalf("Waiting(999) = %d, want 0", n)
+	}
+}

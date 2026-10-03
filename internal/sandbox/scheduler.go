@@ -41,6 +41,9 @@ func (s *Scheduler) Acquire(ctx context.Context, p Priority) (func(), error) {
 	if p < 0 || p >= numPriorities {
 		p = PriorityProbe
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	if s.inUse < s.max && s.queuedLocked() == 0 {
 		s.inUse++
@@ -69,6 +72,9 @@ func (s *Scheduler) Acquire(ctx context.Context, p Priority) (func(), error) {
 
 // Waiting reports how many callers are queued at priority p.
 func (s *Scheduler) Waiting(p Priority) int {
+	if p < 0 || p >= numPriorities {
+		p = PriorityProbe
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.queues[p])
