@@ -42,3 +42,19 @@ func TestParseEnvelopeHandlesLargeLine(t *testing.T) {
 		t.Fatalf("large envelope: err=%v", err)
 	}
 }
+
+func TestParseEnvelopeTwoResultLines(t *testing.T) {
+	// Last result line should win
+	log := []byte(
+		runnerapi.ResultPrefix + `{"version":1,"results":[{"id":"first","exitCode":0,"stdout":"first"}]}` + "\n" +
+			"noise\n" +
+			runnerapi.ResultPrefix + `{"version":1,"results":[{"id":"second","exitCode":0,"stdout":"second"}]}` + "\n",
+	)
+	env, err := runnerapi.ParseEnvelope(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Results) != 1 || env.Results[0].ID != "second" || env.Results[0].Stdout != "second" {
+		t.Fatalf("envelope = %+v", env)
+	}
+}

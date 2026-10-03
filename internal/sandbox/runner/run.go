@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
@@ -58,6 +59,13 @@ func runOne(ctx context.Context, c runnerapi.Command, opts Options) runnerapi.Re
 	}
 	cmd.Dir = opts.WorkDir
 	cmd.WaitDelay = 2 * time.Second // don't hang on grandchildren holding the pipes
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 	stdout := &cappedBuffer{limit: opts.MaxOutput}
 	stderr := &cappedBuffer{limit: opts.MaxOutput}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -65,10 +73,24 @@ func runOne(ctx context.Context, c runnerapi.Command, opts Options) runnerapi.Re
 	err := cmd.Run()
 	res.Stdout, res.StdoutTruncated = stdout.text(), stdout.truncated
 	res.Stderr, res.StderrTruncated = stderr.text(), stderr.truncated
+
+	// Clean up process group in all cases (ignore ESRCH if already gone)
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
 	var exitErr *exec.ExitError
 	switch {
 	case errors.Is(cctx.Err(), context.DeadlineExceeded):
 		return fail("timed out after %s", timeout)
+	case errors.Is(err, exec.ErrWaitDelay):
+		// Command exited but background processes held output open
+		if cmd.ProcessState != nil {
+			res.ExitCode = cmd.ProcessState.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+		res.Error = "background processes held output open and were killed"
 	case err == nil:
 		res.ExitCode = 0
 	case errors.As(err, &exitErr):
@@ -81,16 +103,28 @@ func runOne(ctx context.Context, c runnerapi.Command, opts Options) runnerapi.Re
 
 // writeFiles writes each file, refusing any path that resolves outside workDir.
 func writeFiles(files map[string]string, workDir string) error {
-	root := filepath.Clean(workDir) + string(filepath.Separator)
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return fmt.Errorf("open root %s: %w", workDir, err)
+	}
+	defer func() {
+		_ = root.Close()
+	}()
+
+	cleanRoot := filepath.Clean(workDir) + string(filepath.Separator)
 	for p, content := range files {
 		clean := filepath.Clean(p)
-		if !filepath.IsAbs(p) || !strings.HasPrefix(clean, root) {
+		if !filepath.IsAbs(p) || !strings.HasPrefix(clean, cleanRoot) {
 			return fmt.Errorf("file path %q is outside %s", p, workDir)
 		}
-		if err := os.MkdirAll(filepath.Dir(clean), 0o700); err != nil {
+		rel, err := filepath.Rel(workDir, clean)
+		if err != nil {
+			return fmt.Errorf("relative path for %q: %w", p, err)
+		}
+		if err := root.MkdirAll(filepath.Dir(rel), 0o700); err != nil {
 			return fmt.Errorf("create directory for %q: %w", p, err)
 		}
-		if err := os.WriteFile(clean, []byte(content), 0o600); err != nil {
+		if err := root.WriteFile(rel, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("write %q: %w", p, err)
 		}
 	}
