@@ -1,0 +1,209 @@
+package sandbox
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/probe"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
+)
+
+// ProbeRunRequest is a set of probes for one Intent.
+type ProbeRunRequest struct {
+	Intent string
+	Probes []lastv1alpha1.Probe
+}
+
+// ProbeOutcome is one probe's result. Passed is false whenever Error is set.
+type ProbeOutcome struct {
+	ID     string
+	Passed bool
+	Result runnerapi.Result
+	Error  string
+}
+
+type probeRef struct {
+	ID      string               `json:"id"`
+	Command lastv1alpha1.Command `json:"command"`
+	Assert  string               `json:"assert"`
+}
+
+type probeStart struct {
+	RunID       string             `json:"runId"`
+	Image       string             `json:"image"`
+	Probes      []probeRef         `json:"probes"`
+	Providers   []string           `json:"providers,omitempty"`
+	Egress      []string           `json:"egress,omitempty"`
+	Credentials []IssuedCredential `json:"credentials,omitempty"`
+}
+
+type probeResultEntry struct {
+	ID              string `json:"id"`
+	ExitCode        int    `json:"exitCode"`
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	StdoutTruncated bool   `json:"stdoutTruncated"`
+	StderrTruncated bool   `json:"stderrTruncated"`
+	Passed          bool   `json:"passed"`
+	Error           string `json:"error,omitempty"`
+}
+
+type probeResultPayload struct {
+	RunID        string             `json:"runId"`
+	StartSeq     uint64             `json:"startSeq"`
+	Results      []probeResultEntry `json:"results"`
+	Error        string             `json:"error,omitempty"`
+	CleanupError string             `json:"cleanupError,omitempty"`
+}
+
+// RunProbes runs probes grouped by identical providers and egress, one pod per group,
+// each recorded as a single probe.start/probe.result pair (spec §10.2).
+func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeOutcome, error) {
+	seen := map[string]bool{}
+	for _, p := range req.Probes {
+		if seen[p.ID] {
+			return nil, fmt.Errorf("sandbox: duplicate probe id %q", p.ID)
+		}
+		seen[p.ID] = true
+	}
+	byID := map[string]ProbeOutcome{}
+	var errs []error
+	for _, group := range groupProbes(req.Probes) {
+		outs, err := e.runProbeGroup(ctx, req.Intent, group)
+		for _, o := range outs {
+			byID[o.ID] = o
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	outcomes := make([]ProbeOutcome, 0, len(req.Probes))
+	for _, p := range req.Probes {
+		outcomes = append(outcomes, byID[p.ID])
+	}
+	return outcomes, errors.Join(errs...)
+}
+
+// groupProbes groups probes by their sorted providers and egress, keeping first-seen order.
+func groupProbes(probes []lastv1alpha1.Probe) [][]lastv1alpha1.Probe {
+	var keys []string
+	groups := map[string][]lastv1alpha1.Probe{}
+	for _, p := range probes {
+		providers := slices.Clone(p.Command.Providers)
+		egress := slices.Clone(p.Command.Egress)
+		slices.Sort(providers)
+		slices.Sort(egress)
+		key := strings.Join(providers, ",") + "|" + strings.Join(egress, ",")
+		if _, ok := groups[key]; !ok {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], p)
+	}
+	out := make([][]lastv1alpha1.Probe, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, groups[k])
+	}
+	return out
+}
+
+func (e *Executor) runProbeGroup(ctx context.Context, intent string, probes []lastv1alpha1.Probe) ([]ProbeOutcome, error) {
+	outcomes := make([]ProbeOutcome, len(probes))
+	failAll := func(err error) ([]ProbeOutcome, error) {
+		for i, p := range probes {
+			if outcomes[i].ID == "" {
+				outcomes[i] = ProbeOutcome{ID: p.ID, Result: runnerapi.Result{ID: p.ID, ExitCode: -1}, Error: err.Error()}
+			}
+		}
+		return outcomes, err
+	}
+	cmds := make([]lastv1alpha1.Command, len(probes))
+	refs := make([]probeRef, len(probes))
+	for i, p := range probes {
+		c := p.Command
+		c.ID = p.ID
+		cmds[i] = c
+		refs[i] = probeRef{ID: p.ID, Command: p.Command, Assert: p.Assert}
+	}
+	prep, err := e.prepare(ctx, cmds, probes[0].Command.Providers, probes[0].Command.Egress)
+	if err != nil {
+		return failAll(err)
+	}
+	release, err := e.sched.Acquire(ctx, PriorityProbe)
+	if err != nil {
+		return failAll(err)
+	}
+	defer release()
+
+	runID := e.cfg.NewRunID()
+	issued := make([]IssuedCredential, 0, len(prep.plans))
+	for _, cp := range prep.plans {
+		issued = append(issued, cp.Issued)
+	}
+	draft := func(typ string, payload any) audit.Draft {
+		return audit.Draft{Type: typ, Actor: "gateway", Intent: intent, Payload: payload}
+	}
+	var cleanupErr string
+	runCtx := ctx
+	// The result entry must be written even when the request was cancelled, so the
+	// audit calls ignore cancellation while the run itself still honors it.
+	err = e.auditor.Do(context.WithoutCancel(ctx),
+		draft(audit.TypeProbeStart, probeStart{RunID: runID, Image: e.cfg.Pod.Image, Probes: refs,
+			Providers: probes[0].Command.Providers, Egress: ruleStrings(prep.rules), Credentials: issued}),
+		func(context.Context) (any, error) {
+			ctx := runCtx
+			results, runErr := e.launch(ctx, runID, prep, launchHooks{})
+			if cerr := e.cleanup(ctx, runID, nil); cerr != nil {
+				cleanupErr = cerr.Error()
+			}
+			if runErr != nil {
+				return nil, runErr
+			}
+			byID := map[string]runnerapi.Result{}
+			for _, r := range results {
+				byID[r.ID] = r
+			}
+			for i, p := range probes {
+				r, ok := byID[p.ID]
+				o := ProbeOutcome{ID: p.ID, Result: r}
+				switch {
+				case !ok:
+					o.Result = runnerapi.Result{ID: p.ID, ExitCode: -1}
+					o.Error = "sandbox: no result for probe"
+				case r.Error != "":
+					o.Error = r.Error
+				default:
+					passed, aerr := probe.Evaluate(p.Assert, probe.Result{ExitCode: r.ExitCode, Stdout: r.Stdout, Stderr: r.Stderr})
+					o.Passed = passed && aerr == nil
+					if aerr != nil {
+						o.Error = aerr.Error()
+					}
+				}
+				outcomes[i] = o
+			}
+			return nil, nil
+		},
+		func(start audit.Entry, _ any, actionErr error) audit.Draft {
+			p := probeResultPayload{RunID: runID, StartSeq: start.Seq, CleanupError: cleanupErr}
+			if actionErr != nil {
+				p.Error = actionErr.Error()
+			}
+			for _, o := range outcomes {
+				if o.ID == "" {
+					continue
+				}
+				p.Results = append(p.Results, probeResultEntry{ID: o.ID, ExitCode: o.Result.ExitCode,
+					Stdout: o.Result.Stdout, Stderr: o.Result.Stderr, StdoutTruncated: o.Result.StdoutTruncated,
+					StderrTruncated: o.Result.StderrTruncated, Passed: o.Passed, Error: o.Error})
+			}
+			return draft(audit.TypeProbeResult, p)
+		})
+	if err != nil {
+		return failAll(err)
+	}
+	return outcomes, nil
+}
