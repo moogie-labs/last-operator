@@ -33,14 +33,9 @@ func execute() (runnerapi.Envelope, int) {
 	if err != nil {
 		return failed(fmt.Errorf("read spec: %w", err))
 	}
-	var spec runnerapi.Spec
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&spec); err != nil {
-		return failed(fmt.Errorf("parse spec: %w", err))
-	}
-	if spec.Version != runnerapi.Version {
-		return failed(fmt.Errorf("unsupported spec version %d", spec.Version))
+	spec, err := runnerapi.DecodeSpec(bytes.NewReader(raw))
+	if err != nil {
+		return failed(err)
 	}
 	return runner.Run(context.Background(), spec, runner.Options{
 		MaxOutput: runnerapi.MaxOutput, WorkDir: "/work", Shell: "/bin/sh",

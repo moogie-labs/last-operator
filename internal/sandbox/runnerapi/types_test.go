@@ -2,6 +2,7 @@ package runnerapi_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
@@ -56,5 +57,23 @@ func TestParseEnvelopeTwoResultLines(t *testing.T) {
 	}
 	if len(env.Results) != 1 || env.Results[0].ID != "second" || env.Results[0].Stdout != "second" {
 		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestDecodeSpecIsStrict(t *testing.T) {
+	good := `{"version":1,"commands":[{"id":"a","argv":["true"],"timeoutSeconds":5}]}`
+	spec, err := runnerapi.DecodeSpec(strings.NewReader(good))
+	if err != nil || len(spec.Commands) != 1 || spec.Commands[0].ID != "a" {
+		t.Fatalf("spec=%+v err=%v", spec, err)
+	}
+	for name, bad := range map[string]string{
+		"unknown field":  `{"version":1,"commands":[],"extra":true}`,
+		"unknown nested": `{"version":1,"commands":[{"id":"a","argv":["x"],"shell":"y"}]}`,
+		"wrong version":  `{"version":2,"commands":[]}`,
+		"not json":       `nope`,
+	} {
+		if _, err := runnerapi.DecodeSpec(strings.NewReader(bad)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }

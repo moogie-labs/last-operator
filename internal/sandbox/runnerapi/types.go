@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 const (
@@ -80,4 +81,20 @@ func ParseEnvelope(log []byte) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("runnerapi: unsupported envelope version %d", env.Version)
 	}
 	return env, nil
+}
+
+// DecodeSpec reads a spec the way the in-pod runner must: unknown fields and a
+// version mismatch are errors, so a gateway/runner skew fails loudly instead of
+// silently dropping fields.
+func DecodeSpec(r io.Reader) (Spec, error) {
+	var spec Spec
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
+		return Spec{}, fmt.Errorf("parse spec: %w", err)
+	}
+	if spec.Version != Version {
+		return Spec{}, fmt.Errorf("unsupported spec version %d", spec.Version)
+	}
+	return spec, nil
 }
