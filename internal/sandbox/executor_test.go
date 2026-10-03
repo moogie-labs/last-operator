@@ -4,16 +4,20 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -26,7 +30,11 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
-const execChain = "exec-test"
+const (
+	execChain        = "exec-test"
+	tokenSubresource = "token"
+	testEgress       = "10.1.2.3:443"
+)
 
 func newAudit(t *testing.T) (*audit.Writer, *audittest.MemSink) {
 	t.Helper()
@@ -111,7 +119,11 @@ func apiServerObjects() []runtime.Object {
 }
 
 func newExec(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader) *sandbox.Executor {
-	return sandbox.NewExecutor(kube, providers(envProvider(), k8sProvider("cluster")), aud, sandbox.NewScheduler(2), logs,
+	return newExecWith(kube, aud, logs, envProvider(), k8sProvider(clusterName))
+}
+
+func newExecWith(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader, ps ...*lastv1alpha1.Provider) *sandbox.Executor {
+	return sandbox.NewExecutor(kube, providers(ps...), aud, sandbox.NewScheduler(2), logs,
 		sandbox.ExecutorConfig{
 			Pod:               sandbox.PodConfig{Namespace: "last-sandbox", Image: "img:test"},
 			ProviderNamespace: "last-gateway",
@@ -143,7 +155,7 @@ func TestRunSucceedsAndAuditsEveryStepInOrder(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
 	aud, sink := newAudit(t)
 	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", ExitCode: 0, Stdout: "ok\n"})).Run(context.Background(),
-		sandbox.RunRequest{Intent: "team-x/web", Stage: "Create", Command: cmd([]string{"demo"}, []string{"10.1.2.3:443"})})
+		sandbox.RunRequest{Intent: "team-x/web", Stage: "Create", Command: cmd([]string{"demo"}, []string{testEgress})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,11 +217,14 @@ func TestRunTimesOutWhenThePodNeverFinishes(t *testing.T) {
 
 func TestRunWithoutAnEnvelopeFails(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodFailed)
-	aud, _ := newAudit(t)
+	aud, sink := newAudit(t)
 	garbage := func(context.Context, string, string) ([]byte, error) { return []byte("segfault\n"), nil }
 	_, err := newExec(kube, aud, garbage).Run(context.Background(), sandbox.RunRequest{Command: cmd(nil, nil)})
 	if err == nil || !strings.Contains(err.Error(), "no result envelope") {
 		t.Fatalf("err = %v", err)
+	}
+	if r := resultPayload(t, sink); r.Error == "" || r.ExitCode != -1 {
+		t.Fatalf("command.result = %+v, want a recorded error", r)
 	}
 	assertCleaned(t, kube)
 }
@@ -231,7 +246,7 @@ func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
 func TestRunWithKubernetesProviderAllowsTheAPIServer(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		if a.GetSubresource() != tokenKey {
+		if a.GetSubresource() != tokenSubresource {
 			return false, nil, nil
 		}
 		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
@@ -276,7 +291,7 @@ func TestRunRaisesTheKubernetesTokenTTLAboveThePodLifetime(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
 	var expiration int64
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		if a.GetSubresource() != tokenKey {
+		if a.GetSubresource() != tokenSubresource {
 			return false, nil, nil
 		}
 		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
@@ -313,4 +328,408 @@ func TestRunRaisesTheKubernetesTokenTTLAboveThePodLifetime(t *testing.T) {
 		t.Fatalf("credential.issued ttl = %q, want %q", ttl, want)
 	}
 	assertCleaned(t, kube)
+}
+
+// ---- fix round 1 helpers and tests ----
+
+type resultEntry struct {
+	Error        string `json:"error"`
+	CleanupError string `json:"cleanupError"`
+	ExitCode     int    `json:"exitCode"`
+	Stdout       string `json:"stdout"`
+	Stderr       string `json:"stderr"`
+}
+
+func resultPayload(t *testing.T, sink *audittest.MemSink) resultEntry {
+	t.Helper()
+	var out resultEntry
+	found := false
+	for _, e := range entries(t, sink) {
+		if e.Type == audit.TypeCommandResult {
+			found = true
+			if err := json.Unmarshal(e.Payload, &out); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no command.result entry was written")
+	}
+	return out
+}
+
+func hasType(sink *audittest.MemSink, t *testing.T, typ string) bool {
+	t.Helper()
+	return slices.Contains(entryTypes(entries(t, sink)), typ)
+}
+
+type eventLog struct {
+	mu sync.Mutex
+	ev []string
+}
+
+func (l *eventLog) add(s string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ev = append(l.ev, s)
+}
+
+func (l *eventLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ev)
+}
+
+func (l *eventLog) count(prefix string) int {
+	n := 0
+	for _, e := range l.all() {
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// recordKube logs every kube action. Call it last so its reactor runs first.
+func recordKube(kube *fake.Clientset, l *eventLog) {
+	kube.PrependReactor("*", "*", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		res := a.GetResource().Resource
+		if a.GetSubresource() != "" {
+			res += "/" + a.GetSubresource()
+		}
+		l.add("kube:" + a.GetVerb() + ":" + res + ":" + a.GetNamespace())
+		return false, nil, nil
+	})
+}
+
+// recAuditor wraps a real writer, logs audit events, can fail the Nth Append and, like
+// a real sink client, refuses a cancelled context.
+type recAuditor struct {
+	inner  sandbox.Auditor
+	log    *eventLog
+	failAt int // 1-based Append number that fails; 0 never
+	n      int
+}
+
+var errSinkDown = errors.New("sink down")
+
+func (r *recAuditor) Append(ctx context.Context, d audit.Draft) (audit.Entry, error) {
+	r.n++
+	if ctx.Err() != nil {
+		return audit.Entry{}, ctx.Err()
+	}
+	if r.failAt != 0 && r.n == r.failAt {
+		return audit.Entry{}, errSinkDown
+	}
+	e, err := r.inner.Append(ctx, d)
+	if err == nil {
+		r.log.add("audit:" + d.Type)
+	}
+	return e, err
+}
+
+func (r *recAuditor) Do(ctx context.Context, before audit.Draft, action func(context.Context) (any, error),
+	after func(audit.Entry, any, error) audit.Draft) error {
+	return r.inner.Do(ctx, before, func(c context.Context) (any, error) {
+		r.log.add("audit:" + before.Type)
+		return action(c)
+	}, func(b audit.Entry, res any, err error) audit.Draft {
+		d := after(b, res, err)
+		r.log.add("audit:" + d.Type)
+		return d
+	})
+}
+
+func newRecAudit(t *testing.T, failAt int) (*recAuditor, *audittest.MemSink, *eventLog) {
+	t.Helper()
+	w, sink := newAudit(t)
+	l := &eventLog{}
+	return &recAuditor{inner: w, log: l, failAt: failAt}, sink, l
+}
+
+func TestRunRedactsIssuedCredentialsFromOutput(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte(secretValue))
+	raw := base64.RawStdEncoding.EncodeToString([]byte(secretValue))
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, sink := newAudit(t)
+	leak := runnerapi.Result{ID: "c1",
+		Stdout: "a " + secretValue + " b " + b64 + " c " + raw + "\n",
+		Stderr: "e " + secretValue + " " + b64, Error: "err " + secretValue}
+	res, err := newExec(kube, aud, envelopeLogs(leak)).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider}, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries(t, sink) {
+		for _, bad := range []string{secretValue, b64, raw} {
+			if strings.Contains(string(e.Payload), bad) {
+				t.Fatalf("entry %s leaks %q: %s", e.Type, bad, e.Payload)
+			}
+		}
+	}
+	for _, got := range []string{res.Result.Stdout, res.Result.Stderr, res.Result.Error} {
+		for _, bad := range []string{secretValue, b64, raw} {
+			if strings.Contains(got, bad) {
+				t.Fatalf("RunResult leaks %q: %+v", bad, res.Result)
+			}
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("%q lacks [REDACTED]", got)
+		}
+	}
+	if r := resultPayload(t, sink); !strings.Contains(r.Stdout, "[REDACTED]") || !strings.Contains(r.Stderr, "[REDACTED]") {
+		t.Fatalf("command.result = %+v", r)
+	}
+}
+
+func TestRunRedactsMintedKubernetesTokens(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() != tokenSubresource {
+			return false, nil, nil
+		}
+		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
+		tr.Status.Token = "tok-" + secretValue
+		return true, tr, nil
+	})
+	aud, sink := newAudit(t)
+	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", Stdout: "token=tok-" + secretValue})).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{clusterName}, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Result.Stdout, secretValue) || !strings.Contains(res.Result.Stdout, "[REDACTED]") {
+		t.Fatalf("stdout = %q", res.Result.Stdout)
+	}
+	if r := resultPayload(t, sink); strings.Contains(r.Stdout, secretValue) {
+		t.Fatalf("command.result leaks the token: %q", r.Stdout)
+	}
+}
+
+func TestRunDoesNotRedactValuesShorterThanEightBytes(t *testing.T) {
+	short := &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "short"}, Spec: lastv1alpha1.ProviderSpec{
+		Type: lastv1alpha1.ProviderEnvSecret, SecretRef: &lastv1alpha1.LocalRef{Name: "short-creds"},
+		Env: map[string]string{"SHORT": tokenKey}}}
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "short-creds", Namespace: gatewayNS},
+		Data: map[string][]byte{tokenKey: []byte("abc1234")}} // 7 bytes
+	kube, _ := fakeCluster(corev1.PodSucceeded, sec)
+	aud, _ := newAudit(t)
+	res, err := newExecWith(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", Stdout: "v=abc1234"}), short).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{"short"}, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Result.Stdout != "v=abc1234" {
+		t.Fatalf("stdout = %q, want it untouched", res.Result.Stdout)
+	}
+}
+
+func TestRunFailsClosedAtCredentialIssued(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, append(apiServerObjects(), demoSecret())...)
+	aud, sink, l := newRecAudit(t, 1)
+	recordKube(kube, l)
+	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider, clusterName}, []string{testEgress})})
+	if !errors.Is(err, audit.ErrAuditUnavailable) {
+		t.Fatalf("err = %v, want ErrAuditUnavailable", err)
+	}
+	if n := l.count("kube:get:secrets:" + gatewayNS); n != 0 {
+		t.Fatalf("read %d provider secrets before credential.issued was durable", n)
+	}
+	if n := l.count("kube:create:serviceaccounts/token"); n != 0 {
+		t.Fatalf("minted %d tokens", n)
+	}
+	if n := l.count("kube:create:") - l.count("kube:create:serviceaccounts/token"); n != 0 {
+		t.Fatalf("created %d objects: %v", n, l.all())
+	}
+	if r := resultPayload(t, sink); r.Error == "" {
+		t.Fatal("command.result lacks the error")
+	}
+}
+
+func TestRunFailsClosedAtEgressGranted(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, sink, l := newRecAudit(t, 2)
+	recordKube(kube, l)
+	_, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+	if !errors.Is(err, audit.ErrAuditUnavailable) {
+		t.Fatalf("err = %v, want ErrAuditUnavailable", err)
+	}
+	if n := l.count("kube:create:networkpolicies"); n != 0 {
+		t.Fatalf("created %d network policies without an egress.granted entry", n)
+	}
+	if l.count("kube:create:secrets:"+sandboxNS) == 0 {
+		t.Fatal("expected the credential secret to have been created first")
+	}
+	if hasType(sink, t, audit.TypeEgressGranted) {
+		t.Fatal("egress.granted should not have been recorded")
+	}
+	if r := resultPayload(t, sink); r.Error == "" {
+		t.Fatal("command.result lacks the error")
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunInterleavesAuditAndKubeActionsInOrder(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	aud, _, l := newRecAudit(t, 0)
+	recordKube(kube, l)
+	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})}); err != nil {
+		t.Fatal(err)
+	}
+	ev := l.all()
+	at := func(s string) int {
+		i := slices.Index(ev, s)
+		if i < 0 {
+			t.Fatalf("event %q missing from %v", s, ev)
+		}
+		return i
+	}
+	if at("audit:"+audit.TypeCommandStart) >= at("audit:"+audit.TypeCredentialIssued) {
+		t.Fatalf("command.start must come first: %v", ev)
+	}
+	if at("audit:"+audit.TypeCredentialIssued) >= at("kube:get:secrets:"+gatewayNS) {
+		t.Fatalf("credential.issued must precede the provider secret read: %v", ev)
+	}
+	if at("audit:"+audit.TypeEgressGranted) >= at("kube:create:networkpolicies:"+sandboxNS) {
+		t.Fatalf("egress.granted must precede the policy create: %v", ev)
+	}
+	if at("kube:delete:networkpolicies:"+sandboxNS) >= at("audit:"+audit.TypeEgressRevoked) {
+		t.Fatalf("the policy delete must precede egress.revoked: %v", ev)
+	}
+	if ev[len(ev)-1] != "audit:"+audit.TypeCommandResult {
+		t.Fatalf("command.result must be last: %v", ev)
+	}
+}
+
+func TestRunCancelledWhilePendingStillCleansUpAndAudits(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending, demoSecret())
+	aud, sink, l := newRecAudit(t, 0)
+	c := cmd([]string{demoProvider}, []string{testEgress})
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(30*time.Millisecond, cancel)
+	res, err := newExec(kube, aud, envelopeLogs()).Run(ctx, sandbox.RunRequest{Command: c})
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cancel") {
+		t.Fatalf("err = %v, want a cancellation error", err)
+	}
+	if strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("cancellation reported as a timeout: %v", err)
+	}
+	if res.CleanupError != "" {
+		t.Fatalf("cleanup error: %s", res.CleanupError)
+	}
+	for _, typ := range []string{audit.TypeEgressRevoked, audit.TypeCommandResult} {
+		if !hasType(sink, t, typ) {
+			t.Fatalf("missing %s; events %v", typ, l.all())
+		}
+	}
+	if r := resultPayload(t, sink); !strings.Contains(r.Error, "cancel") {
+		t.Fatalf("command.result error = %q", r.Error)
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunRecordsCleanupErrorWithoutRevokedWhenPolicyDeleteFails(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	kube.PrependReactor("delete", "networkpolicies", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("apiserver says no")
+	})
+	aud, sink := newAudit(t)
+	res, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CleanupError == "" {
+		t.Fatal("RunResult.CleanupError is empty")
+	}
+	if r := resultPayload(t, sink); r.CleanupError == "" {
+		t.Fatal("command.result.cleanupError is empty")
+	}
+	if hasType(sink, t, audit.TypeEgressRevoked) {
+		t.Fatal("egress.revoked was written although the policy delete failed")
+	}
+}
+
+func TestRunCleansUpWhenPodCreateFails(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, demoSecret())
+	kube.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("quota exceeded")
+	})
+	aud, sink := newAudit(t)
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(),
+		sandbox.RunRequest{Command: cmd([]string{demoProvider}, []string{testEgress})})
+	if err == nil || !strings.Contains(err.Error(), "create pod") {
+		t.Fatalf("err = %v", err)
+	}
+	if r := resultPayload(t, sink); !strings.Contains(r.Error, "create pod") {
+		t.Fatalf("command.result error = %q", r.Error)
+	}
+	if !hasType(sink, t, audit.TypeEgressRevoked) {
+		t.Fatal("egress.revoked missing")
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunFailsFastOnImagePullBackOff(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending)
+	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		pod := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runner",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
+		return false, nil, nil
+	})
+	aud, sink := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	start := time.Now()
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: c})
+	if err == nil || !strings.Contains(err.Error(), "ImagePullBackOff") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("did not fail fast: %s", time.Since(start))
+	}
+	if r := resultPayload(t, sink); !strings.Contains(r.Error, "ImagePullBackOff") {
+		t.Fatalf("command.result error = %q", r.Error)
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunFailsFastWhenThePodIsDeletedExternally(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending)
+	kube.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), "last-run-run1")
+	})
+	aud, _ := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	start := time.Now()
+	_, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Command: c})
+	if err == nil || !strings.Contains(err.Error(), "deleted externally") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("did not fail fast: %s", time.Since(start))
+	}
+}
+
+func TestRunDefaultRunIDIs32HexCharacters(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded)
+	aud, _ := newAudit(t)
+	ex := sandbox.NewExecutor(kube, providers(), aud, sandbox.NewScheduler(1), envelopeLogs(runnerapi.Result{ID: "c1"}),
+		sandbox.ExecutorConfig{Pod: sandbox.PodConfig{Namespace: sandboxNS, Image: "img:test"}, PollInterval: time.Millisecond})
+	res, err := ex.Run(context.Background(), sandbox.RunRequest{Command: cmd(nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.RunID) != 32 {
+		t.Fatalf("run id %q has %d chars", res.RunID, len(res.RunID))
+	}
+	if _, err := hex.DecodeString(res.RunID); err != nil {
+		t.Fatal(err)
+	}
 }

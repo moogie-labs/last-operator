@@ -3,9 +3,11 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,7 +46,7 @@ type ExecutorConfig struct {
 	DeadlineOverhead  time.Duration // added to the summed command timeouts for activeDeadlineSeconds; default 60s
 	StartupGrace      time.Duration // extra wait for scheduling and image pull; default 2m
 	CleanupTimeout    time.Duration // default 30s
-	NewRunID          func() string // default: 10 random hex characters
+	NewRunID          func() string // default: 32 random hex characters
 }
 
 func (c ExecutorConfig) withDefaults() ExecutorConfig {
@@ -169,17 +171,21 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	hooks := launchHooks{
 		beforeCredential: func(ctx context.Context, cp CredentialPlan) error {
 			_, err := e.auditor.Append(ctx, draft(audit.TypeCredentialIssued, credentialIssued{RunID: runID, IssuedCredential: cp.Issued}))
-			return err
+			return classifyAudit(err)
 		},
 		beforeEgress: func(ctx context.Context, rules []EgressRule) error {
 			_, err := e.auditor.Append(ctx, draft(audit.TypeEgressGranted, egressGranted{RunID: runID, Rules: ruleStrings(rules)}))
-			return err
+			return classifyAudit(err)
 		},
 	}
-	err = e.auditor.Do(ctx,
+	runCtx := ctx
+	// The outcome entry must be written even when the request was cancelled, so the
+	// audit calls ignore cancellation while the run itself still honors it.
+	err = e.auditor.Do(context.WithoutCancel(ctx),
 		draft(audit.TypeCommandStart, commandStart{RunID: runID, Image: e.cfg.Pod.Image, Command: req.Command,
 			Providers: req.Command.Providers, Egress: ruleStrings(p.rules)}),
-		func(ctx context.Context) (any, error) {
+		func(context.Context) (any, error) {
+			ctx := runCtx
 			results, runErr := e.launch(ctx, runID, p, hooks)
 			if runErr == nil && len(results) != 1 {
 				runErr = fmt.Errorf("sandbox: expected 1 result, got %d", len(results))
@@ -239,6 +245,10 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 }
 
 // launch issues credentials, grants egress, runs the pod and returns the runner's results.
+// Credential values materialized for the run are redacted from the results (see
+// redactor); this is best-effort: re-encoded or transformed values (reversed, hex,
+// split) are not caught. The real boundary is that sandbox credentials are short-lived
+// and that every command is audited.
 func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks launchHooks) ([]runnerapi.Result, error) {
 	ns := e.cfg.Pod.Namespace
 	for _, cp := range p.plans { // record each issuance before the credential is read or minted
@@ -279,8 +289,23 @@ func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks l
 	if _, err := e.kube.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("sandbox: create pod: %w", err)
 	}
-	return e.await(ctx, pod.Name, deadline+e.cfg.StartupGrace)
+	results, err := e.await(ctx, pod.Name, deadline+e.cfg.StartupGrace)
+	if err != nil {
+		return nil, err
+	}
+	if creds.Secret != nil {
+		r := newRedactor(creds.Secret.Data)
+		for i := range results {
+			results[i].Stdout = r.redact(results[i].Stdout)
+			results[i].Stderr = r.redact(results[i].Stderr)
+			results[i].Error = r.redact(results[i].Error)
+		}
+	}
+	return results, nil
 }
+
+// failFastReasons are container waiting reasons that cannot progress without intervention.
+var failFastReasons = []string{"ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError"}
 
 // await polls the pod until it finishes or limit passes, then parses its envelope.
 func (e *Executor) await(ctx context.Context, name string, limit time.Duration) ([]runnerapi.Result, error) {
@@ -292,14 +317,25 @@ func (e *Executor) await(ctx context.Context, name string, limit time.Duration) 
 	var last *corev1.Pod
 	for {
 		pod, err := e.kube.CoreV1().Pods(ns).Get(waitCtx, name, metav1.GetOptions{})
-		if err == nil {
+		switch {
+		case err == nil:
 			last = pod
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 				return e.collect(ctx, pod)
 			}
+			for _, cs := range pod.Status.ContainerStatuses {
+				if w := cs.State.Waiting; w != nil && slices.Contains(failFastReasons, w.Reason) {
+					return nil, fmt.Errorf("sandbox: pod %s cannot start (%s)", name, describePod(pod))
+				}
+			}
+		case apierrors.IsNotFound(err):
+			return nil, fmt.Errorf("sandbox: pod %s was deleted externally", name)
 		}
 		select {
 		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("sandbox: run cancelled while waiting for pod %s (%s): %w", name, describePod(last), ctx.Err())
+			}
 			return nil, fmt.Errorf("sandbox: pod %s did not finish within %s (%s)", name, limit, describePod(last))
 		case <-ticker.C:
 		}
@@ -307,7 +343,9 @@ func (e *Executor) await(ctx context.Context, name string, limit time.Duration) 
 }
 
 func (e *Executor) collect(ctx context.Context, pod *corev1.Pod) ([]runnerapi.Result, error) {
-	log, err := e.logs(ctx, pod.Namespace, pod.Name)
+	lctx, cancel := context.WithTimeout(ctx, e.cfg.CleanupTimeout)
+	defer cancel()
+	log, err := e.logs(lctx, pod.Namespace, pod.Name)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: read pod %s log (%s): %w", pod.Name, describePod(pod), err)
 	}
@@ -324,7 +362,7 @@ func (e *Executor) collect(ctx context.Context, pod *corev1.Pod) ([]runnerapi.Re
 func (e *Executor) cleanup(ctx context.Context, runID string, onRevoked func(context.Context) error) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.cfg.CleanupTimeout)
 	defer cancel()
-	policies, err := e.deleteRun(cctx, LabelRun+"="+runID)
+	policies, err := e.deleteRun(cctx, LabelRun+"="+runID+","+LabelManagedBy+"="+ManagedByValue)
 	if policies > 0 && onRevoked != nil {
 		err = errors.Join(err, onRevoked(cctx))
 	}
@@ -396,6 +434,53 @@ func describePod(p *corev1.Pod) string {
 	return desc.String()
 }
 
+// classifyAudit marks an audit write failure as ErrAuditUnavailable.
+func classifyAudit(err error) error {
+	if err == nil || errors.Is(err, audit.ErrAuditUnavailable) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", audit.ErrAuditUnavailable, err)
+}
+
+const redacted = "[REDACTED]"
+
+// minRedactLen keeps short values from shredding the output.
+const minRedactLen = 8
+
+// redactor replaces credential values in command output.
+type redactor struct{ needles []string }
+
+func newRedactor(data map[string][]byte) redactor {
+	seen := map[string]bool{}
+	var needles []string
+	add := func(n string) {
+		if len(n) >= minRedactLen && !seen[n] {
+			seen[n] = true
+			needles = append(needles, n)
+		}
+	}
+	for _, v := range data {
+		add(string(v))
+		add(strings.TrimSpace(string(v)))
+		add(base64.StdEncoding.EncodeToString(v))
+		add(base64.RawStdEncoding.EncodeToString(v))
+	}
+	slices.SortFunc(needles, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	return redactor{needles: needles}
+}
+
+func (r redactor) redact(s string) string {
+	for _, n := range r.needles {
+		s = strings.ReplaceAll(s, n, redacted)
+	}
+	return s
+}
+
 func parseRules(egress []string) ([]EgressRule, error) {
 	rules := make([]EgressRule, 0, len(egress))
 	for _, s := range egress {
@@ -426,7 +511,7 @@ func needsAPIServer(plans []CredentialPlan) bool {
 }
 
 func randomRunID() string {
-	b := make([]byte, 5)
+	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
