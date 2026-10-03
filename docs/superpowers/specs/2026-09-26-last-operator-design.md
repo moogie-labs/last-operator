@@ -173,6 +173,16 @@ A kubebuilder controller manager. It:
 
 A gRPC server and the only component able to cause side effects.
 
+**Transport and caller authentication.** The operator calls the gateway
+over gRPC on the cluster network (Service `last-gateway`). Every call
+carries the operator's projected ServiceAccount token (audience
+`last-gateway`, short-lived, mounted by the kubelet). The gateway validates
+it with the TokenReview API and accepts only the operator's ServiceAccount
+(`system:serviceaccount:last-system:last-operator`). A NetworkPolicy limits
+ingress to the gRPC port to pods in `last-system`. There is no mTLS in v1.
+The token check is the authentication boundary, and the audit entry records
+the authenticated caller.
+
 **API (called by the operator):**
 
 | RPC | Purpose |
