@@ -154,6 +154,9 @@ spec:
               kubernetes.io/metadata.name: {{ .Release.Namespace }}
       ports:
         - {port: 9090, protocol: TCP}
+    # This rule must stay open from anywhere (no from:): the sandbox egress gate uses
+    # this port as a canary that must be reachable from outside last-sandbox when
+    # egress is open. helm-lint checks it.
     - ports:
         - {port: 8080, protocol: TCP}
 ---
