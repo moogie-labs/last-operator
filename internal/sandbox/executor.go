@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -43,11 +44,19 @@ func KubeLogReader(kube kubernetes.Interface) LogReader {
 type ExecutorConfig struct {
 	Pod               PodConfig
 	ProviderNamespace string
-	PollInterval      time.Duration // default 1s
-	DeadlineOverhead  time.Duration // added to the summed command timeouts for activeDeadlineSeconds; default 60s
-	StartupGrace      time.Duration // extra wait for scheduling and image pull; default 2m
-	CleanupTimeout    time.Duration // default 30s
-	NewRunID          func() string // default: 32 random hex characters
+	// EgressCanary is an IP:port that would be reachable if egress were open. When set,
+	// the runner runs nothing until dials to it time out, so a CNI that applies a new
+	// pod's NetworkPolicy late cannot leak egress, and runs granting it are rejected.
+	// In M2b the gateway sets it to its own Service ClusterIP on the http port (8080),
+	// which the chart's last-gateway NetworkPolicy admits from anywhere.
+	EgressCanary string
+	PollInterval time.Duration // default 1s
+	// DeadlineOverhead is added to the summed command timeouts for activeDeadlineSeconds;
+	// default 60s. It also covers the runner's egress gate (at most 30s).
+	DeadlineOverhead time.Duration
+	StartupGrace     time.Duration // extra wait for scheduling and image pull; default 2m
+	CleanupTimeout   time.Duration // default 30s
+	NewRunID         func() string // default: 32 random hex characters
 }
 
 func (c ExecutorConfig) withDefaults() ExecutorConfig {
@@ -238,6 +247,11 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 	if err != nil {
 		return prepared{}, err
 	}
+	canary, err := parseCanary(e.cfg.EgressCanary)
+	if err != nil {
+		return prepared{}, err
+	}
+	spec.EgressCanary = e.cfg.EgressCanary
 	rules, err := parseRules(egress)
 	if err != nil {
 		return prepared{}, err
@@ -259,6 +273,13 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 		}
 		credCfg.APIServerHost = host
 		rules = append(rules, apiRules...)
+	}
+	if canary != nil {
+		for _, r := range rules {
+			if r.covers(canary.ip, canary.port) {
+				return prepared{}, fmt.Errorf("sandbox: egress grant would allow the egress canary %s", e.cfg.EgressCanary)
+			}
+		}
 	}
 	return prepared{spec: spec, total: total, rules: rules, plans: plans, credCfg: credCfg}, nil
 }
@@ -522,6 +543,29 @@ func checkFileConflicts(cmds []lastv1alpha1.Command, plans []CredentialPlan) err
 		}
 	}
 	return nil
+}
+
+type canaryAddr struct {
+	ip   netip.Addr
+	port int32
+}
+
+// parseCanary validates an IP:port literal; "" means no canary.
+func parseCanary(s string) (*canaryAddr, error) {
+	if s == "" {
+		return nil, nil
+	}
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil || ap.Port() == 0 {
+		return nil, fmt.Errorf("sandbox: egress canary %q must be an IP:port literal", s)
+	}
+	return &canaryAddr{ip: ap.Addr().Unmap(), port: int32(ap.Port())}, nil
+}
+
+// covers reports whether the rule allows TCP to ip:port.
+func (r EgressRule) covers(ip netip.Addr, port int32) bool {
+	pfx, err := netip.ParsePrefix(r.CIDR)
+	return err == nil && r.Port == port && pfx.Contains(ip)
 }
 
 func parseRules(egress []string) ([]EgressRule, error) {
