@@ -43,6 +43,7 @@ type sandboxEnv struct {
 	sink     *audittest.MemSink
 	signer   *audit.Signer
 	targetIP string
+	canary   string
 }
 
 func setupSandbox(t *testing.T) *sandboxEnv {
@@ -100,6 +101,14 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 		t.Fatalf("target pod not running: %v", err)
 	}
 
+	// The gateway Service's http port is admitted from anywhere by the chart, so it is
+	// reachable if (and only if) a sandbox pod's egress is still open.
+	gwSvc, err := kube.CoreV1().Services("last-gateway").Get(ctx, "last-gateway", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canary := gwSvc.Spec.ClusterIP + ":8080"
+
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	signer := audit.NewSigner(key)
 	sink := audittest.NewMemSink()
@@ -115,9 +124,9 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	exec := sandbox.NewExecutor(kube, getProvider, w, sandbox.NewScheduler(4), sandbox.KubeLogReader(kube), sandbox.ExecutorConfig{
 		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}},
-		ProviderNamespace: "last-gateway",
+		ProviderNamespace: "last-gateway", EgressCanary: canary,
 	})
-	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP}
+	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canary: canary}
 }
 
 func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult {
@@ -138,6 +147,13 @@ func TestSandboxExecution(t *testing.T) {
 	t.Run("egress is denied by default", func(t *testing.T) {
 		if r := s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: curl}}); r.Result.ExitCode == 0 {
 			t.Fatalf("curl succeeded without an egress grant: %+v (does the CNI enforce NetworkPolicy?)", r.Result)
+		}
+	})
+	t.Run("a grant that would open the egress canary is rejected", func(t *testing.T) {
+		_, err := s.exec.Run(context.Background(), sandbox.RunRequest{Actor: e2eActor, Intent: "e2e/sandbox", Stage: "Create",
+			Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}, Egress: []string{s.canary}}})
+		if err == nil || !strings.Contains(err.Error(), "egress grant would allow the egress canary "+s.canary) {
+			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("a grant opens exactly that destination", func(t *testing.T) {
