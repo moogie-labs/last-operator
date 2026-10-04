@@ -58,10 +58,10 @@ func secretValue(t *testing.T, ns, name, key string) string {
 	return string(b)
 }
 
-// portForward forwards a random local port to svc/last-rustfs and returns its URL.
-func portForward(t *testing.T) string {
+// portForward forwards a random local port to target in namespace and returns 127.0.0.1:<port>.
+func portForward(t *testing.T, namespace, target, remotePort string) string {
 	t.Helper()
-	cmd := exec.Command("kubectl", "port-forward", "-n", "last-audit", "svc/last-rustfs", ":9000")
+	cmd := exec.Command("kubectl", "port-forward", "-n", namespace, target, ":"+remotePort)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func portForward(t *testing.T) string {
 	}()
 	select {
 	case port := <-found:
-		return "http://127.0.0.1:" + port
+		return "127.0.0.1:" + port
 	case <-time.After(30 * time.Second):
 		t.Fatal("kubectl port-forward did not start")
 		return ""
@@ -131,7 +131,7 @@ func TestAuditChain(t *testing.T) {
 			"AWS_SECRET_ACCESS_KEY": secretValue(t, ns, secret, "secretKey"),
 		}
 	}
-	endpoint := portForward(t)
+	endpoint := "http://" + portForward(t, "last-audit", "svc/last-rustfs", "9000")
 	reader := creds(endpoint, "last-audit", "last-audit-reader")
 
 	var before uint64
@@ -178,7 +178,7 @@ func TestAuditChain(t *testing.T) {
 		kubectl(t, "scale", "-n", "last-audit", "statefulset/last-rustfs", "--replicas=1")
 		kubectl(t, "rollout", "status", "-n", "last-audit", "statefulset/last-rustfs", "--timeout=5m")
 		kubectl(t, "rollout", "status", "-n", "last-gateway", "deploy/last-gateway", "--timeout=10m")
-		fresh := creds(portForward(t), "last-audit", "last-audit-reader") // the old forward died with the pod
+		fresh := creds("http://"+portForward(t, "last-audit", "svc/last-rustfs", "9000"), "last-audit", "last-audit-reader") // the old forward died with the pod
 		out, err := runLast(fresh, "audit", "verify", "--pubkey-file", pub)
 		if err != nil {
 			t.Fatalf("verify after recovery: %v\n%s", err, out)

@@ -11,7 +11,7 @@ kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER"
 kubectl config use-context "kind-$CLUSTER"
 
 make images IMAGE_TAG="$TAG" IMAGE_REGISTRY="$REGISTRY" COMPONENTS="gateway audit-init"
-for c in gateway audit-init; do
+for c in gateway audit-init sandbox-base; do
   kind load docker-image --name "$CLUSTER" "$REGISTRY/last-$c:$TAG"
 done
 
