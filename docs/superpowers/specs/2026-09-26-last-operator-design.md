@@ -816,7 +816,7 @@ Every command runs in a sandbox pod:
     The runner therefore runs nothing until it has seen every
     configured *egress canary* (an `IP:port` that is reachable whenever
     egress is open and that the run's policy denies) time out on
-    consecutive rounds for at least two seconds; after 30 seconds it
+    at least three consecutive rounds spanning at least two seconds; after 30 seconds it
     fails every command closed. The gateway rejects any grant that
     covers a canary. Canaries should include one whose backend is not
     itself selected by a NetworkPolicy, since some CNIs police traffic
