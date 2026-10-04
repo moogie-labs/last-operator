@@ -20,7 +20,10 @@ RUN apt-get update \
  && curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
  && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
  && chmod 0755 /usr/local/bin/kubectl \
- && rm /tmp/kubectl.sha256
+ && rm /tmp/kubectl.sha256 \
+ && groupadd -g 65532 sandbox \
+ && useradd -u 65532 -g 65532 -d /work -M -s /usr/sbin/nologin sandbox \
+ && mkdir -p /work && chown 65532:65532 /work
 COPY --from=builder /out/sandbox-runner /last/sandbox-runner
 USER 65532:65532
 WORKDIR /work
