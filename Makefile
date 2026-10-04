@@ -309,5 +309,6 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'containerPort: 9090'
 	helm template last charts/last-operator -n last-system | grep -q 'resources: \["tokenreviews"\]'
 	helm template last charts/last-operator -n last-system | awk '/name: last-sandbox-runner/{f=1} f&&/^---/{exit} f' | grep -q '^automountServiceAccountToken: false'
-	@# The sandbox egress gate uses the gateway's http port as a canary: its NetworkPolicy rule must have no from:.
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /kind: NetworkPolicy/ && doc ~ /name: last-gateway\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | awk '/^ *#/ { next } /port: 8080/ { if (prev ~ /^ *- ports:/) ok = 1 } { prev = $$0 } END { exit !ok }'
+	@# The sandbox egress gate uses the gateway's http port as a canary: the last-gateway NetworkPolicy
+	@# ingress item that opens 8080 must exist and must have no from: key (before or after ports:).
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: NetworkPolicy\n/ && doc ~ /\nmetadata:\n  name: last-gateway\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | awk 'function close_item() { if (item ~ /port: 8080/) { found = 1; if (item ~ /(^|\n) *(- )?from:/) bad = 1 } item = "" } /^ *#/ { next } /^    - / { close_item() } /^[^ ]/ || /^  [a-z]/ { if (!/^  ingress:/) close_item() } { item = item $$0 "\n" } END { close_item(); exit !(found && !bad) }'
