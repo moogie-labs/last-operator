@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/audit/audittest"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
 const (
@@ -43,7 +45,7 @@ type sandboxEnv struct {
 	sink     *audittest.MemSink
 	signer   *audit.Signer
 	targetIP string
-	canary   string
+	canaries []string
 }
 
 func setupSandbox(t *testing.T) *sandboxEnv {
@@ -107,7 +109,22 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canary := gwSvc.Spec.ClusterIP + ":8080"
+	// A second canary no NetworkPolicy selects: some CNIs (kindnet) police the two
+	// kinds of destination on different paths. The kubelet answers on the node IP.
+	nodes, err := kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil || len(nodes.Items) == 0 {
+		t.Fatalf("list nodes: %v", err)
+	}
+	var nodeIP string
+	for _, a := range nodes.Items[0].Status.Addresses {
+		if a.Type == corev1.NodeInternalIP {
+			nodeIP = a.Address
+		}
+	}
+	if nodeIP == "" {
+		t.Fatal("node has no InternalIP")
+	}
+	canaries := []string{net.JoinHostPort(gwSvc.Spec.ClusterIP, "8080"), net.JoinHostPort(nodeIP, "10250")}
 
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	signer := audit.NewSigner(key)
@@ -124,9 +141,9 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	exec := sandbox.NewExecutor(kube, getProvider, w, sandbox.NewScheduler(4), sandbox.KubeLogReader(kube), sandbox.ExecutorConfig{
 		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}},
-		ProviderNamespace: "last-gateway", EgressCanaries: []string{canary},
+		ProviderNamespace: "last-gateway", EgressCanaries: canaries,
 	})
-	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canary: canary}
+	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canaries: canaries}
 }
 
 func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult {
@@ -140,20 +157,42 @@ func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult
 	return res
 }
 
+// requireDenied asserts curl ran and was denied: it timed out (exit 28, code 000)
+// rather than the sandbox failing to run it or the request succeeding.
+func requireDenied(t *testing.T, r runnerapi.Result) {
+	t.Helper()
+	if r.Error != "" || (r.Stdout != "000" && r.ExitCode != 28) {
+		t.Fatalf("curl was not cleanly denied (does the CNI enforce NetworkPolicy?): %+v", r)
+	}
+}
+
 func TestSandboxExecution(t *testing.T) {
 	s := setupSandbox(t)
+	curl3 := "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://" + s.targetIP + "/"
 	curl := "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://" + s.targetIP + "/"
 
 	t.Run("egress is denied by default", func(t *testing.T) {
-		if r := s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: curl}}); r.Result.ExitCode == 0 {
-			t.Fatalf("curl succeeded without an egress grant: %+v (does the CNI enforce NetworkPolicy?)", r.Result)
+		requireDenied(t, s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: curl}}).Result)
+	})
+	t.Run("fresh pods never get egress before policy", func(t *testing.T) {
+		// Back-to-back fresh pods, each curling a destination no policy selects the
+		// moment it starts. Any 200 means egress was open before the policy applied.
+		for i := range 8 {
+			r := s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: curl3}})
+			t.Logf("run %d: exit=%d stdout=%q error=%q", i, r.Result.ExitCode, r.Result.Stdout, r.Result.Error)
+			if r.Result.Stdout == "200" {
+				t.Fatalf("run %d got egress before policy: %+v", i, r.Result)
+			}
+			requireDenied(t, r.Result)
 		}
 	})
-	t.Run("a grant that would open the egress canary is rejected", func(t *testing.T) {
-		_, err := s.exec.Run(context.Background(), sandbox.RunRequest{Actor: e2eActor, Intent: "e2e/sandbox", Stage: "Create",
-			Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}, Egress: []string{s.canary}}})
-		if err == nil || !strings.Contains(err.Error(), "egress grant would allow the egress canary "+s.canary) {
-			t.Fatalf("err = %v", err)
+	t.Run("a grant that would open an egress canary is rejected", func(t *testing.T) {
+		for _, canary := range s.canaries {
+			_, err := s.exec.Run(context.Background(), sandbox.RunRequest{Actor: e2eActor, Intent: "e2e/sandbox", Stage: "Create",
+				Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}, Egress: []string{canary}}})
+			if err == nil || !strings.Contains(err.Error(), "egress grant would allow the egress canary "+canary) {
+				t.Fatalf("canary %s: err = %v", canary, err)
+			}
 		}
 	})
 	t.Run("a grant opens exactly that destination", func(t *testing.T) {
