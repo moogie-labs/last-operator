@@ -106,13 +106,23 @@ func egressGate(ctx context.Context, canaries []string, opts Options) string {
 		}
 		wg.Wait()
 		all := true
+		var roundBad string
+		roundReachable, found := false, false
 		for i := range canaries {
-			if !denied[i] {
-				all = false
-				if gctx.Err() == nil || reachable[i] {
-					bad, badReachable = canaries[i], reachable[i]
-				}
+			if denied[i] {
+				continue
 			}
+			all = false
+			if gctx.Err() != nil && !reachable[i] {
+				continue // cut off by the gate's own deadline: no verdict about this canary
+			}
+			// Prefer naming a canary that connected; otherwise the first undenied one.
+			if !found || (reachable[i] && !roundReachable) {
+				roundBad, roundReachable, found = canaries[i], reachable[i], true
+			}
+		}
+		if found {
+			bad, badReachable = roundBad, roundReachable
 		}
 		if all {
 			if streak == 0 {

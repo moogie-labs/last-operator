@@ -516,3 +516,11 @@ func TestEgressGateMeasuresTheWindowFromTheFirstDeniedRound(t *testing.T) {
 		t.Fatalf("gate passed %s after the first denied round, want about %s", got, stable)
 	}
 }
+
+func TestEgressGateNamesTheCanaryThatWasReachable(t *testing.T) {
+	d := newDial(map[string][]error{canaryB: {nil}, canaryA: {syscall.ECONNREFUSED}})
+	env, marker := gateRun(t, []string{canaryB, canaryA}, d)
+	if ran(marker) || !strings.Contains(env.Results[0].Error, "canary "+canaryB+" still reachable") {
+		t.Fatalf("results = %+v", env.Results)
+	}
+}
