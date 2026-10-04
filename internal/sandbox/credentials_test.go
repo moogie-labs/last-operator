@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -64,6 +65,7 @@ var credCfg = sandbox.CredentialConfig{SandboxNamespace: sandboxNS, ProviderName
 
 func tokenClient(token string, gotTTL *int64) *fake.Clientset {
 	kube := fake.NewClientset()
+	withSecretUIDs(kube)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != "token" {
 			return false, nil, nil
@@ -317,6 +319,7 @@ func TestTokenRequestValidation(t *testing.T) {
 	// The TokenRequest reactor asserts namespace and ServiceAccount name
 	ctx := context.Background()
 	kube := fake.NewClientset()
+	withSecretUIDs(kube)
 	var gotNamespace, gotSA string
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenKey {
@@ -408,6 +411,7 @@ func TestTokenMintErrorPath(t *testing.T) {
 			configKey: []byte("cfg-" + secretValue),
 		},
 	})
+	withSecretUIDs(kube)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenKey {
 			return false, nil, nil
@@ -502,6 +506,7 @@ func TestMaterializeWithBadPlan(t *testing.T) {
 // expiringClient mints tokens that the API server says expire after granted.
 func expiringClient(token string, granted time.Duration) *fake.Clientset {
 	kube := fake.NewClientset()
+	withSecretUIDs(kube)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != "token" {
 			return false, nil, nil
@@ -546,5 +551,79 @@ func TestMaterializeAcceptsATokenWithinTheSlack(t *testing.T) {
 		if _, err := sandbox.Materialize(ctx, expiringClient("tok-"+secretValue, granted), credCfg, runID, plans); err != nil {
 			t.Fatalf("granted %s: %v", granted, err)
 		}
+	}
+}
+
+// anchorClient is a fake clientset that assigns UIDs to created Secrets (a real
+// API server does) and records every TokenRequest.
+func anchorClient(t *testing.T) (*fake.Clientset, *[]*authv1.TokenRequest) {
+	t.Helper()
+	kube := fake.NewClientset()
+	var reqs []*authv1.TokenRequest
+	kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		s := a.(k8stesting.CreateAction).GetObject().(*corev1.Secret)
+		s.UID = types.UID("uid-" + s.Name)
+		return false, nil, nil
+	})
+	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() != tokenSubresource {
+			return false, nil, nil
+		}
+		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
+		reqs = append(reqs, tr.DeepCopy())
+		tr.Status.Token = "tok-" + strings.Repeat("x", 16)
+		return true, tr, nil
+	})
+	return kube, &reqs
+}
+
+func TestMaterializeBindsTheTokenToARunAnchor(t *testing.T) {
+	ctx := context.Background()
+	kube, reqs := anchorClient(t)
+	plans, err := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := credCfg
+	cfg.ExpiresAt = time.Unix(2000000000, 0)
+	if _, err := sandbox.Materialize(ctx, kube, cfg, runID, plans); err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := kube.CoreV1().Secrets(gatewayNS).Get(ctx, "last-run-"+runID+sandbox.AnchorSuffix, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("anchor secret: %v", err)
+	}
+	if anchor.Labels[sandbox.LabelRun] != runID || anchor.Labels[sandbox.LabelManagedBy] != sandbox.ManagedByValue ||
+		anchor.Labels[sandbox.LabelExpiresAt] != "2000000000" {
+		t.Fatalf("anchor labels = %v", anchor.Labels)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("token requests = %d", len(*reqs))
+	}
+	ref := (*reqs)[0].Spec.BoundObjectRef
+	if ref == nil || ref.Kind != "Secret" || ref.APIVersion != "v1" || ref.Name != anchor.Name || ref.UID != anchor.UID {
+		t.Fatalf("bound object ref = %+v, want the anchor %s/%s", ref, anchor.Name, anchor.UID)
+	}
+}
+
+func TestMaterializeCreatesNoAnchorWithoutAKubernetesProvider(t *testing.T) {
+	ctx := context.Background()
+	kube := fake.NewClientset(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: demoCreds, Namespace: gatewayNS},
+		Data: map[string][]byte{tokenKey: []byte(secretValue), configKey: []byte("cfg-" + secretValue)}})
+	plans, _ := sandbox.PlanCredentials(ctx, providers(envProvider()), gatewayNS, []string{demoProvider})
+	if _, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kube.CoreV1().Secrets(gatewayNS).Get(ctx, "last-run-"+runID+sandbox.AnchorSuffix, metav1.GetOptions{}); err == nil {
+		t.Fatal("an env-secret run must not create an anchor")
+	}
+}
+
+func TestMaterializeRefusesAnAnchorWithoutUID(t *testing.T) {
+	ctx := context.Background()
+	kube := fake.NewClientset() // the plain fake does not assign UIDs
+	plans, _ := sandbox.PlanCredentials(ctx, providers(k8sProvider(clusterName)), gatewayNS, []string{clusterName})
+	if _, err := sandbox.Materialize(ctx, kube, credCfg, runID, plans); err == nil || !strings.Contains(err.Error(), "uid") {
+		t.Fatalf("Materialize = %v, want an anchor uid error", err)
 	}
 }

@@ -389,3 +389,19 @@ func TestRunStampsExpiryOnEveryRunObjectButNotTheSelector(t *testing.T) {
 		t.Fatal("RunLabels (the selector) must not carry expires-at")
 	}
 }
+
+func TestReapOrphansDeletesAnOrphanedAnchor(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	meta := runMeta("last-run-o-anchor", "o", old)
+	meta.Namespace = gatewayNS
+	kube, _ := fakeCluster(corev1.PodSucceeded, &corev1.Secret{ObjectMeta: meta})
+	aud, _ := newAudit(t)
+	n, err := newExec(kube, aud, envelopeLogs()).ReapOrphans(context.Background(), time.Minute, now)
+	if err != nil || n != 1 {
+		t.Fatalf("reaped=%d err=%v, want 1", n, err)
+	}
+	if _, err := kube.CoreV1().Secrets(gatewayNS).Get(context.Background(), "last-run-o-anchor", metav1.GetOptions{}); err == nil {
+		t.Fatal("orphaned anchor survived")
+	}
+}

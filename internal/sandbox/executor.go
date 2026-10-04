@@ -304,6 +304,7 @@ func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks l
 			}
 		}
 	}
+	p.credCfg.ExpiresAt = expires
 	creds, err := Materialize(ctx, e.kube, p.credCfg, runID, p.plans)
 	if err != nil {
 		return nil, err
@@ -419,7 +420,7 @@ func (e *Executor) cleanup(ctx context.Context, runID string, onRevoked func(con
 }
 
 // deleteRun deletes the pods, secrets and network policies matching selector in the
-// sandbox namespace and reports how many network policies it deleted.
+// sandbox namespace, plus token anchors in the provider namespace, and reports how many network policies it deleted.
 func (e *Executor) deleteRun(ctx context.Context, selector string) (int, error) {
 	ns := e.cfg.Pod.Namespace
 	opts := metav1.ListOptions{LabelSelector: selector}
@@ -443,6 +444,15 @@ func (e *Executor) deleteRun(ctx context.Context, selector string) (int, error) 
 	} else {
 		for _, s := range secrets.Items {
 			errs = append(errs, ignore(e.kube.CoreV1().Secrets(ns).Delete(ctx, s.Name, metav1.DeleteOptions{})))
+		}
+	}
+	if pns := e.cfg.ProviderNamespace; pns != "" && pns != ns {
+		if anchors, err := e.kube.CoreV1().Secrets(pns).List(ctx, opts); err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, s := range anchors.Items {
+				errs = append(errs, ignore(e.kube.CoreV1().Secrets(pns).Delete(ctx, s.Name, metav1.DeleteOptions{})))
+			}
 		}
 	}
 	deleted := 0

@@ -23,6 +23,7 @@ import (
 
 func TestDefaultTimingsFlowIntoDeadlineTokenAndExpiry(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	withSecretUIDs(kube)
 	var tokenSecs int64
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenSubresource {

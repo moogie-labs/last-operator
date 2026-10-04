@@ -43,6 +43,10 @@ var (
 	ErrReservedEnv                 = errors.New("sandbox: reserved or invalid env var name")
 )
 
+// AnchorSuffix names the per-run Secret in the provider namespace that kubernetes
+// tokens are bound to; deleting it revokes them (TokenRequest boundObjectRef).
+const AnchorSuffix = "-anchor"
+
 // ProviderGetter reads a cluster-scoped Provider by name.
 type ProviderGetter func(ctx context.Context, name string) (*lastv1alpha1.Provider, error)
 
@@ -68,6 +72,8 @@ type CredentialConfig struct {
 	SandboxNamespace  string
 	ProviderNamespace string
 	APIServerHost     string // the kubernetes Service ClusterIP
+	// ExpiresAt stamps the run's expiry on the token anchor; zero means no expiry label.
+	ExpiresAt time.Time
 }
 
 // Materialized is what a run's pod needs to present its credentials.
@@ -166,7 +172,11 @@ func RaiseTokenTTL(plans []CredentialPlan, minTTL time.Duration) {
 }
 
 // Materialize reads provider secrets and mints tokens into a per-run Secret
-// (not yet created) plus the env, mounts and volumes that expose it.
+// (not yet created) plus the env, mounts and volumes that expose it. For a kubernetes
+// provider it first creates one object: the token anchor Secret in the provider
+// namespace, which every token is bound to. Callers must invoke it only after the
+// credential.issued entry is durable. The anchor carries the run labels, so cleanup
+// and the reaper remove it even when Materialize fails later.
 func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialConfig, runID string, plans []CredentialPlan) (Materialized, error) {
 	var m Materialized
 	if len(plans) == 0 {
@@ -174,6 +184,7 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 	}
 	secretName := "last-run-" + runID + "-creds"
 	data := map[string][]byte{}
+	var anchor *corev1.Secret
 	for _, cp := range plans {
 		if cp.Provider == nil {
 			return Materialized{}, fmt.Errorf("sandbox: credential plan has nil provider")
@@ -217,10 +228,26 @@ func Materialize(ctx context.Context, kube kubernetes.Interface, cfg CredentialC
 			if ttl == 0 {
 				ttl = tokenTTL(p)
 			}
+			if anchor == nil {
+				meta := metav1.ObjectMeta{Name: "last-run-" + runID + AnchorSuffix, Namespace: cfg.ProviderNamespace, Labels: RunLabels(runID)}
+				if !cfg.ExpiresAt.IsZero() {
+					stampExpiry(&meta, cfg.ExpiresAt)
+				}
+				created, err := kube.CoreV1().Secrets(cfg.ProviderNamespace).Create(ctx,
+					&corev1.Secret{ObjectMeta: meta, Type: corev1.SecretTypeOpaque}, metav1.CreateOptions{})
+				if err != nil {
+					return Materialized{}, fmt.Errorf("sandbox: create token anchor: %w", err)
+				}
+				if created.UID == "" {
+					return Materialized{}, fmt.Errorf("sandbox: token anchor %s has no uid", created.Name)
+				}
+				anchor = created
+			}
 			secs := int64(ttl.Seconds())
 			requestedAt := time.Now()
 			tr, err := kube.CoreV1().ServiceAccounts(cfg.ProviderNamespace).CreateToken(ctx, sa,
-				&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &secs}}, metav1.CreateOptions{})
+				&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &secs,
+					BoundObjectRef: &authv1.BoundObjectReference{Kind: "Secret", APIVersion: "v1", Name: anchor.Name, UID: anchor.UID}}}, metav1.CreateOptions{})
 			if err != nil {
 				return Materialized{}, fmt.Errorf("sandbox: provider %q token for %s/%s: %w", p.Name, cfg.ProviderNamespace, sa, err)
 			}

@@ -62,6 +62,16 @@ func (e *Executor) ReapOrphans(ctx context.Context, margin time.Duration, now ti
 		record(s.ObjectMeta)
 	}
 
+	if pns := e.cfg.ProviderNamespace; pns != "" && pns != ns {
+		anchors, err := e.kube.CoreV1().Secrets(pns).List(ctx, opts)
+		if err != nil {
+			return 0, fmt.Errorf("sandbox: list anchors: %w", err)
+		}
+		for _, s := range anchors.Items {
+			record(s.ObjectMeta)
+		}
+	}
+
 	nps, err := e.kube.NetworkingV1().NetworkPolicies(ns).List(ctx, opts)
 	if err != nil {
 		return 0, fmt.Errorf("sandbox: list network policies: %w", err)

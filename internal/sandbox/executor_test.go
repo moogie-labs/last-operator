@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -102,7 +103,7 @@ func envelopeLogs(results ...runnerapi.Result) sandbox.LogReader {
 }
 
 func demoSecret() *corev1.Secret {
-	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-creds", Namespace: "last-gateway"},
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-creds", Namespace: gatewayNS},
 		Data: map[string][]byte{tokenKey: []byte(secretValue), configKey: []byte("cfg-" + secretValue)}}
 }
 
@@ -126,7 +127,7 @@ func newExecWith(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogRead
 	return sandbox.NewExecutor(kube, providers(ps...), aud, sandbox.NewScheduler(2), logs,
 		sandbox.ExecutorConfig{
 			Pod:               sandbox.PodConfig{Namespace: "last-sandbox", Image: probeImage},
-			ProviderNamespace: "last-gateway",
+			ProviderNamespace: gatewayNS,
 			PollInterval:      time.Millisecond,
 			DeadlineOverhead:  time.Millisecond,
 			StartupGrace:      50 * time.Millisecond,
@@ -245,6 +246,7 @@ func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
 
 func TestRunWithKubernetesProviderAllowsTheAPIServer(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	withSecretUIDs(kube)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenSubresource {
 			return false, nil, nil
@@ -289,6 +291,7 @@ func TestRunRejectsImageBuildsBeforeAuditing(t *testing.T) {
 
 func TestRunRaisesTheKubernetesTokenTTLAboveThePodLifetime(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	withSecretUIDs(kube)
 	var expiration int64
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenSubresource {
@@ -484,6 +487,7 @@ func TestRunRedactsIssuedCredentialsFromOutput(t *testing.T) {
 
 func TestRunRedactsMintedKubernetesTokens(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	withSecretUIDs(kube)
 	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != tokenSubresource {
 			return false, nil, nil
@@ -731,5 +735,50 @@ func TestRunDefaultRunIDIs32HexCharacters(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(res.RunID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// withSecretUIDs makes the fake clientset assign UIDs to created Secrets, as a real
+// API server does; token anchors need one for boundObjectRef.
+func withSecretUIDs(kube *fake.Clientset) {
+	kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		s := a.(k8stesting.CreateAction).GetObject().(*corev1.Secret)
+		s.UID = types.UID("uid-" + s.Name)
+		return false, nil, nil
+	})
+}
+
+func TestRunDeletesTheTokenAnchorOnCleanup(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
+	withSecretUIDs(kube)
+	kube.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() != tokenSubresource {
+			return false, nil, nil
+		}
+		tr := a.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
+		if tr.Spec.BoundObjectRef == nil || tr.Spec.BoundObjectRef.Name != "last-run-"+runID+sandbox.AnchorSuffix {
+			t.Errorf("token request is not bound to the run anchor: %+v", tr.Spec.BoundObjectRef)
+		}
+		tr.Status.Token = "tok-" + secretValue
+		return true, tr, nil
+	})
+	aud, _ := newAudit(t)
+	if _, err := newExec(kube, aud, envelopeLogs(runnerapi.Result{ID: "c1"})).Run(context.Background(),
+		sandbox.RunRequest{Actor: testActor, Command: cmd([]string{clusterName}, nil)}); err != nil {
+		t.Fatal(err)
+	}
+	left, err := kube.CoreV1().Secrets(gatewayNS).List(context.Background(),
+		metav1.ListOptions{LabelSelector: sandbox.LabelRun + "=" + runID})
+	if err != nil || len(left.Items) != 0 {
+		t.Fatalf("anchors left in last-gateway: %v (err %v)", left, err)
+	}
+	deleted := false
+	for _, a := range kube.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "secrets" && a.GetNamespace() == gatewayNS {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatal("cleanup never deleted the anchor in last-gateway")
 	}
 }
