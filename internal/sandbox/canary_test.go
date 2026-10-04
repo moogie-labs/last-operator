@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,8 @@ func TestRunRejectsACanaryThatIsNotAnIPPort(t *testing.T) {
 	for _, bad := range []string{"gateway.local:8080", "10.0.0.1", "10.0.0.1:0"} {
 		e, _, n := newCanaryExec(t, canaryAddr, bad)
 		base := n()
-		if _, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)}); err == nil || n() != base {
+		_, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)})
+		if err == nil || !strings.Contains(err.Error(), "egress canary "+strconv.Quote(bad)+" must be an IP:port literal") || n() != base {
 			t.Fatalf("canary %q: err = %v, entries = %d", bad, err, n())
 		}
 	}
