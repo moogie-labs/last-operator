@@ -284,6 +284,13 @@ type scriptedDial struct {
 	outcomes map[string][]error
 	calls    map[string]int
 	conns    []*fakeConn
+	delay    time.Duration // how long a successful connect takes
+	events   []dialEvent
+}
+
+type dialEvent struct {
+	at     time.Time
+	denied bool
 }
 
 type fakeConn struct {
@@ -303,6 +310,7 @@ func (d *scriptedDial) dial(ctx context.Context, _, addr string) (net.Conn, erro
 	i := min(d.calls[addr], len(seq)-1)
 	d.calls[addr]++
 	out := seq[i]
+	d.events = append(d.events, dialEvent{at: time.Now(), denied: errors.Is(out, errDeny)})
 	var c *fakeConn
 	if out == nil {
 		c = &fakeConn{}
@@ -311,6 +319,7 @@ func (d *scriptedDial) dial(ctx context.Context, _, addr string) (net.Conn, erro
 	d.mu.Unlock()
 	switch {
 	case out == nil:
+		time.Sleep(d.delay)
 		return c, nil
 	case errors.Is(out, errDeny):
 		<-ctx.Done()
@@ -469,5 +478,41 @@ func TestEgressGateIsSkippedWithoutCanaries(t *testing.T) {
 	env, marker := gateRun(t, nil, d)
 	if !ran(marker) || d.total() != 0 || env.Results[0].ExitCode != 0 {
 		t.Fatalf("results = %+v", env.Results)
+	}
+}
+
+func TestEgressGateNeedsAtLeastThreeDeniedRounds(t *testing.T) {
+	d := newDial(map[string][]error{canaryA: {errDeny}})
+	env, marker := gateRun(t, []string{canaryA}, d, func(o *runner.Options) { o.EgressStableFor = time.Nanosecond })
+	if !ran(marker) || env.Results[0].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+	if d.total() < 3 {
+		t.Fatalf("gate passed after %d denied rounds, want at least 3", d.total())
+	}
+}
+
+func TestEgressGateMeasuresTheWindowFromTheFirstDeniedRound(t *testing.T) {
+	const stable = 100 * time.Millisecond
+	// Reachable rounds that together outlast the window, then only drops: the window
+	// must start at the first drop, not at the start of the gate.
+	d := newDial(map[string][]error{canaryA: append(repeat(nil, 5), errDeny)})
+	d.delay = 30 * time.Millisecond
+	env, marker := gateRun(t, []string{canaryA}, d, func(o *runner.Options) {
+		o.EgressStableFor, o.EgressGateTimeout = stable, 5*time.Second
+	})
+	if !ran(marker) || env.Results[0].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+	var firstDenied, last time.Time
+	for _, e := range d.events {
+		if e.denied && firstDenied.IsZero() {
+			firstDenied = e.at
+		}
+		last = e.at
+	}
+	// The last round starts at most one dial timeout before the window closes.
+	if got := last.Sub(firstDenied); got < stable-10*time.Millisecond {
+		t.Fatalf("gate passed %s after the first denied round, want about %s", got, stable)
 	}
 }
