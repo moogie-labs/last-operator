@@ -255,9 +255,18 @@ func TestSandboxExecution(t *testing.T) {
 	t.Run("nothing is left behind and the audit chain verifies", func(t *testing.T) {
 		ctx := context.Background()
 		sel := metav1.ListOptions{LabelSelector: sandbox.LabelManagedBy + "=" + sandbox.ManagedByValue}
-		pods, _ := s.kube.CoreV1().Pods("last-sandbox").List(ctx, sel)
-		secrets, _ := s.kube.CoreV1().Secrets("last-sandbox").List(ctx, sel)
-		nps, _ := s.kube.NetworkingV1().NetworkPolicies("last-sandbox").List(ctx, sel)
+		pods, err := s.kube.CoreV1().Pods("last-sandbox").List(ctx, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secrets, err := s.kube.CoreV1().Secrets("last-sandbox").List(ctx, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nps, err := s.kube.NetworkingV1().NetworkPolicies("last-sandbox").List(ctx, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(pods.Items)+len(secrets.Items)+len(nps.Items) != 0 {
 			t.Fatalf("leftovers: %d pods, %d secrets, %d policies", len(pods.Items), len(secrets.Items), len(nps.Items))
 		}
@@ -265,11 +274,19 @@ func TestSandboxExecution(t *testing.T) {
 		if err != nil || !rep.OK() {
 			t.Fatalf("verify: %v %+v", err, rep.Problems)
 		}
-		objs, _ := s.sink.List(ctx, audit.EntryPrefix("e2e-sandbox"), "")
+		objs, err := s.sink.List(ctx, audit.EntryPrefix("e2e-sandbox"), "")
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("list audit entries: %v (%d)", err, len(objs))
+		}
 		for _, o := range objs {
-			body, _ := s.sink.Get(ctx, o.Key, "")
-			if strings.Contains(string(body), e2eSecretValue) {
-				t.Fatalf("audit entry %s contains the provider secret value", o.Key)
+			body, err := s.sink.Get(ctx, o.Key, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{e2eSecretValue, e2eFileValue} {
+				if strings.Contains(string(body), secret) {
+					t.Fatalf("audit entry %s contains a provider secret value", o.Key)
+				}
 			}
 		}
 	})
