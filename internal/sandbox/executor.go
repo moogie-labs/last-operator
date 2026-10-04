@@ -44,13 +44,16 @@ func KubeLogReader(kube kubernetes.Interface) LogReader {
 type ExecutorConfig struct {
 	Pod               PodConfig
 	ProviderNamespace string
-	// EgressCanary is an IP:port that would be reachable if egress were open. When set,
-	// the runner runs nothing until dials to it time out, so a CNI that applies a new
-	// pod's NetworkPolicy late cannot leak egress, and runs granting it are rejected.
-	// In M2b the gateway sets it to its own Service ClusterIP on the http port (8080),
-	// which the chart's last-gateway NetworkPolicy admits from anywhere.
-	EgressCanary string
-	PollInterval time.Duration // default 1s
+	// EgressCanaries are IP:port literals that would be reachable if egress were open.
+	// When set, the runner runs nothing until dials to all of them have timed out for a
+	// stable window, so a CNI that applies a new pod's NetworkPolicy late cannot leak
+	// egress, and runs granting any of them are rejected. Use destinations of different
+	// kinds: some CNIs police pods selected by a NetworkPolicy before other traffic. In
+	// M2b the gateway uses its own Service ClusterIP on the http port (8080), which the
+	// chart's last-gateway NetworkPolicy admits from anywhere, plus a node address that
+	// no policy selects.
+	EgressCanaries []string
+	PollInterval   time.Duration // default 1s
 	// DeadlineOverhead is added to the summed command timeouts for activeDeadlineSeconds;
 	// default 60s. It also covers the runner's egress gate (at most 30s).
 	DeadlineOverhead time.Duration
@@ -247,11 +250,11 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 	if err != nil {
 		return prepared{}, err
 	}
-	canary, err := parseCanary(e.cfg.EgressCanary)
+	canaries, err := parseCanaries(e.cfg.EgressCanaries)
 	if err != nil {
 		return prepared{}, err
 	}
-	spec.EgressCanary = e.cfg.EgressCanary
+	spec.EgressCanaries = slices.Clone(e.cfg.EgressCanaries)
 	rules, err := parseRules(egress)
 	if err != nil {
 		return prepared{}, err
@@ -274,10 +277,10 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 		credCfg.APIServerHost = host
 		rules = append(rules, apiRules...)
 	}
-	if canary != nil {
+	for i, c := range canaries {
 		for _, r := range rules {
-			if r.covers(canary.ip, canary.port) {
-				return prepared{}, fmt.Errorf("sandbox: egress grant would allow the egress canary %s", e.cfg.EgressCanary)
+			if r.covers(c.ip, c.port) {
+				return prepared{}, fmt.Errorf("sandbox: egress grant would allow the egress canary %s", e.cfg.EgressCanaries[i])
 			}
 		}
 	}
@@ -550,16 +553,17 @@ type canaryAddr struct {
 	port int32
 }
 
-// parseCanary validates an IP:port literal; "" means no canary.
-func parseCanary(s string) (*canaryAddr, error) {
-	if s == "" {
-		return nil, nil
+// parseCanaries validates IP:port literals.
+func parseCanaries(list []string) ([]canaryAddr, error) {
+	out := make([]canaryAddr, 0, len(list))
+	for _, s := range list {
+		ap, err := netip.ParseAddrPort(s)
+		if err != nil || ap.Port() == 0 {
+			return nil, fmt.Errorf("sandbox: egress canary %q must be an IP:port literal", s)
+		}
+		out = append(out, canaryAddr{ip: ap.Addr().Unmap(), port: int32(ap.Port())})
 	}
-	ap, err := netip.ParseAddrPort(s)
-	if err != nil || ap.Port() == 0 {
-		return nil, fmt.Errorf("sandbox: egress canary %q must be an IP:port literal", s)
-	}
-	return &canaryAddr{ip: ap.Addr().Unmap(), port: int32(ap.Port())}, nil
+	return out, nil
 }
 
 // covers reports whether the rule allows TCP to ip:port.

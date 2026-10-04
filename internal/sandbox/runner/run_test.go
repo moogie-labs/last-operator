@@ -3,11 +3,14 @@ package runner_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -271,56 +274,92 @@ func TestRunSuccessWithBackgroundChild(t *testing.T) {
 	}
 }
 
-// timeoutErr is a dial timeout, the way a dropped packet surfaces.
-type timeoutErr struct{}
+var errDeny = errors.New("dropped") // scripted outcome: the dial blocks until its deadline
 
-func (timeoutErr) Error() string   { return "i/o timeout" }
-func (timeoutErr) Timeout() bool   { return true }
-func (timeoutErr) Temporary() bool { return true }
-
-// scriptedDial plays outcomes in order, repeating the last one.
+// scriptedDial plays outcomes per address in order, repeating the last one. A nil
+// outcome connects, errDeny drops (blocks until the dial deadline), anything else
+// fails immediately.
 type scriptedDial struct {
-	outcomes []error // nil = connect succeeds
-	calls    int
+	mu       sync.Mutex
+	outcomes map[string][]error
+	calls    map[string]int
 	conns    []*fakeConn
 }
 
 type fakeConn struct {
 	net.Conn
-	closed bool
+	closed atomic.Bool
 }
 
-func (c *fakeConn) Close() error { c.closed = true; return nil }
+func (c *fakeConn) Close() error { c.closed.Store(true); return nil }
 
-func (d *scriptedDial) dial(_ context.Context, _, _ string) (net.Conn, error) {
-	i := d.calls
-	if i >= len(d.outcomes) {
-		i = len(d.outcomes) - 1
-	}
-	d.calls++
-	if err := d.outcomes[i]; err != nil {
-		return nil, err
-	}
-	c := &fakeConn{}
-	d.conns = append(d.conns, c)
-	return c, nil
+func newDial(outcomes map[string][]error) *scriptedDial {
+	return &scriptedDial{outcomes: outcomes, calls: map[string]int{}}
 }
 
-func gateRun(t *testing.T, canary string, d *scriptedDial) (runnerapi.Envelope, string) {
+func (d *scriptedDial) dial(ctx context.Context, _, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	seq := d.outcomes[addr]
+	i := min(d.calls[addr], len(seq)-1)
+	d.calls[addr]++
+	out := seq[i]
+	var c *fakeConn
+	if out == nil {
+		c = &fakeConn{}
+		d.conns = append(d.conns, c)
+	}
+	d.mu.Unlock()
+	switch {
+	case out == nil:
+		return c, nil
+	case errors.Is(out, errDeny):
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return nil, out
+}
+
+func (d *scriptedDial) total() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, c := range d.calls {
+		n += c
+	}
+	return n
+}
+
+const canaryA, canaryB = "10.0.0.1:8080", "10.0.0.2:10250"
+
+func repeat(err error, n int) []error {
+	out := make([]error, n)
+	for i := range out {
+		out[i] = err
+	}
+	return out
+}
+
+func gateRun(t *testing.T, canaries []string, d *scriptedDial, mod ...func(*runner.Options)) (runnerapi.Envelope, string) {
 	t.Helper()
 	work := t.TempDir()
 	marker := filepath.Join(work, "ran")
-	env := runner.Run(context.Background(), runnerapi.Spec{Version: runnerapi.Version, EgressCanary: canary,
-		Commands: []runnerapi.Command{{ID: "a", Script: "touch " + marker, TimeoutSeconds: 10}, {ID: "b", Argv: []string{trueCmd}, TimeoutSeconds: 10}}},
-		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: shellBin,
-			Dial: d.dial, EgressGateTimeout: 300 * time.Millisecond, EgressRetryInterval: time.Millisecond, EgressDialTimeout: 5 * time.Millisecond})
+	opts := runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: shellBin, Dial: d.dial,
+		EgressGateTimeout: 500 * time.Millisecond, EgressRetryInterval: time.Millisecond,
+		EgressDialTimeout: 5 * time.Millisecond, EgressStableFor: 20 * time.Millisecond}
+	for _, m := range mod {
+		m(&opts)
+	}
+	env := runner.Run(context.Background(), runnerapi.Spec{Version: runnerapi.Version, EgressCanaries: canaries,
+		Commands: []runnerapi.Command{{ID: "a", Script: "touch " + marker, TimeoutSeconds: 10}, {ID: "b", Argv: []string{trueCmd}, TimeoutSeconds: 10}}}, opts)
 	return env, marker
 }
 
+func ran(marker string) bool { _, err := os.Stat(marker); return err == nil }
+
 func TestEgressGateFailsWhenCanaryStaysReachable(t *testing.T) {
-	d := &scriptedDial{outcomes: []error{nil}}
-	env, marker := gateRun(t, "10.0.0.1:8080", d)
-	if _, err := os.Stat(marker); err == nil {
+	d := newDial(map[string][]error{canaryA: {nil}})
+	env, marker := gateRun(t, []string{canaryA}, d)
+	if ran(marker) {
 		t.Fatal("a command ran although egress was not confirmed denied")
 	}
 	if len(env.Results) != 2 {
@@ -328,51 +367,107 @@ func TestEgressGateFailsWhenCanaryStaysReachable(t *testing.T) {
 	}
 	for i, r := range env.Results {
 		if r.ID != []string{"a", "b"}[i] || r.ExitCode != -1 ||
-			!strings.Contains(r.Error, "egress policy not enforced: canary 10.0.0.1:8080 still reachable after 300ms") {
+			!strings.Contains(r.Error, "egress policy not enforced: canary 10.0.0.1:8080 still reachable after 500ms") {
 			t.Fatalf("result %d = %+v", i, r)
 		}
 	}
 	for _, c := range d.conns {
-		if !c.closed {
+		if !c.closed.Load() {
 			t.Fatal("a canary connection was left open")
 		}
 	}
 }
 
-func TestEgressGatePassesAfterTwoConsecutiveTimeouts(t *testing.T) {
-	d := &scriptedDial{outcomes: []error{nil, nil, nil, timeoutErr{}, timeoutErr{}}}
-	env, marker := gateRun(t, "10.0.0.1:8080", d)
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("commands did not run: %+v", env.Results)
+func TestEgressGatePassesAfterAStableDeniedWindow(t *testing.T) {
+	d := newDial(map[string][]error{canaryA: append(repeat(nil, 3), errDeny)})
+	env, marker := gateRun(t, []string{canaryA}, d)
+	if !ran(marker) || env.Results[0].ExitCode != 0 || env.Results[1].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
 	}
-	if d.calls != 5 || env.Results[0].ExitCode != 0 || env.Results[1].ExitCode != 0 {
-		t.Fatalf("calls=%d results=%+v", d.calls, env.Results)
+	if d.total() < 6 { // 3 reachable rounds, then at least 3 denied rounds
+		t.Fatalf("gate passed after only %d dials", d.total())
 	}
 }
 
-func TestEgressGateRequiresConsecutiveTimeouts(t *testing.T) {
-	d := &scriptedDial{outcomes: []error{timeoutErr{}, nil, timeoutErr{}, nil}}
-	env, _ := gateRun(t, "10.0.0.1:8080", d)
-	if env.Results[0].ExitCode != -1 {
-		t.Fatalf("gate passed on non-consecutive timeouts: %+v", env.Results)
+func TestEgressGateFailsWhenOneOfTwoCanariesIsReachable(t *testing.T) {
+	d := newDial(map[string][]error{canaryA: {errDeny}, canaryB: {nil}})
+	env, marker := gateRun(t, []string{canaryA, canaryB}, d)
+	if ran(marker) || env.Results[0].ExitCode != -1 || !strings.Contains(env.Results[0].Error, "canary "+canaryB+" still reachable") {
+		t.Fatalf("results = %+v", env.Results)
+	}
+}
+
+func TestEgressGatePassesWhenAllCanariesAreDenied(t *testing.T) {
+	d := newDial(map[string][]error{canaryA: {errDeny}, canaryB: {errDeny}})
+	env, marker := gateRun(t, []string{canaryA, canaryB}, d)
+	if !ran(marker) || env.Results[0].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+}
+
+func TestEgressGateRestartsTheWindowAfterAReachableRound(t *testing.T) {
+	// denied x2, reachable, then denied: the two early denials must not count.
+	d := newDial(map[string][]error{canaryA: append([]error{errDeny, errDeny, nil}, errDeny)})
+	env, marker := gateRun(t, []string{canaryA}, d)
+	if !ran(marker) || env.Results[0].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+	if d.total() < 6 { // 2 + 1 + a full new streak of 3
+		t.Fatalf("streak was not reset: %d dials", d.total())
+	}
+}
+
+func TestEgressGateEnforcesTheStabilityWindow(t *testing.T) {
+	// Everything is denied, but the window is longer than the gate allows.
+	d := newDial(map[string][]error{canaryA: {errDeny}})
+	env, marker := gateRun(t, []string{canaryA}, d, func(o *runner.Options) {
+		o.EgressStableFor, o.EgressGateTimeout = time.Hour, 100*time.Millisecond
+	})
+	if ran(marker) || !strings.Contains(env.Results[0].Error, "not confirmed denied") {
+		t.Fatalf("results = %+v", env.Results)
+	}
+	start := time.Now()
+	d = newDial(map[string][]error{canaryA: {errDeny}})
+	env, marker = gateRun(t, []string{canaryA}, d, func(o *runner.Options) { o.EgressStableFor = 80 * time.Millisecond })
+	if !ran(marker) || time.Since(start) < 80*time.Millisecond || env.Results[0].ExitCode != 0 {
+		t.Fatalf("passed after %s: %+v", time.Since(start), env.Results)
 	}
 }
 
 func TestEgressGateFailsWhenDeniedIsNeverObserved(t *testing.T) {
-	d := &scriptedDial{outcomes: []error{syscall.ECONNREFUSED}}
-	env, marker := gateRun(t, "10.0.0.1:8080", d)
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("a command ran")
-	}
-	if r := env.Results[0]; r.ExitCode != -1 || !strings.Contains(r.Error, "not confirmed denied") || strings.Contains(r.Error, "still reachable") {
+	d := newDial(map[string][]error{canaryA: {syscall.ECONNREFUSED}})
+	env, marker := gateRun(t, []string{canaryA}, d)
+	if r := env.Results[0]; ran(marker) || r.ExitCode != -1 || !strings.Contains(r.Error, "not confirmed denied") || strings.Contains(r.Error, "still reachable") {
 		t.Fatalf("result = %+v", r)
 	}
 }
 
-func TestEgressGateIsSkippedWithoutACanary(t *testing.T) {
-	d := &scriptedDial{outcomes: []error{nil}}
-	env, marker := gateRun(t, "", d)
-	if _, err := os.Stat(marker); err != nil || d.calls != 0 || env.Results[0].ExitCode != 0 {
-		t.Fatalf("calls=%d results=%+v", d.calls, env.Results)
+func TestEgressGateIgnoresTimeoutErrorsThatAreNotTheDialDeadline(t *testing.T) {
+	// A net.Error that says Timeout() (EAGAIN, DNS) is not a dropped packet.
+	d := newDial(map[string][]error{canaryA: {&net.DNSError{IsTimeout: true}}})
+	env, marker := gateRun(t, []string{canaryA}, d)
+	if ran(marker) || env.Results[0].ExitCode != -1 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+}
+
+func TestEgressGateFailsClosedOnNonLiteralCanaries(t *testing.T) {
+	for _, bad := range []string{"gateway.last-gateway.svc:8080", "10.0.0.1", "10.0.0.1:0", ""} {
+		d := newDial(map[string][]error{bad: {errDeny}, canaryA: {errDeny}})
+		env, marker := gateRun(t, []string{canaryA, bad}, d)
+		if ran(marker) || !strings.Contains(env.Results[0].Error, "invalid egress canary") {
+			t.Fatalf("canary %q: results = %+v", bad, env.Results)
+		}
+		if d.total() != 0 {
+			t.Fatalf("canary %q: dialed %d times", bad, d.total())
+		}
+	}
+}
+
+func TestEgressGateIsSkippedWithoutCanaries(t *testing.T) {
+	d := newDial(map[string][]error{canaryA: {nil}})
+	env, marker := gateRun(t, nil, d)
+	if !ran(marker) || d.total() != 0 || env.Results[0].ExitCode != 0 {
+		t.Fatalf("results = %+v", env.Results)
 	}
 }

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,7 +27,8 @@ type Options struct {
 	// Egress gate (see Spec.EgressCanary). Zero values select the defaults.
 	EgressGateTimeout   time.Duration // bounds the whole gate; default 30s
 	EgressDialTimeout   time.Duration // per canary dial; default 500ms
-	EgressRetryInterval time.Duration // between attempts; default 200ms
+	EgressRetryInterval time.Duration // between rounds; default 200ms
+	EgressStableFor     time.Duration // denied rounds must span this long; default 2s
 	// Dial opens the canary connection; default net.Dialer.DialContext.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -33,8 +36,8 @@ type Options struct {
 // Run executes every command in order. A failing command never stops later ones.
 func Run(ctx context.Context, spec runnerapi.Spec, opts Options) runnerapi.Envelope {
 	env := runnerapi.Envelope{Version: runnerapi.Version, Results: make([]runnerapi.Result, 0, len(spec.Commands))}
-	if spec.EgressCanary != "" {
-		if msg := egressGate(ctx, spec.EgressCanary, opts); msg != "" {
+	if len(spec.EgressCanaries) > 0 {
+		if msg := egressGate(ctx, spec.EgressCanaries, opts); msg != "" {
 			for _, c := range spec.Commands {
 				env.Results = append(env.Results, runnerapi.Result{ID: c.ID, ExitCode: -1, Error: msg})
 			}
@@ -47,13 +50,17 @@ func Run(ctx context.Context, spec runnerapi.Spec, opts Options) runnerapi.Envel
 	return env
 }
 
-// egressGate blocks until dials to the canary time out twice in a row, which is how
-// NetworkPolicy denies (dropped packets). CNIs apply a new pod's policy shortly after
-// it starts, so until then the canary may be reachable. Any other outcome (connect,
-// refused, unreachable) means "not yet enforced" and is retried. It returns "" when
-// egress is confirmed denied, else the failure message. Nothing is read from the canary.
-func egressGate(ctx context.Context, canary string, opts Options) string {
-	gateTimeout, dialTimeout, retry := opts.EgressGateTimeout, opts.EgressDialTimeout, opts.EgressRetryInterval
+// egressGate blocks until every canary dial times out in each of a run of
+// consecutive rounds that spans at least EgressStableFor and has at least
+// minDeniedRounds rounds. NetworkPolicy denies by dropping packets, so only a dial
+// whose own deadline expired counts as denied. Anything else (connect, refused,
+// unreachable, DNS) means "not yet enforced" and resets the streak. CNIs apply a
+// new pod's policy late and may police some destinations before others, so several
+// canaries and a stability window guard against a single early verdict.
+// It returns "" when egress is confirmed denied, else the failure message. Nothing is
+// read from a canary connection.
+func egressGate(ctx context.Context, canaries []string, opts Options) string {
+	gateTimeout, dialTimeout, retry, stable := opts.EgressGateTimeout, opts.EgressDialTimeout, opts.EgressRetryInterval, opts.EgressStableFor
 	if gateTimeout <= 0 {
 		gateTimeout = 30 * time.Second
 	}
@@ -63,44 +70,74 @@ func egressGate(ctx context.Context, canary string, opts Options) string {
 	if retry <= 0 {
 		retry = 200 * time.Millisecond
 	}
+	if stable <= 0 {
+		stable = 2 * time.Second
+	}
+	for _, c := range canaries {
+		if ap, err := netip.ParseAddrPort(c); err != nil || ap.Port() == 0 {
+			return fmt.Sprintf("egress policy not enforced: invalid egress canary %q", c)
+		}
+	}
 	dial := opts.Dial
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
 	gctx, cancel := context.WithTimeout(ctx, gateTimeout)
 	defer cancel()
-	reachable := false
-	for timeouts := 0; timeouts < 2; {
-		dctx, dcancel := context.WithTimeout(gctx, dialTimeout)
-		conn, err := dial(dctx, "tcp", canary)
-		dcancel()
-		var nerr net.Error
-		switch {
-		case err == nil:
-			_ = conn.Close()
-			reachable, timeouts = true, 0
-		case gctx.Err() == nil && errors.As(err, &nerr) && nerr.Timeout():
-			reachable = false
-			timeouts++
-		case gctx.Err() != nil:
-			// the gate's own deadline, not a verdict about the canary
-		default:
-			reachable, timeouts = false, 0
+	var streak int
+	var streakStart time.Time
+	bad, badReachable := canaries[0], false
+	for {
+		denied := make([]bool, len(canaries))
+		reachable := make([]bool, len(canaries))
+		var wg sync.WaitGroup
+		for i, c := range canaries {
+			wg.Go(func() {
+				dctx, dcancel := context.WithTimeout(gctx, dialTimeout)
+				conn, err := dial(dctx, "tcp", c)
+				// Checked before cancel: only the dial's own deadline is a denial.
+				denied[i] = err != nil && gctx.Err() == nil && errors.Is(dctx.Err(), context.DeadlineExceeded)
+				dcancel()
+				if err == nil {
+					_ = conn.Close()
+					reachable[i] = true
+				}
+			})
 		}
-		if timeouts >= 2 {
-			return ""
+		wg.Wait()
+		all := true
+		for i := range canaries {
+			if !denied[i] {
+				all = false
+				if gctx.Err() == nil || reachable[i] {
+					bad, badReachable = canaries[i], reachable[i]
+				}
+			}
+		}
+		if all {
+			if streak == 0 {
+				streakStart = time.Now()
+			}
+			streak++
+			if streak >= minDeniedRounds && time.Since(streakStart) >= stable {
+				return ""
+			}
+		} else {
+			streak = 0
 		}
 		select {
 		case <-gctx.Done():
-			if reachable {
-				return fmt.Sprintf("egress policy not enforced: canary %s still reachable after %s", canary, gateTimeout)
+			if badReachable {
+				return fmt.Sprintf("egress policy not enforced: canary %s still reachable after %s", bad, gateTimeout)
 			}
-			return fmt.Sprintf("egress policy not enforced: canary %s not confirmed denied after %s", canary, gateTimeout)
+			return fmt.Sprintf("egress policy not enforced: canary %s not confirmed denied after %s", bad, gateTimeout)
 		case <-time.After(retry):
 		}
 	}
-	return ""
 }
+
+// minDeniedRounds is the fewest consecutive all-denied rounds the gate accepts.
+const minDeniedRounds = 3
 
 func runOne(ctx context.Context, c runnerapi.Command, opts Options) runnerapi.Result {
 	res := runnerapi.Result{ID: c.ID}

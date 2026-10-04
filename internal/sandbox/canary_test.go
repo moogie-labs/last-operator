@@ -3,6 +3,7 @@ package sandbox_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +17,12 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
-const canaryAddr = "10.96.5.5:8080"
+const (
+	canaryAddr  = "10.96.5.5:8080"
+	canaryAddr2 = "172.18.0.2:10250"
+)
 
-func newCanaryExec(t *testing.T, canary string) (*sandbox.Executor, *[]runnerapi.Spec, func() int) {
+func newCanaryExec(t *testing.T, canaries ...string) (*sandbox.Executor, *[]runnerapi.Spec, func() int) {
 	t.Helper()
 	kube, _ := fakeCluster(corev1.PodSucceeded)
 	specs := &[]runnerapi.Spec{}
@@ -37,47 +41,52 @@ func newCanaryExec(t *testing.T, canary string) (*sandbox.Executor, *[]runnerapi
 		sandbox.ExecutorConfig{
 			Pod:               sandbox.PodConfig{Namespace: sandboxNS, Image: probeImage},
 			ProviderNamespace: gatewayNS, PollInterval: time.Millisecond, DeadlineOverhead: time.Millisecond,
-			StartupGrace: 50 * time.Millisecond, CleanupTimeout: time.Second, EgressCanary: canary,
+			StartupGrace: 50 * time.Millisecond, CleanupTimeout: time.Second, EgressCanaries: canaries,
 			NewRunID: func() string { return runID },
 		})
 	return e, specs, func() int { return len(entries(t, sink)) }
 }
 
 func TestRunPutsTheEgressCanaryInTheSpec(t *testing.T) {
-	e, specs, _ := newCanaryExec(t, canaryAddr)
+	e, specs, _ := newCanaryExec(t, canaryAddr, canaryAddr2)
 	if _, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)}); err != nil {
 		t.Fatal(err)
 	}
-	if len(*specs) != 1 || (*specs)[0].EgressCanary != canaryAddr {
+	if len(*specs) != 1 || !slices.Equal((*specs)[0].EgressCanaries, []string{canaryAddr, canaryAddr2}) {
 		t.Fatalf("specs = %+v", *specs)
 	}
 }
 
 func TestRunProbesPutTheEgressCanaryInTheSpec(t *testing.T) {
 	e, specs, _ := newCanaryExec(t, canaryAddr)
-	_, _ = e.RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor,
-		Probes: []lastv1alpha1.Probe{{ID: "c1", Assert: "result.exitCode == 0", Command: cmd(nil, nil)}}})
-	if len(*specs) != 1 || (*specs)[0].EgressCanary != canaryAddr {
+	if _, err := e.RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor,
+		Probes: []lastv1alpha1.Probe{{ID: "c1", Assert: "result.exitCode == 0", Command: cmd(nil, nil)}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*specs) != 1 || !slices.Equal((*specs)[0].EgressCanaries, []string{canaryAddr}) {
 		t.Fatalf("specs = %+v", *specs)
 	}
 }
 
 func TestRunWithoutACanaryLeavesTheSpecAlone(t *testing.T) {
-	e, specs, _ := newCanaryExec(t, "")
+	e, specs, _ := newCanaryExec(t)
 	if _, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)}); err != nil {
 		t.Fatal(err)
 	}
-	if (*specs)[0].EgressCanary != "" {
+	if len((*specs)[0].EgressCanaries) != 0 {
 		t.Fatalf("spec = %+v", (*specs)[0])
 	}
 }
 
 func TestRunRejectsGrantsThatCoverTheCanaryBeforeAuditing(t *testing.T) {
-	for _, grant := range []string{"10.96.5.5:8080", "10.96.5.5/32:8080", "10.96.0.0/16:8080"} {
-		e, specs, n := newCanaryExec(t, canaryAddr)
+	for grant, canary := range map[string]string{
+		"10.96.5.5:8080": canaryAddr, "10.96.5.5/32:8080": canaryAddr, "10.96.0.0/16:8080": canaryAddr,
+		"[::ffff:10.96.5.5]:8080": canaryAddr, "172.18.0.2:10250": canaryAddr2, "172.18.0.0/24:10250": canaryAddr2,
+	} {
+		e, specs, n := newCanaryExec(t, canaryAddr, canaryAddr2)
 		base := n() // the chain's own start entry
 		_, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, []string{grant})})
-		if err == nil || !strings.Contains(err.Error(), "egress grant would allow the egress canary "+canaryAddr) {
+		if err == nil || !strings.Contains(err.Error(), "egress grant would allow the egress canary "+canary) {
 			t.Fatalf("grant %s: err = %v", grant, err)
 		}
 		if n() != base || len(*specs) != 0 {
@@ -95,7 +104,7 @@ func TestRunAllowsAnotherPortOnTheCanaryIP(t *testing.T) {
 
 func TestRunRejectsACanaryThatIsNotAnIPPort(t *testing.T) {
 	for _, bad := range []string{"gateway.local:8080", "10.0.0.1", "10.0.0.1:0"} {
-		e, _, n := newCanaryExec(t, bad)
+		e, _, n := newCanaryExec(t, canaryAddr, bad)
 		base := n()
 		if _, err := e.Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: cmd(nil, nil)}); err == nil || n() != base {
 			t.Fatalf("canary %q: err = %v, entries = %d", bad, err, n())

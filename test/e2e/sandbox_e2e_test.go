@@ -124,7 +124,7 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	exec := sandbox.NewExecutor(kube, getProvider, w, sandbox.NewScheduler(4), sandbox.KubeLogReader(kube), sandbox.ExecutorConfig{
 		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}},
-		ProviderNamespace: "last-gateway", EgressCanary: canary,
+		ProviderNamespace: "last-gateway", EgressCanaries: []string{canary},
 	})
 	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canary: canary}
 }
