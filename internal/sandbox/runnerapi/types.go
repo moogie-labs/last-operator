@@ -28,6 +28,10 @@ var ErrNoResult = errors.New("runnerapi: sandbox produced no result envelope")
 type Spec struct {
 	Version  int       `json:"version"`
 	Commands []Command `json:"commands"`
+	// EgressCanary is a host:port that would be reachable if egress were open and that
+	// the run's NetworkPolicy must deny. When set, the runner runs nothing until dials
+	// to it time out (see runner.Options.EgressGateTimeout).
+	EgressCanary string `json:"egressCanary,omitempty"`
 }
 
 // Command is one execution. Exactly one of Argv or Script is set.

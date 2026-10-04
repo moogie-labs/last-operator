@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,85 @@ type Options struct {
 	MaxOutput int    // cap per stream, bytes
 	WorkDir   string // the only directory files may be written under
 	Shell     string // used for Script commands
+
+	// Egress gate (see Spec.EgressCanary). Zero values select the defaults.
+	EgressGateTimeout   time.Duration // bounds the whole gate; default 30s
+	EgressDialTimeout   time.Duration // per canary dial; default 500ms
+	EgressRetryInterval time.Duration // between attempts; default 200ms
+	// Dial opens the canary connection; default net.Dialer.DialContext.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Run executes every command in order. A failing command never stops later ones.
 func Run(ctx context.Context, spec runnerapi.Spec, opts Options) runnerapi.Envelope {
 	env := runnerapi.Envelope{Version: runnerapi.Version, Results: make([]runnerapi.Result, 0, len(spec.Commands))}
+	if spec.EgressCanary != "" {
+		if msg := egressGate(ctx, spec.EgressCanary, opts); msg != "" {
+			for _, c := range spec.Commands {
+				env.Results = append(env.Results, runnerapi.Result{ID: c.ID, ExitCode: -1, Error: msg})
+			}
+			return env
+		}
+	}
 	for _, c := range spec.Commands {
 		env.Results = append(env.Results, runOne(ctx, c, opts))
 	}
 	return env
+}
+
+// egressGate blocks until dials to the canary time out twice in a row, which is how
+// NetworkPolicy denies (dropped packets). CNIs apply a new pod's policy shortly after
+// it starts, so until then the canary may be reachable. Any other outcome (connect,
+// refused, unreachable) means "not yet enforced" and is retried. It returns "" when
+// egress is confirmed denied, else the failure message. Nothing is read from the canary.
+func egressGate(ctx context.Context, canary string, opts Options) string {
+	gateTimeout, dialTimeout, retry := opts.EgressGateTimeout, opts.EgressDialTimeout, opts.EgressRetryInterval
+	if gateTimeout <= 0 {
+		gateTimeout = 30 * time.Second
+	}
+	if dialTimeout <= 0 {
+		dialTimeout = 500 * time.Millisecond
+	}
+	if retry <= 0 {
+		retry = 200 * time.Millisecond
+	}
+	dial := opts.Dial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	gctx, cancel := context.WithTimeout(ctx, gateTimeout)
+	defer cancel()
+	reachable := false
+	for timeouts := 0; timeouts < 2; {
+		dctx, dcancel := context.WithTimeout(gctx, dialTimeout)
+		conn, err := dial(dctx, "tcp", canary)
+		dcancel()
+		var nerr net.Error
+		switch {
+		case err == nil:
+			_ = conn.Close()
+			reachable, timeouts = true, 0
+		case gctx.Err() == nil && errors.As(err, &nerr) && nerr.Timeout():
+			reachable = false
+			timeouts++
+		case gctx.Err() != nil:
+			// the gate's own deadline, not a verdict about the canary
+		default:
+			reachable, timeouts = false, 0
+		}
+		if timeouts >= 2 {
+			return ""
+		}
+		select {
+		case <-gctx.Done():
+			if reachable {
+				return fmt.Sprintf("egress policy not enforced: canary %s still reachable after %s", canary, gateTimeout)
+			}
+			return fmt.Sprintf("egress policy not enforced: canary %s not confirmed denied after %s", canary, gateTimeout)
+		case <-time.After(retry):
+		}
+	}
+	return ""
 }
 
 func runOne(ctx context.Context, c runnerapi.Command, opts Options) runnerapi.Result {

@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -267,5 +268,111 @@ func TestRunSuccessWithBackgroundChild(t *testing.T) {
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatalf("command took %s", time.Since(start))
+	}
+}
+
+// timeoutErr is a dial timeout, the way a dropped packet surfaces.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// scriptedDial plays outcomes in order, repeating the last one.
+type scriptedDial struct {
+	outcomes []error // nil = connect succeeds
+	calls    int
+	conns    []*fakeConn
+}
+
+type fakeConn struct {
+	net.Conn
+	closed bool
+}
+
+func (c *fakeConn) Close() error { c.closed = true; return nil }
+
+func (d *scriptedDial) dial(_ context.Context, _, _ string) (net.Conn, error) {
+	i := d.calls
+	if i >= len(d.outcomes) {
+		i = len(d.outcomes) - 1
+	}
+	d.calls++
+	if err := d.outcomes[i]; err != nil {
+		return nil, err
+	}
+	c := &fakeConn{}
+	d.conns = append(d.conns, c)
+	return c, nil
+}
+
+func gateRun(t *testing.T, canary string, d *scriptedDial) (runnerapi.Envelope, string) {
+	t.Helper()
+	work := t.TempDir()
+	marker := filepath.Join(work, "ran")
+	env := runner.Run(context.Background(), runnerapi.Spec{Version: runnerapi.Version, EgressCanary: canary,
+		Commands: []runnerapi.Command{{ID: "a", Script: "touch " + marker, TimeoutSeconds: 10}, {ID: "b", Argv: []string{trueCmd}, TimeoutSeconds: 10}}},
+		runner.Options{MaxOutput: runnerapi.MaxOutput, WorkDir: work, Shell: shellBin,
+			Dial: d.dial, EgressGateTimeout: 300 * time.Millisecond, EgressRetryInterval: time.Millisecond, EgressDialTimeout: 5 * time.Millisecond})
+	return env, marker
+}
+
+func TestEgressGateFailsWhenCanaryStaysReachable(t *testing.T) {
+	d := &scriptedDial{outcomes: []error{nil}}
+	env, marker := gateRun(t, "10.0.0.1:8080", d)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a command ran although egress was not confirmed denied")
+	}
+	if len(env.Results) != 2 {
+		t.Fatalf("results = %+v", env.Results)
+	}
+	for i, r := range env.Results {
+		if r.ID != []string{"a", "b"}[i] || r.ExitCode != -1 ||
+			!strings.Contains(r.Error, "egress policy not enforced: canary 10.0.0.1:8080 still reachable after 300ms") {
+			t.Fatalf("result %d = %+v", i, r)
+		}
+	}
+	for _, c := range d.conns {
+		if !c.closed {
+			t.Fatal("a canary connection was left open")
+		}
+	}
+}
+
+func TestEgressGatePassesAfterTwoConsecutiveTimeouts(t *testing.T) {
+	d := &scriptedDial{outcomes: []error{nil, nil, nil, timeoutErr{}, timeoutErr{}}}
+	env, marker := gateRun(t, "10.0.0.1:8080", d)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("commands did not run: %+v", env.Results)
+	}
+	if d.calls != 5 || env.Results[0].ExitCode != 0 || env.Results[1].ExitCode != 0 {
+		t.Fatalf("calls=%d results=%+v", d.calls, env.Results)
+	}
+}
+
+func TestEgressGateRequiresConsecutiveTimeouts(t *testing.T) {
+	d := &scriptedDial{outcomes: []error{timeoutErr{}, nil, timeoutErr{}, nil}}
+	env, _ := gateRun(t, "10.0.0.1:8080", d)
+	if env.Results[0].ExitCode != -1 {
+		t.Fatalf("gate passed on non-consecutive timeouts: %+v", env.Results)
+	}
+}
+
+func TestEgressGateFailsWhenDeniedIsNeverObserved(t *testing.T) {
+	d := &scriptedDial{outcomes: []error{syscall.ECONNREFUSED}}
+	env, marker := gateRun(t, "10.0.0.1:8080", d)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a command ran")
+	}
+	if r := env.Results[0]; r.ExitCode != -1 || !strings.Contains(r.Error, "not confirmed denied") || strings.Contains(r.Error, "still reachable") {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+func TestEgressGateIsSkippedWithoutACanary(t *testing.T) {
+	d := &scriptedDial{outcomes: []error{nil}}
+	env, marker := gateRun(t, "", d)
+	if _, err := os.Stat(marker); err != nil || d.calls != 0 || env.Results[0].ExitCode != 0 {
+		t.Fatalf("calls=%d results=%+v", d.calls, env.Results)
 	}
 }
