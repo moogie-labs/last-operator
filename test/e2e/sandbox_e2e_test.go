@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -115,10 +116,13 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	if err != nil || len(nodes.Items) == 0 {
 		t.Fatalf("list nodes: %v", err)
 	}
+	// Prefer an InternalIP of the gateway ClusterIP's address family.
+	wantV6 := strings.Contains(gwSvc.Spec.ClusterIP, ":")
 	var nodeIP string
 	for _, a := range nodes.Items[0].Status.Addresses {
-		if a.Type == corev1.NodeInternalIP {
+		if a.Type == corev1.NodeInternalIP && strings.Contains(a.Address, ":") == wantV6 {
 			nodeIP = a.Address
+			break
 		}
 	}
 	if nodeIP == "" {
@@ -157,13 +161,42 @@ func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult
 	return res
 }
 
-// requireDenied asserts curl ran and was denied: it timed out (exit 28, code 000)
+// requireDenied asserts curl ran and was denied: it timed out (exit 28 and code 000)
 // rather than the sandbox failing to run it or the request succeeding.
 func requireDenied(t *testing.T, r runnerapi.Result) {
 	t.Helper()
-	if r.Error != "" || (r.Stdout != "000" && r.ExitCode != 28) {
+	if r.Error != "" || r.ExitCode != 28 || r.Stdout != "000" {
 		t.Fatalf("curl was not cleanly denied (does the CNI enforce NetworkPolicy?): %+v", r)
 	}
+}
+
+// openPodCurl runs curl from a plain pod in the target namespace (no NetworkPolicy
+// there) and returns the HTTP code, "000" when the connection failed.
+func openPodCurl(t *testing.T, kube kubernetes.Interface, name, url string) string {
+	t.Helper()
+	ctx := context.Background()
+	zero := int64(0)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: targetNS},
+		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, TerminationGracePeriodSeconds: &zero,
+			Containers: []corev1.Container{{Name: "runner", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
+				Command: []string{"sh", "-c", "curl -sk -o /dev/null -w '%{http_code}' --max-time 5 " + url}}}}}
+	if _, err := kube.CoreV1().Pods(targetNS).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = kube.CoreV1().Pods(targetNS).Delete(context.Background(), name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
+	})
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+		p, err := kube.CoreV1().Pods(targetNS).Get(ctx, name, metav1.GetOptions{})
+		return err == nil && (p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed), nil
+	}); err != nil {
+		t.Fatalf("pod %s did not finish: %v", name, err)
+	}
+	out, err := kube.CoreV1().Pods(targetNS).GetLogs(name, &corev1.PodLogOptions{}).DoRaw(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestSandboxExecution(t *testing.T) {
@@ -171,6 +204,19 @@ func TestSandboxExecution(t *testing.T) {
 	curl3 := "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://" + s.targetIP + "/"
 	curl := "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://" + s.targetIP + "/"
 
+	t.Run("the canaries are reachable when egress is open", func(t *testing.T) {
+		// Without this the gate could pass (and egress look denied) because the canary
+		// was never reachable in the first place.
+		for i, c := range s.canaries {
+			scheme := "http://"
+			if i == 1 {
+				scheme = "https://" // kubelet; any TCP connect counts, including a 401
+			}
+			if code := openPodCurl(t, s.kube, "canary-check-"+strconv.Itoa(i), scheme+c+"/"); code == "000" || code == "" {
+				t.Fatalf("canary %s is unreachable from an unrestricted pod (curl code %q)", c, code)
+			}
+		}
+	})
 	t.Run("egress is denied by default", func(t *testing.T) {
 		requireDenied(t, s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: curl}}).Result)
 	})
