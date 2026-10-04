@@ -6,17 +6,28 @@ import (
 )
 
 // LLMProviderType selects a gateway LLM adapter.
-// +kubebuilder:validation:Enum=anthropic;openai;openai-compatible
+// +kubebuilder:validation:Enum=anthropic;openai;openai-compatible;scripted
 type LLMProviderType string
 
 const (
 	LLMAnthropic        LLMProviderType = "anthropic"
 	LLMOpenAI           LLMProviderType = "openai"
 	LLMOpenAICompatible LLMProviderType = "openai-compatible"
+	// LLMScripted replays fixed responses from a ConfigMap; for tests and demos (spec §18).
+	LLMScripted LLMProviderType = "scripted"
 )
+
+// ScriptedLLM points at a ConfigMap in last-gateway. Each key is an Intent
+// ("<namespace>.<name>") and each value a JSON array of response strings; the
+// n-th response answers a conversation that already holds n assistant messages.
+type ScriptedLLM struct {
+	ConfigMapRef LocalRef `json:"configMapRef"`
+}
 
 // LLMProviderSpec configures one model endpoint.
 // +kubebuilder:validation:XValidation:rule="self.type != 'openai-compatible' || has(self.endpoint)",message="endpoint is required for openai-compatible"
+// +kubebuilder:validation:XValidation:rule="self.type == 'scripted' || has(self.secretRef)",message="secretRef is required unless type is scripted"
+// +kubebuilder:validation:XValidation:rule="self.type != 'scripted' || has(self.scripted)",message="scripted is required when type is scripted"
 type LLMProviderSpec struct {
 	Type LLMProviderType `json:"type"`
 	// +kubebuilder:validation:MinLength=1
@@ -24,7 +35,10 @@ type LLMProviderSpec struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 	// SecretRef names a Secret in last-gateway holding the API key.
-	SecretRef LocalRef `json:"secretRef"`
+	// +optional
+	SecretRef *LocalRef `json:"secretRef,omitempty"`
+	// +optional
+	Scripted *ScriptedLLM `json:"scripted,omitempty"`
 }
 
 // +kubebuilder:object:root=true

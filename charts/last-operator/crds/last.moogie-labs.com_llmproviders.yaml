@@ -51,6 +51,25 @@ spec:
               model:
                 minLength: 1
                 type: string
+              scripted:
+                description: |-
+                  ScriptedLLM points at a ConfigMap in last-gateway. Each key is an Intent
+                  ("<namespace>.<name>") and each value a JSON array of response strings; the
+                  n-th response answers a conversation that already holds n assistant messages.
+                properties:
+                  configMapRef:
+                    description: LocalRef names an object in the same namespace (or
+                      a cluster-scoped object).
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - configMapRef
+                type: object
               secretRef:
                 description: SecretRef names a Secret in last-gateway holding the
                   API key.
@@ -67,15 +86,19 @@ spec:
                 - anthropic
                 - openai
                 - openai-compatible
+                - scripted
                 type: string
             required:
             - model
-            - secretRef
             - type
             type: object
             x-kubernetes-validations:
             - message: endpoint is required for openai-compatible
               rule: self.type != 'openai-compatible' || has(self.endpoint)
+            - message: secretRef is required unless type is scripted
+              rule: self.type == 'scripted' || has(self.secretRef)
+            - message: scripted is required when type is scripted
+              rule: self.type != 'scripted' || has(self.scripted)
         required:
         - spec
         type: object

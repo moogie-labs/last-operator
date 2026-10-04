@@ -27,6 +27,8 @@ const (
 	TypeRuleObserved      = "rule.observed"
 	TypeSuggestionDecided = "suggestion.decided"
 	TypePolicyDenied      = "policy.denied"
+	// output Secret written; values recorded as SHA-256 (spec §15)
+	TypeOutputWritten = "output.written"
 )
 
 // GenesisHash is the prevHash of the entry at seq 0.

@@ -92,7 +92,26 @@ func TestProviderTypeRequiresMatchingFields(t *testing.T) {
 
 func TestLLMProviderOpenAICompatibleRequiresEndpoint(t *testing.T) {
 	obj := &lastv1alpha1.LLMProvider{ObjectMeta: clusterMeta(), Spec: lastv1alpha1.LLMProviderSpec{
-		Type: lastv1alpha1.LLMOpenAICompatible, Model: "llama", SecretRef: lastv1alpha1.LocalRef{Name: "key"},
+		Type: lastv1alpha1.LLMOpenAICompatible, Model: "llama", SecretRef: &lastv1alpha1.LocalRef{Name: "key"},
 	}}
 	expectInvalid(t, k8sClient.Create(ctx, obj), "endpoint is required for openai-compatible")
+}
+
+func TestLLMProviderScriptedNeedsConfigMapNotSecret(t *testing.T) {
+	ok := &lastv1alpha1.LLMProvider{ObjectMeta: clusterMeta(), Spec: lastv1alpha1.LLMProviderSpec{
+		Type: lastv1alpha1.LLMScripted, Model: "fixture",
+		Scripted: &lastv1alpha1.ScriptedLLM{ConfigMapRef: lastv1alpha1.LocalRef{Name: "llm-script"}},
+	}}
+	if err := k8sClient.Create(ctx, ok); err != nil {
+		t.Fatalf("create scripted: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, ok) })
+
+	missing := &lastv1alpha1.LLMProvider{ObjectMeta: clusterMeta(), Spec: lastv1alpha1.LLMProviderSpec{
+		Type: lastv1alpha1.LLMScripted, Model: "fixture"}}
+	expectInvalid(t, k8sClient.Create(ctx, missing), "scripted is required when type is scripted")
+
+	noSecret := &lastv1alpha1.LLMProvider{ObjectMeta: clusterMeta(), Spec: lastv1alpha1.LLMProviderSpec{
+		Type: lastv1alpha1.LLMAnthropic, Model: "claude"}}
+	expectInvalid(t, k8sClient.Create(ctx, noSecret), "secretRef is required unless type is scripted")
 }

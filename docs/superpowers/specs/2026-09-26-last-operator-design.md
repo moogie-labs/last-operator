@@ -389,6 +389,7 @@ spec:
   llmProviderRef: { name: anthropic-default }
   sandbox:
     baseImage: ghcr.io/moogie-labs/last-sandbox-base@sha256:…   # pinned by digest
+    # When `sandbox.baseImage` is unset, the gateway falls back to the Helm value `sandbox.image` (development and e2e installs only; production pins the image by digest here).
     maxConcurrent: 20           # cluster-wide cap on running sandbox + build pods
   registry:
     mode: bundled               # bundled | external
@@ -436,10 +437,11 @@ spec:
 ---
 kind: LLMProvider
 spec:
-  type: anthropic | openai | openai-compatible
+  type: anthropic | openai | openai-compatible | scripted
   model: "…"
   endpoint: "…"                 # for openai-compatible
   secretRef: { name: anthropic-key }
+  scripted: { configMapRef: { name: llm-script } }   # type scripted only: fixed responses for tests and demos
 ```
 
 ## 6. Configuration layering and defaults
@@ -586,7 +588,7 @@ again.
 **The gateway takes the snapshot from its own records.** For
 Remediate, Delete, and probes, the gateway uses the **last successfully
 executed plan** for the Intent from the audit log: `phase.begin`
-records the full plan and `phase.end` records the outcome. It never
+records the full plan and `phase.end` records the outcome. In v1 the gateway keeps that record (the open phase and the last executed plan per Intent) in a gateway-owned ConfigMap in `last-gateway`, written only after the matching `phase.begin`/`phase.end`. The operator has no access to it, and a gateway restart closes an open phase as `interrupted` rather than resuming it. It never
 trusts `ManagedResource.spec` or `Intent.status` for these, because
 the operator can write both.
 
@@ -1034,7 +1036,8 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 `image.build.start`, `image.build.result`, `image.deleted`,
 `image.gc.start`, `image.gc.result` (§11.2, §11.3),
 `approval.observed`, `rule.observed` (a rule created, changed, or
-deleted, seen via watch), `suggestion.decided`, `policy.denied`.
+deleted, seen via watch), `suggestion.decided`, `policy.denied`,
+`output.written` (records a WriteOutputSecret with each value as its SHA-256).
 
 **Redaction:** credential values are never logged. Values written to
 output Secrets are logged as SHA-256 hashes. LLM payloads are logged in
