@@ -811,6 +811,18 @@ Every command runs in a sandbox pod:
   - **Requirement:** the cluster's CNI must enforce NetworkPolicy.
     Host-name egress rules require Cilium (or equivalent). Without it,
     only CIDR rules are supported.
+  - **Egress gate.** CNIs may program a new pod's policy a moment after
+    the pod starts (kindnet: about one second), leaving egress open.
+    The runner therefore runs nothing until it has seen every
+    configured *egress canary* (an `IP:port` that is reachable whenever
+    egress is open and that the run's policy denies) time out on
+    consecutive rounds for at least two seconds; after 30 seconds it
+    fails every command closed. The gateway rejects any grant that
+    covers a canary. Canaries should include one whose backend is not
+    itself selected by a NetworkPolicy, since some CNIs police traffic
+    to policy-selected pods on a different path. The CNI must *drop*
+    denied packets (not reject them), and the gateway's http port must
+    stay reachable from any namespace while it serves as a canary.
 - **Output.** The gateway captures stdout, stderr (each truncated at
   1 MiB, with truncation recorded), and the exit code into the audit
   log (`command.result`) and returns them to the operator. Before
@@ -1210,7 +1222,8 @@ The CRs emit standard Kubernetes Events for phase transitions.
   calls the CLI makes. Provider-side audit trails (e.g. CloudTrail,
   Kubernetes audit) complement it.
 - **Every command and probe starts a pod.** Expect a few seconds of
-  latency per command. The first use of a new image spec also waits for
+  latency per command, plus at least two seconds for the egress gate
+  (§11.1). The first use of a new image spec also waits for
   a build, from about 30 seconds to a few minutes.
 - **Audit volume at scale.** Even with compact probe entries, each probe
   run writes 2 objects under compliance retention, and every write goes
@@ -1234,6 +1247,11 @@ The CRs emit standard Kubernetes Events for phase transitions.
   command was planned and approved.
 - **Credential redaction is best-effort.** A command that re-encodes a
   credential value defeats it (§11.1).
+- **The egress gate is a point-in-time check.** It proves policy is in
+  force when the command starts. A CNI that fails open when its agent
+  restarts (kindnet queues policy decisions with bypass) can reopen
+  egress mid-run. A CNI that rejects denied packets instead of dropping
+  them makes every run fail closed.
 - **Probe reliability** depends on the LLM writing good probes. The
   Verifying phase catches probes that fail immediately, but not probes
   that pass trivially.
@@ -1272,7 +1290,7 @@ restricted to the same level as admin access.
   approvals or rules or set suggestion decisions; `approvedBy` /
   `decidedBy` spoofing is rejected; rule constraints are enforced
   (literal `argv[0]`, `...` last only).
-- **End-to-end tests on kind** (with Calico for NetworkPolicy): full
+- **End-to-end tests on kind** (with kind's default kindnet CNI, which enforces NetworkPolicy): full
   Helm install with bundled RustFS and registry, `kubectl last audit conformance` passing; a command whose image
   requires a build, then runs from the node-local proxy; the web server
   demo driven by the

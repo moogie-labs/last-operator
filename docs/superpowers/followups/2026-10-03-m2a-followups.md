@@ -33,7 +33,26 @@ during M2a are not listed.
 - **Restrict gRPC ingress (9090) with a `podSelector`** for the operator
   pod once the operator Deployment's labels exist.
 
+- **Configure egress canaries in the gateway.** `ExecutorConfig.EgressCanaries`
+  is empty (no gate) unless set. M2b must set at least the gateway's own
+  Service `ClusterIP:8080` plus one canary whose backend is not selected by
+  any NetworkPolicy (on kindnet the node InternalIP:10250 works; choose per
+  CNI), and fail startup if none is configured.
+
 ## Address in M2b
+
+- **Egress canary coverage after DNAT.** The gateway rejects grants that
+  cover a canary's `IP:port`, but not grants on the canary Service's
+  endpoint IPs or pod CIDR. Such a grant makes the gate fail closed after
+  30s with a misleading "not enforced" error; resolve canary endpoints
+  (as `APIServerEgress` does) and reject those too.
+- **Gate failures need a typed marker** so a probe whose gate failed is not
+  read as an assertion failure or drift.
+- **`DeadlineOverhead` must cover the gate** (≥ `EgressGateTimeout` plus
+  image pull); validate it instead of relying on the 60s default.
+- E2E: follow `IMAGE_REGISTRY`/`IMAGE_TAG` instead of a hard-coded image;
+  creating the target Pod can fail on an immediate rerun while its
+  namespace is still Terminating.
 
 - **Shutdown drain:** cancel in-flight runs and wait for cleanup + outcome
   entries before exit; size `terminationGracePeriodSeconds` accordingly (also
