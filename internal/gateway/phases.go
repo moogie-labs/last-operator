@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -32,8 +36,15 @@ const (
 )
 
 // phase is an open phase of this gateway process.
+//
+// Every holder of mu must check closed immediately after acquiring it: a closed
+// phase (ended by EndPhase, or interrupted) must never run anything, even when
+// a caller still holds a stale pointer to it.
 type phase struct {
 	mu       sync.Mutex // held while a step or output write runs
+	closed   bool       // phase.end is durable; set under mu
+	endSeq   uint64     // seq of the phase.end already written; non-zero while the state save is pending
+	outcome  string     // outcome recorded by that phase.end
 	stage    lastv1alpha1.Stage
 	subject  string
 	body     plan.Body
@@ -95,6 +106,22 @@ type policyDenied struct {
 	Reason string `json:"reason"`
 }
 
+var subjectPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+const maxReasonBytes = 1 << 10
+
+// truncateReason caps s at maxReasonBytes on a UTF-8 boundary.
+func truncateReason(s string) string {
+	if len(s) <= maxReasonBytes {
+		return s
+	}
+	cut := maxReasonBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.ToValidUTF8(s[:cut], "") + "…(truncated)"
+}
+
 var errApprovalDenied = errors.New("approval denied")
 
 func intentKey(ref *gatewayv1.IntentRef) (ns, name, key string, err error) {
@@ -127,6 +154,9 @@ func (d denial) deny(code codes.Code, format string, args ...any) error {
 	return status.Error(code, reason)
 }
 
+// errInvalidPolicy marks a policy that does not resolve; callers audit it as a denial.
+type errInvalidPolicy struct{ error }
+
 func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effective, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
@@ -138,7 +168,7 @@ func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effect
 	}
 	eff, err := policy.Resolve(op, list.Items)
 	if err != nil {
-		return policy.Effective{}, status.Errorf(codes.FailedPrecondition, "invalid policy: %v", err)
+		return policy.Effective{}, errInvalidPolicy{err}
 	}
 	return eff, nil
 }
@@ -199,13 +229,16 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, err
 	}
 	stage, subject := lastv1alpha1.Stage(req.GetStage()), req.GetSubjectHash()
-	if stage != lastv1alpha1.StageCreate {
-		return nil, status.Errorf(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create phases only", stage)
+	if !subjectPattern.MatchString(subject) {
+		return nil, status.Error(codes.InvalidArgument, "subject_hash must be sha256:<64 lowercase hex digits>")
 	}
 	unlock := g.locks.lock(key)
 	defer unlock()
 	actor := CallerFrom(ctx)
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, stage: string(stage), subject: subject, rpc: "BeginPhase"}
+	if stage != lastv1alpha1.StageCreate {
+		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create phases only", stage)
+	}
 
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
@@ -239,7 +272,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 	if rec.Open != nil {
 		if rec.Open.Epoch == g.epoch && g.phases.get(key) != nil {
-			return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
+			return nil, d.deny(codes.AlreadyExists, "a phase is already open for this intent (subject %s)", rec.Open.SubjectHash)
 		}
 		if err := g.closeInterrupted(ctx, w, key, rec); err != nil {
 			return nil, err
@@ -249,6 +282,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
 	}
 	eff, err := g.effectivePolicy(ctx, ns)
+	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
+		return nil, d.deny(codes.FailedPrecondition, "invalid policy: %v", invalid.error)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -281,8 +317,10 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch}
 	rec.MarkUsed(subject)
 	if err := g.state.Save(ctx, rec); err != nil {
-		_, _ = w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: string(stage),
-			SubjectHash: subject, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}})
+		if _, aerr := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(stage),
+			SubjectHash: subject, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}}); aerr != nil {
+			slog.Warn("Could not record aborted phase", "err", aerr)
+		}
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	g.phases.put(key, &phase{stage: stage, subject: subject, body: body, auth: auth, beginSeq: begin.Seq, results: plan.Results{}})
@@ -297,6 +335,11 @@ func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key str
 		SubjectHash: open.SubjectHash, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
 			Reason: "the gateway restarted or lost leadership during the phase"}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+	}
+	if p := g.phases.get(key); p != nil {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 	}
 	g.phases.remove(key)
 	rec.Open = nil
@@ -316,42 +359,59 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 	if err != nil {
 		return nil, err
 	}
+	subject := req.GetSubjectHash()
+	if !subjectPattern.MatchString(subject) {
+		return nil, status.Error(codes.InvalidArgument, "subject_hash must be sha256:<64 lowercase hex digits>")
+	}
 	unlock := g.locks.lock(key)
 	defer unlock()
+	actor := CallerFrom(ctx)
+	d := denial{ctx: ctx, w: w, actor: actor, intent: key, subject: subject, rpc: "EndPhase"}
 	p := g.phases.get(key)
-	if p == nil || p.subject != req.GetSubjectHash() {
-		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
+	if p == nil || p.subject != subject {
+		return nil, d.deny(codes.FailedPrecondition, "no open phase for this plan")
 	}
+	d.stage = string(p.stage)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if req.GetSucceeded() && (p.failed || p.next < len(p.body.Steps)) {
-		return nil, status.Errorf(codes.FailedPrecondition, "the phase cannot succeed: %d of %d steps succeeded", p.next, len(p.body.Steps))
-	}
-	outcome := outcomeFailed
+	want := outcomeFailed
 	if req.GetSucceeded() {
-		outcome = outcomeSucceeded
+		want = outcomeSucceeded
 	}
-	end, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: CallerFrom(ctx), Intent: key, Stage: string(p.stage),
-		SubjectHash: p.subject, AuthorizedBy: p.auth,
-		Payload: phaseEnd{BeginSeq: p.beginSeq, Outcome: outcome, Reason: req.GetReason(), StepsRun: p.next}})
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+	if p.endSeq != 0 {
+		// A previous attempt wrote phase.end but could not save the record; only retry the save.
+		if p.outcome != want {
+			return nil, d.deny(codes.FailedPrecondition, "this phase already ended as %s", p.outcome)
+		}
+	} else {
+		if req.GetSucceeded() && (p.failed || p.next < len(p.body.Steps)) {
+			return nil, d.deny(codes.FailedPrecondition, "the phase cannot succeed: %d of %d steps succeeded", p.next, len(p.body.Steps))
+		}
 	}
-	g.phases.remove(key)
 	rec, err := g.state.Load(ctx, key)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
+	if p.endSeq == 0 {
+		end, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(p.stage),
+			SubjectHash: p.subject, AuthorizedBy: p.auth,
+			Payload: phaseEnd{BeginSeq: p.beginSeq, Outcome: want, Reason: truncateReason(req.GetReason()), StepsRun: p.next}})
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+		}
+		p.endSeq, p.outcome, p.closed = end.Seq, want, true
+	}
 	rec.Open = nil
-	if req.GetSucceeded() {
+	if p.outcome == outcomeSucceeded {
 		canonical, err := plan.Canonical(p.body)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
 		}
-		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: end.Seq}
+		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq}
 	}
 	if err := g.state.Save(ctx, rec); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	return &gatewayv1.EndPhaseResponse{EndSeq: end.Seq}, nil
+	g.phases.remove(key)
+	return &gatewayv1.EndPhaseResponse{EndSeq: p.endSeq}, nil
 }

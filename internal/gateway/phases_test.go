@@ -3,12 +3,16 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -17,6 +21,8 @@ import (
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
+
+const msgNoApproval = "no IntentApproval"
 
 func twoSteps() []lastv1alpha1.Command {
 	return []lastv1alpha1.Command{
@@ -54,8 +60,11 @@ func TestBeginPhaseOpensAnApprovedPlan(t *testing.T) {
 	if err != nil || rec.Open == nil || rec.Open.BeginSeq != begin.Seq || rec.Open.Epoch != env.g.epoch {
 		t.Fatalf("record = %+v, %v", rec.IntentRecord, err)
 	}
-	if _, err := env.begin(h); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("second BeginPhase = %v, want AlreadyExists", err)
+	if _, err := env.begin(h); status.Code(err) != codes.AlreadyExists || !strings.Contains(err.Error(), h) {
+		t.Fatalf("second BeginPhase = %v, want AlreadyExists naming %s", err, h)
+	}
+	if env.last().Type != audit.TypePolicyDenied {
+		t.Fatalf("last entry = %s, want policy.denied", env.last().Type)
 	}
 }
 
@@ -84,10 +93,10 @@ func TestBeginPhaseDenials(t *testing.T) {
 			in.Status.Plan.Steps[0].Run.Argv = []string{"kubectl", "delete", "ns", "team-x"}
 			return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)}
 		}, codes.PermissionDenied, "does not match"},
-		{"no approval", func(in *lastv1alpha1.Intent) []runtime.Object { return nil }, codes.FailedPrecondition, "no IntentApproval"},
+		{"no approval", func(in *lastv1alpha1.Intent) []runtime.Object { return nil }, codes.FailedPrecondition, msgNoApproval},
 		{"approval for another plan", func(in *lastv1alpha1.Intent) []runtime.Object {
 			return []runtime.Object{approvalFor("other", "sha256:"+strings.Repeat("0", 64), lastv1alpha1.DecisionApprove, approver)}
-		}, codes.FailedPrecondition, "no IntentApproval"},
+		}, codes.FailedPrecondition, msgNoApproval},
 		{"denied", func(in *lastv1alpha1.Intent) []runtime.Object {
 			return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver),
 				approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")}
@@ -101,6 +110,21 @@ func TestBeginPhaseDenials(t *testing.T) {
 			in.Status.Plan.Hash = h
 			return []runtime.Object{approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver)}
 		}, codes.PermissionDenied, `provider "prod"`},
+		{"approval in another namespace", func(in *lastv1alpha1.Intent) []runtime.Object {
+			a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+			a.Namespace = tokOther
+			return []runtime.Object{a}
+		}, codes.FailedPrecondition, msgNoApproval},
+		{"approval for another intent", func(in *lastv1alpha1.Intent) []runtime.Object {
+			a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+			a.Spec.IntentRef.Name = tokOther
+			return []runtime.Object{a}
+		}, codes.FailedPrecondition, msgNoApproval},
+		{"approval for another stage", func(in *lastv1alpha1.Intent) []runtime.Object {
+			a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+			a.Spec.Stage = lastv1alpha1.StageUpdate
+			return []runtime.Object{a}
+		}, codes.FailedPrecondition, msgNoApproval},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +157,9 @@ func TestBeginPhaseOpensCreateOnly(t *testing.T) {
 	_, err := env.g.beginPhase(env.ctx, &gatewayv1.BeginPhaseRequest{Intent: ref(), Stage: "Update", SubjectHash: in.Status.Plan.Hash})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("Update phase = %v, want FailedPrecondition", err)
+	}
+	if env.last().Type != audit.TypePolicyDenied {
+		t.Fatalf("last entry = %s, want policy.denied", env.last().Type)
 	}
 }
 
@@ -178,11 +205,17 @@ func TestEndPhase(t *testing.T) {
 	if _, err := env.end(h, false); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("EndPhase without a phase = %v", err)
 	}
+	if env.last().Type != audit.TypePolicyDenied {
+		t.Fatalf("last entry = %s, want policy.denied", env.last().Type)
+	}
 	if _, err := env.begin(h); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.end(h, true); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("EndPhase(succeeded) before any step = %v, want FailedPrecondition", err)
+	}
+	if env.last().Type != audit.TypePolicyDenied {
+		t.Fatalf("last entry = %s, want policy.denied", env.last().Type)
 	}
 	if _, err := env.end(h, false); err != nil {
 		t.Fatal(err)
@@ -230,4 +263,113 @@ func withVersion(t *testing.T, env *testEnv, in *lastv1alpha1.Intent) *lastv1alp
 	}
 	in.ResourceVersion = cur.ResourceVersion
 	return in
+}
+
+func TestEndPhaseRetriesTheStateSaveWithoutASecondPhaseEnd(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	p.next = len(p.body.Steps) // both steps ran
+	var fail atomic.Bool
+	fail.Store(true)
+	env.kube.PrependReactor("update", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if fail.CompareAndSwap(true, false) {
+			return true, nil, errors.New("etcd unavailable")
+		}
+		return false, nil, nil
+	})
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first EndPhase = %v, want Unavailable", err)
+	}
+	if _, err := env.end(h, false); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("EndPhase with another outcome = %v, want FailedPrecondition", err)
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatalf("retried EndPhase = %v", err)
+	}
+	var ends int
+	for _, e := range env.entries() {
+		var pe phaseEnd
+		if e.Type == audit.TypePhaseEnd && json.Unmarshal(e.Payload, &pe) == nil && pe.BeginSeq == p.beginSeq {
+			ends++
+		}
+	}
+	if ends != 1 {
+		t.Fatalf("phase.end entries for the phase = %d, want 1", ends)
+	}
+	rec, _ := env.g.state.Load(context.Background(), envKey)
+	if rec.Open != nil || rec.Executed == nil || rec.Executed.PlanHash != h {
+		t.Fatalf("record = %+v", rec.IntentRecord)
+	}
+}
+
+func TestEndPhaseMarksTheStalePhaseClosed(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	if _, err := env.end(h, false); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if !closed {
+		t.Fatal("a phase held across EndPhase is not marked closed")
+	}
+}
+
+func TestRestartMarksTheOldPhaseClosed(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	env.g.epoch = "next" // the same process sees its open phase as another epoch's
+	if _, err := env.begin(h); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if !closed {
+		t.Fatal("an interrupted phase is not marked closed")
+	}
+}
+
+func TestPhaseRequestsRejectMalformedSubjectsWithoutAuditing(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	env := newTestEnv(t, in, allowAll())
+	before := len(env.entries())
+	for _, bad := range []string{"", "sha256:abc", "SHA256:" + strings.Repeat("0", 64), "sha256:" + strings.Repeat("G", 64)} {
+		if _, err := env.begin(bad); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("BeginPhase(%q) = %v", bad, err)
+		}
+		if _, err := env.end(bad, false); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("EndPhase(%q) = %v", bad, err)
+		}
+	}
+	if len(env.entries()) != before {
+		t.Fatal("a malformed request wrote an audit entry")
+	}
+}
+
+func TestTruncateReason(t *testing.T) {
+	if got := truncateReason("short"); got != "short" {
+		t.Fatalf("got %q", got)
+	}
+	long := strings.Repeat("é", 1000) // 2000 bytes
+	got := truncateReason(long)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "…(truncated)") || len(got) > maxReasonBytes+len("…(truncated)") {
+		t.Fatalf("truncated reason = %d bytes, valid=%v", len(got), utf8.ValidString(got))
+	}
 }
