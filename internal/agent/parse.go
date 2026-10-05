@@ -1,0 +1,94 @@
+package agent
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"regexp"
+	"strings"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/plan"
+)
+
+// MaxPlanBytes bounds a plan's canonical JSON. It stays well under the gateway's
+// bounds (512 KiB per plan, about 900 KiB per record) and the Intent object size.
+const MaxPlanBytes = 256 << 10
+
+// answer is the JSON object the model must answer with (see SystemPrompt).
+type answer struct {
+	Summary   string                             `json:"summary"`
+	Steps     []lastv1alpha1.Command             `json:"steps"`
+	Resources []lastv1alpha1.ManagedResourceSpec `json:"resources,omitempty"`
+}
+
+var fence = regexp.MustCompile("(?s)^\\s*```(?:json)?[ \\t]*\\n(.*?)\\n?```\\s*$")
+
+// Parse reads a model answer: one JSON object, optionally inside a ```json
+// fence. It checks everything the gateway and the CRD schema would refuse, so a
+// bad answer becomes a correction turn rather than a rejected status write.
+func Parse(content string) (*lastv1alpha1.Plan, error) {
+	raw := strings.TrimSpace(content)
+	if m := fence.FindStringSubmatch(content); m != nil {
+		raw = m[1]
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var a answer
+	if err := dec.Decode(&a); err != nil {
+		return nil, fmt.Errorf("the answer is not a plan object: %w", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("the answer has text after the plan object")
+	}
+	for _, s := range a.Steps {
+		if err := checkCommand("step "+s.ID, s); err != nil {
+			return nil, err
+		}
+	}
+	for i, r := range a.Resources {
+		if r.IntentRef != nil {
+			return nil, fmt.Errorf("resource %d sets intentRef; the operator sets it", i)
+		}
+		for j, p := range r.Probes {
+			if p.ID == "" {
+				return nil, fmt.Errorf("probe %d of resource %d has no id", j, i)
+			}
+			if p.Assert == "" {
+				return nil, fmt.Errorf("probe %q has no assert", p.ID)
+			}
+			if err := checkCommand("probe "+p.ID, p.Command); err != nil {
+				return nil, err
+			}
+		}
+	}
+	body := plan.Body{Steps: a.Steps, Resources: a.Resources}
+	if err := plan.Validate(body); err != nil {
+		return nil, err
+	}
+	canonical, err := plan.Canonical(body)
+	if err != nil {
+		return nil, err
+	}
+	if len(canonical) > MaxPlanBytes {
+		return nil, fmt.Errorf("the plan is %d bytes; the limit is %d", len(canonical), MaxPlanBytes)
+	}
+	hash, err := plan.Hash(body)
+	if err != nil {
+		return nil, err
+	}
+	return &lastv1alpha1.Plan{Hash: hash, Summary: a.Summary, Steps: a.Steps, Resources: a.Resources}, nil
+}
+
+// checkCommand mirrors the CRD's rule for commands and refuses image builds,
+// which arrive in M4.
+func checkCommand(where string, c lastv1alpha1.Command) error {
+	if (len(c.Run.Argv) > 0) == (c.Run.Script != "") {
+		return fmt.Errorf("%s: set exactly one of run.argv and run.script", where)
+	}
+	if c.Image != nil {
+		return fmt.Errorf("%s: image.install is not supported yet", where)
+	}
+	return nil
+}
