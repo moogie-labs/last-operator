@@ -58,3 +58,7 @@ func (s *rpcServer) RunProbes(ctx context.Context, req *gatewayv1.RunProbesReque
 func (s *rpcServer) WriteOutputSecret(ctx context.Context, req *gatewayv1.WriteOutputSecretRequest) (*gatewayv1.WriteOutputSecretResponse, error) {
 	return s.g.writeOutputSecret(ctx, req)
 }
+
+func (s *rpcServer) CallLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*gatewayv1.CallLLMResponse, error) {
+	return s.g.callLLM(ctx, req)
+}
