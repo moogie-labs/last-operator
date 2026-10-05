@@ -1,0 +1,27 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: last-intentapproval
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["last.moogie-labs.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["intentapprovals"]
+  validations:
+    - expression: "request.operation == 'CREATE'"
+      message: "IntentApprovals are immutable"
+    - expression: "object.spec.approvedBy == request.userInfo.username"
+      message: "spec.approvedBy must be the requesting user"
+    - expression: "!(request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-operator'))"
+      message: "the operator may not create IntentApprovals"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: last-intentapproval
+spec:
+  policyName: last-intentapproval
+  validationActions: [Deny]
