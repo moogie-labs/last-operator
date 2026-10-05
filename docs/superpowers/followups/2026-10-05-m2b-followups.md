@@ -43,6 +43,15 @@ by the final fix wave (W1–W6) are not listed.
 - **Close interrupted phases eagerly at lead.** List `component=intent-state` ConfigMaps and close every `Open` from another epoch, instead of waiting for that Intent's next BeginPhase.
 - **EndPhase Save failure plus restart** writes an `interrupted` `phase.end` after a `succeeded` one, and `Executed` is never recorded. A leader-start reconciliation from the chain would close this.
 
+## From the final fix-wave re-review
+
+- **Record headroom.** `recordFits` sizes the record after EndPhase, but BeginPhase's own save also holds the old `Executed` plus `Open`. A stored record within about 600 bytes of `MaxRecordBytes` makes every later BeginPhase write `phase.begin` and then an aborted `phase.end`. That fails closed, but the Intent is stuck. Include a worst-case `OpenPhase` in the prospective record.
+- **Per-step re-check gaps.** The re-checks in RunCommand and RunProbes accept any non-denied Approve, but skip the operator-identity and gateway-namespace approver checks that BeginPhase applies. This matters only for a non-default gateway namespace.
+- **Queued steps.** RunCommand's re-check runs before the sandbox scheduler grants a slot, so a Deny filed while a step waits in the queue does not stop that step.
+- **Partial probe runs.** When a later probe group uses a forbidden Provider, earlier groups have already run and written their entries before the `policy.denied`.
+- **Over-broad guard matches.** The audit-guard VAP matches any ServiceAccount named `last-gateway` in any namespace. This is harmless, but could be scoped.
+- **Missing stage.** RunProbes denials carry no stage.
+
 ## Security hardening
 
 - **Dedicated namespace.** Move per-run anchors and Provider ServiceAccounts and Secrets to their own namespace (e.g. `last-gateway-runs`). Then the gateway Role in `last-gateway` can return to `resourceNames` rules. This is the structural form of the audit-object guard.
