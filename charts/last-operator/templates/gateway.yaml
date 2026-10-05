@@ -31,16 +31,14 @@ metadata:
   labels: {{- include "last.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: [secrets, configmaps]
-    verbs: [create]
-  - apiGroups: [""]
     resources: [secrets]
-    resourceNames: [last-audit-signing]
-    verbs: [get]
+    verbs: [get, list, create, delete]   # signing key, provider credentials, per-run token anchors
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [last-audit-pubkey]
-    verbs: [get, update]
+    verbs: [get, list, create, update]   # public key, LLM scripts, gateway-owned intent records
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]                      # kubernetes Provider tokens, bound to the run anchor
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [create]
@@ -64,6 +62,89 @@ subjects:
     name: last-gateway
     namespace: {{ $gw }}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: last-gateway-sandbox
+  namespace: {{ .Values.namespaces.sandbox }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, list, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: last-gateway-sandbox
+  namespace: {{ .Values.namespaces.sandbox }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-gateway-sandbox}
+subjects:
+  - {kind: ServiceAccount, name: last-gateway, namespace: {{ $gw }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: last-gateway-apiserver
+  namespace: default
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    resourceNames: [kubernetes]
+    verbs: [get]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: last-gateway-apiserver
+  namespace: default
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-gateway-apiserver}
+subjects:
+  - {kind: ServiceAccount, name: last-gateway, namespace: {{ $gw }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: last-gateway-lifecycle
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [last.moogie-labs.com]
+    resources: [intents, intentapprovals, managedresources, intentpolicies, operatorconfigs, providers, llmproviders]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update]         # output Secrets in Intent namespaces (spec §15)
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]                         # service egress canaries
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [list]                        # the node egress canary
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: last-gateway-lifecycle
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: last-gateway-lifecycle}
+subjects:
+  - {kind: ServiceAccount, name: last-gateway, namespace: {{ $gw }}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,6 +164,7 @@ spec:
         {{- include "last.labels" . | nindent 8 }}
     spec:
       serviceAccountName: last-gateway
+      terminationGracePeriodSeconds: 330 # covers LAST_DRAIN_TIMEOUT (5m)
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
@@ -108,6 +190,12 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ include "last.writerSecret" . }}, key: secretKey}}
             - {name: LAST_GRPC_ADDR, value: ":9090"}
             - {name: LAST_OPERATOR_IDENTITY, value: {{ printf "system:serviceaccount:%s:last-operator" .Release.Namespace | quote }}}
+            - {name: LAST_SANDBOX_NAMESPACE, value: {{ .Values.namespaces.sandbox | quote }}}
+            - {name: LAST_EGRESS_CANARIES, value: {{ .Values.sandbox.egressCanaries | default (printf "service/%s/last-gateway:8080,node:10250" $gw) | quote }}}
+            - {name: LAST_DRAIN_TIMEOUT, value: "5m"}
+            {{- with .Values.sandbox.image }}
+            - {name: LAST_SANDBOX_IMAGE, value: {{ . | quote }}}
+            {{- end }}
           ports:
             - {name: http, containerPort: 8080}
             - {name: grpc, containerPort: 9090}

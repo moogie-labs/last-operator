@@ -312,3 +312,10 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	@# The sandbox egress gate uses the gateway's http port as a canary: the last-gateway NetworkPolicy
 	@# ingress item that opens 8080 must exist and must have no from: key (before or after ports:).
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: NetworkPolicy\n/ && doc ~ /\nmetadata:\n  name: last-gateway\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | awk 'function close_item() { if (item ~ /port: 8080/) { found = 1; if (item ~ /(^|\n) *(- )?from:/) bad = 1 } item = "" } /^ *#/ { next } /^    - / { close_item() } /^[^ ]/ || /^  [a-z]/ { if (!/^  ingress:/) close_item() } { item = item $$0 "\n" } END { close_item(); exit !(found && !bad) }'
+	helm template last charts/last-operator -n last-system | grep -q '^kind: ValidatingAdmissionPolicy$$'
+	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_EGRESS_CANARIES, value: "service/last-gateway/last-gateway:8080,node:10250"'
+	helm template last charts/last-operator -n last-system | grep -q 'resources: \[pods/log\]'
+	helm template last charts/last-operator -n last-system | grep -q 'resources: \[serviceaccounts/token\]'
+	helm template last charts/last-operator -n last-system | grep -q 'terminationGracePeriodSeconds: 330'
+	helm template last charts/last-operator -n last-system --set sandbox.image=img:dev | grep -q 'name: LAST_SANDBOX_IMAGE, value: "img:dev"'
+	! helm template last charts/last-operator -n last-system | grep -q 'LAST_SANDBOX_IMAGE'

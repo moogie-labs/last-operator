@@ -19,6 +19,7 @@ make helm-crds
 helm upgrade --install last charts/last-operator -n last-system --create-namespace \
   --set image.tag="$TAG" --set image.registry="$REGISTRY" --set image.pullPolicy=Never \
   --set audit.bundled.size=1Gi \
+  --set sandbox.image="$REGISTRY/last-sandbox-base:$TAG" \
   --wait --wait-for-jobs --timeout 10m
 
 go test -tags e2e ./test/e2e/ -count=1 -v -timeout 30m

@@ -33,3 +33,11 @@ gateway:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 256Mi}
+
+sandbox:
+  # Fallback sandbox image, used only while OperatorConfig spec.sandbox.baseImage is
+  # unset (development and e2e). Production pins the image by digest in OperatorConfig.
+  image: ""
+  # Comma-separated egress canaries (spec §11.1): IP:port, service/<ns>/<name>:<port>,
+  # or node:<port>. Empty means the gateway Service's http port and a node's kubelet.
+  egressCanaries: ""
