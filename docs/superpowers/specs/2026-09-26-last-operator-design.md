@@ -763,6 +763,12 @@ probes:
   `probes.interval`. Any failure resets it to `fastInterval`.
 - **Floor.** No layer can set an interval below
   `OperatorConfig.probes.minInterval`.
+- **Fixed interval (M2).** Until adaptive intervals arrive (M5), each
+  Intent is probed at a fixed interval: the shortest `probes.interval` set
+  by `OperatorConfig.spec.defaults` or any `IntentPolicy` in its namespace
+  (default 5m), never below `probes.minInterval`. Runs are scheduled on a
+  grid from the previous run's start; grid points that pass while a run is
+  in flight are skipped and counted.
 - **Jitter.** Each scheduled run is offset by a random ±10% of its
   interval, so Intents created together don't probe in lockstep.
 - **No overlap.** An Intent never has more than one probe run in flight
