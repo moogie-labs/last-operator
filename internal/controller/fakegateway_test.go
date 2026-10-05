@@ -308,3 +308,13 @@ func (f *fakeGateway) lastRequest(key types.NamespacedName) *gatewayv1.CallLLMRe
 	}
 	return reqs[len(reqs)-1]
 }
+
+// updateScript changes an Intent's script in place.
+func (f *fakeGateway) updateScript(key types.NamespacedName, change func(*script)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.scripts[key] == nil {
+		f.scripts[key] = &script{}
+	}
+	change(f.scripts[key])
+}

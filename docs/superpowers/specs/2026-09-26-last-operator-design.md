@@ -1227,12 +1227,12 @@ namespace and Intent:
 - Commands by stage, outcome, and authorization kind (approval / rule / auto)
 - Sandbox pod startup and run durations; sandbox queue depth and wait time
 - Image builds (count, duration, failures), image cache hits, registry size
-- Probe runs skipped due to overlap
+- Probe runs skipped due to overlap (`last_operator_probe_runs_skipped_total`)
 - Approvals pending and time-to-approve
 - Rule suggestions created, accepted, and denied
 - Audit writes, audit write failures, and chain seq
 - `policy.denied` counts
-- Probe runs, failures, and drift events
+- Probe runs, failures, and drift events (`last_operator_probe_runs_total`, by result)
 
 The CRs emit standard Kubernetes Events for phase transitions.
 
