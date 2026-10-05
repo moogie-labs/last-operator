@@ -588,9 +588,14 @@ again.
 **The gateway takes the snapshot from its own records.** For
 Remediate, Delete, and probes, the gateway uses the **last successfully
 executed plan** for the Intent from the audit log: `phase.begin`
-records the full plan and `phase.end` records the outcome. In v1 the gateway keeps that record (the open phase and the last executed plan per Intent) in a gateway-owned ConfigMap in `last-gateway`, written only after the matching `phase.begin`/`phase.end`. The operator has no access to it, and a gateway restart closes an open phase as `interrupted` rather than resuming it. It never
+records the full plan and `phase.end` records the outcome. It never
 trusts `ManagedResource.spec` or `Intent.status` for these, because
-the operator can write both.
+the operator can write both. In v1 the gateway keeps that record (the
+open phase and the last executed plan per Intent) in a gateway-owned
+ConfigMap in `last-gateway`, written only after the matching
+`phase.begin`/`phase.end`. The operator has no access to it, and a
+gateway restart closes an open phase as `interrupted` rather than
+resuming it.
 
 - **Auto-mode remediation** is limited to re-running commands from that
   plan. If the remediation plan contains any other command, it needs
