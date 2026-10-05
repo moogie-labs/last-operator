@@ -123,7 +123,7 @@ func TestValue(t *testing.T) {
 	}
 	bad := []string{
 		"${steps.missing.stdout}", "${steps.bad.stdout}", "${steps.get.json.spec.nope}",
-		"${steps.get.json.obj}", "${steps.get.json.spec.ports.9.port}", "${steps.trunc.json.a}",
+		"${steps.get.json.obj}", "${steps.get.json.spec.ports.9.port}", "${steps.trunc.json.a}", "${steps.trunc.stdout}",
 		"${steps.echo.json.x}", "steps.echo.stdout", echoStdoutRef + " ",
 	}
 	for _, expr := range bad {

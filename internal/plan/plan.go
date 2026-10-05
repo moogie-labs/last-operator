@@ -101,11 +101,11 @@ func (r Results) Value(expr string) (string, error) {
 	if res.ExitCode != 0 || res.Error != "" {
 		return "", fmt.Errorf("%w: step %q did not succeed", ErrReference, m[1])
 	}
-	if m[2] == "stdout" {
-		return strings.TrimRight(res.Stdout, "\n"), nil
-	}
 	if res.StdoutTruncated {
 		return "", fmt.Errorf("%w: step %q output was truncated", ErrReference, m[1])
+	}
+	if m[2] == "stdout" {
+		return strings.TrimRight(res.Stdout, "\n"), nil
 	}
 	dec := json.NewDecoder(strings.NewReader(res.Stdout))
 	dec.UseNumber()
