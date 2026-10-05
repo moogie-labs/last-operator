@@ -31,6 +31,10 @@ const (
 	envIntent = "web"
 	envKey    = envNS + "/" + envIntent
 	approver  = "alice@example.com"
+
+	testConfigName = "default"
+	testProvider   = "cluster"
+	kubectlBin     = "kubectl"
 )
 
 // testEnv is a leading gateway on a fake cluster whose sandbox pods succeed at
@@ -179,7 +183,7 @@ func approvalFor(name, subject string, decision lastv1alpha1.Decision, by string
 
 // allowAll is an OperatorConfig whose defaults allow provider "cluster" and egress to 10.0.0.0/8:443.
 func allowAll() *lastv1alpha1.OperatorConfig {
-	return &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+	return &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: testConfigName},
 		Spec: lastv1alpha1.OperatorConfigSpec{Defaults: &lastv1alpha1.IntentPolicySpec{
-			Providers: []string{"cluster"}, Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"10.0.0.0/8:443"}}}}}
+			Providers: []string{testProvider}, Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"10.0.0.0/8:443"}}}}}
 }

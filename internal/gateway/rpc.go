@@ -50,3 +50,7 @@ func (s *rpcServer) EndPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest
 func (s *rpcServer) RunCommand(ctx context.Context, req *gatewayv1.RunCommandRequest) (*gatewayv1.RunCommandResponse, error) {
 	return s.g.runCommand(ctx, req)
 }
+
+func (s *rpcServer) RunProbes(ctx context.Context, req *gatewayv1.RunProbesRequest) (*gatewayv1.RunProbesResponse, error) {
+	return s.g.runProbes(ctx, req)
+}

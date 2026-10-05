@@ -71,7 +71,7 @@ func executeAll(t *testing.T, env *testEnv, in *lastv1alpha1.Intent) {
 // kubectlJSON makes every kubectl command print a Namespace object and every
 // other command print "ok".
 func kubectlJSON(c runnerapi.Command) runnerapi.Result {
-	if len(c.Argv) > 0 && c.Argv[0] == "kubectl" {
+	if len(c.Argv) > 0 && c.Argv[0] == kubectlBin {
 		return runnerapi.Result{Stdout: `{"kind":"Namespace","metadata":{"name":"team-x"},"password":"s3cr3t-value-123"}` + "\n"}
 	}
 	return runnerapi.Result{Stdout: "ok\n"}
@@ -79,10 +79,10 @@ func kubectlJSON(c runnerapi.Command) runnerapi.Result {
 
 // newRunEnv is an approved intent plus provider "cluster": an env-secret Provider
 // whose Secret lives in last-gateway (probes in Task 10 use it).
-func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) (*testEnv, *lastv1alpha1.Intent) { //nolint:unparam // Tasks 10 and 11 pass resources
+func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) (*testEnv, *lastv1alpha1.Intent) {
 	t.Helper()
 	in := intentWithPlan(t, steps, resources...)
-	provider := &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}, Spec: lastv1alpha1.ProviderSpec{
+	provider := &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider}, Spec: lastv1alpha1.ProviderSpec{
 		Type: lastv1alpha1.ProviderEnvSecret, SecretRef: &lastv1alpha1.LocalRef{Name: "cluster-creds"}, Env: map[string]string{"CLUSTER_TOKEN": "token"}}}
 	env := newTestEnv(t, in, allowAll(), provider, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
 	if _, err := env.kube.CoreV1().Secrets("last-gateway").Create(env.ctx, &corev1.Secret{

@@ -26,7 +26,7 @@ const msgNoApproval = "no IntentApproval"
 
 func twoSteps() []lastv1alpha1.Command {
 	return []lastv1alpha1.Command{
-		argvStep("s1", "kubectl", "get", "ns", "team-x", "-o", "json"),
+		argvStep("s1", kubectlBin, "get", "ns", "team-x", "-o", "json"),
 		argvStep("s2", "echo", "${steps.s1.json.kind}"),
 	}
 }
@@ -90,7 +90,7 @@ func TestBeginPhaseDenials(t *testing.T) {
 		message string
 	}{
 		{"plan edited after hashing", func(in *lastv1alpha1.Intent) []runtime.Object {
-			in.Status.Plan.Steps[0].Run.Argv = []string{"kubectl", "delete", "ns", "team-x"}
+			in.Status.Plan.Steps[0].Run.Argv = []string{kubectlBin, "delete", "ns", "team-x"}
 			return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)}
 		}, codes.PermissionDenied, "does not match"},
 		{"no approval", func(in *lastv1alpha1.Intent) []runtime.Object { return nil }, codes.FailedPrecondition, msgNoApproval},
@@ -186,7 +186,7 @@ func TestRestartClosesTheInterruptedPhaseAndNeverRerunsIt(t *testing.T) {
 		t.Fatal("no phase.end interrupted entry by the gateway")
 	}
 
-	replanned := intentWithPlan(t, []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "ns", "team-x")})
+	replanned := intentWithPlan(t, []lastv1alpha1.Command{argvStep("s1", kubectlBin, "get", "ns", "team-x")})
 	if err := env.crd.Update(context.Background(), withVersion(t, env, replanned)); err != nil {
 		t.Fatal(err)
 	}

@@ -92,7 +92,7 @@ func TestDrainWaitsForInflightRPCs(t *testing.T) {
 
 func TestSandboxImagePrefersOperatorConfig(t *testing.T) {
 	pinned := "ghcr.io/moogie-labs/last-sandbox-base@sha256:" + strings.Repeat("a", 64)
-	g := testGatewayWith(t, &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+	g := testGatewayWith(t, &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: testConfigName},
 		Spec: lastv1alpha1.OperatorConfigSpec{Sandbox: &lastv1alpha1.SandboxConfig{BaseImage: pinned}}})
 	if img, err := g.sandboxImage(context.Background()); err != nil || img != pinned {
 		t.Fatalf("image = %q, %v", img, err)

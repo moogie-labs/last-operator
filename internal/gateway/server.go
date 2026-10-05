@@ -44,6 +44,7 @@ type Gateway struct {
 	locks   keyedMutex
 	state   *StateStore
 	phases  phaseTable
+	probing sync.Map // intent key -> in-flight probe run
 
 	rpcMu    sync.Mutex
 	draining bool
