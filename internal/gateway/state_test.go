@@ -12,6 +12,8 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
+const testHashA = "sha256:a"
+
 func TestStateStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	kube := fake.NewClientset()
@@ -20,13 +22,13 @@ func TestStateStoreRoundTrip(t *testing.T) {
 	if err != nil || r.Intent != "team-x/web" || r.Open != nil || r.Executed != nil {
 		t.Fatalf("missing record = %+v, %v", r, err)
 	}
-	r.Open = &OpenPhase{Stage: testStage, SubjectHash: "sha256:a", BeginSeq: 7, Epoch: "e1"}
-	r.MarkUsed("sha256:a")
+	r.Open = &OpenPhase{Stage: testStage, SubjectHash: testHashA, BeginSeq: 7, Epoch: "e1"}
+	r.MarkUsed(testHashA)
 	if err := s.Save(ctx, r); err != nil {
 		t.Fatal(err)
 	}
 	r.Open = nil
-	r.Executed = &ExecutedPlan{Stage: testStage, PlanHash: "sha256:a", Plan: `{"steps":[]}`, EndSeq: 9}
+	r.Executed = &ExecutedPlan{Stage: testStage, PlanHash: testHashA, Plan: `{"steps":[]}`, EndSeq: 9}
 	if err := s.Save(ctx, r); err != nil {
 		t.Fatalf("second save (update): %v", err)
 	}
@@ -72,5 +74,26 @@ func TestMarkUsedIsBounded(t *testing.T) {
 	r.MarkUsed(r.Used[3])
 	if len(r.Used) != maxUsedSubjects {
 		t.Fatal("re-marking a subject must not grow the list")
+	}
+}
+
+func TestStateStoreSaveRefusesAnOversizedRecordAndDoesNotEscapeMarkup(t *testing.T) {
+	ctx := context.Background()
+	s := NewStateStore(fake.NewClientset(), GRPCAudience)
+	r, _ := s.Load(ctx, "team-x/web")
+	r.Executed = &ExecutedPlan{Stage: testStage, PlanHash: testHashA, Plan: strings.Repeat("a", MaxRecordBytes), EndSeq: 1}
+	if err := s.Save(ctx, r); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("Save of an oversized record = %v, want a too-large error", err)
+	}
+	r.Executed.Plan = strings.Repeat("<>&", 1000)
+	if err := s.Save(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Load(ctx, "team-x/web")
+	if err != nil || got.Executed.Plan != r.Executed.Plan {
+		t.Fatalf("round trip = %v", err)
+	}
+	if n := len(r.cm.Data[stateKey]); n > 3100 || strings.HasSuffix(r.cm.Data[stateKey], "\n") {
+		t.Fatalf("record is %d bytes (markup escaped, or trailing newline kept)", n)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -225,6 +226,41 @@ func (g *Gateway) findApproval(ctx context.Context, ns, name string, stage lastv
 	return found, nil
 }
 
+// verifyPlan checks that the Intent's plan is encodable, bounded, valid and the
+// one the subject names; every refusal is audited through d.
+func verifyPlan(d denial, intent *lastv1alpha1.Intent, subject string) (plan.Body, []byte, error) {
+	body := plan.FromStatus(intent.Status.Plan)
+	canonical, err := plan.Canonical(body)
+	if err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "plan cannot be encoded: %v", err)
+	}
+	if len(canonical) > MaxPlanBytes {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "plan is %d bytes; the limit is %d", len(canonical), MaxPlanBytes)
+	}
+	hash, err := plan.Hash(body)
+	if err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "%v", err)
+	}
+	if hash != subject || intent.Status.Plan.Hash != subject {
+		return plan.Body{}, nil, d.deny(codes.PermissionDenied, "plan hash %s does not match the subject", hash)
+	}
+	if err := plan.Validate(body); err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "%v", err)
+	}
+	return body, canonical, nil
+}
+
+// recordFits checks that the record still fits its ConfigMap once the plan is
+// recorded as Executed, or EndPhase could not save it after the steps ran.
+func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, canonical []byte) error {
+	prospective := rec.IntentRecord
+	prospective.Open = nil
+	prospective.Used = append(slices.Clone(rec.Used), subject)
+	prospective.Executed = &ExecutedPlan{Stage: string(stage), PlanHash: subject, Plan: string(canonical), EndSeq: math.MaxUint64}
+	_, err := encodeRecord(prospective)
+	return err
+}
+
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
 	w, release, err := g.beginRPC()
 	if err != nil {
@@ -254,23 +290,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if intent.Status.Plan == nil {
 		return nil, d.deny(codes.FailedPrecondition, "intent has no plan")
 	}
-	body := plan.FromStatus(intent.Status.Plan)
-	canonical, err := plan.Canonical(body)
+	body, canonical, err := verifyPlan(d, &intent, subject)
 	if err != nil {
-		return nil, d.deny(codes.InvalidArgument, "plan cannot be encoded: %v", err)
-	}
-	if len(canonical) > MaxPlanBytes {
-		return nil, d.deny(codes.InvalidArgument, "plan is %d bytes; the limit is %d", len(canonical), MaxPlanBytes)
-	}
-	hash, err := plan.Hash(body)
-	if err != nil {
-		return nil, d.deny(codes.InvalidArgument, "%v", err)
-	}
-	if hash != subject || intent.Status.Plan.Hash != subject {
-		return nil, d.deny(codes.PermissionDenied, "plan hash %s does not match the subject", hash)
-	}
-	if err := plan.Validate(body); err != nil {
-		return nil, d.deny(codes.InvalidArgument, "%v", err)
+		return nil, err
 	}
 
 	rec, err := g.state.Load(ctx, key)
@@ -287,6 +309,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 	if slices.Contains(rec.Used, subject) {
 		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
+	}
+	if err := recordFits(rec, stage, subject, canonical); err != nil {
+		return nil, d.deny(codes.InvalidArgument, "plan too large to record: %v", err)
 	}
 	eff, err := g.effectivePolicy(ctx, ns)
 	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {

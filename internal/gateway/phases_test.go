@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -382,5 +383,48 @@ func TestEffectivePolicyErrorCarriesAGRPCStatus(t *testing.T) {
 	_, err := env.g.effectivePolicy(env.ctx, envNS)
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "invalid policy") {
 		t.Fatalf("effectivePolicy = %v, want FailedPrecondition", err)
+	}
+}
+
+// bigFilePlan is a one-step plan carrying fill in a file, about n bytes of canonical JSON.
+func bigFilePlan(t *testing.T, fill string, n int) *lastv1alpha1.Intent {
+	t.Helper()
+	step := argvStep("s1", "true")
+	step.Files = map[string]string{"/work/big": strings.Repeat(fill, n)}
+	return intentWithPlan(t, []lastv1alpha1.Command{step})
+}
+
+func TestMarkupHeavyPlanFitsItsRecord(t *testing.T) {
+	in := bigFilePlan(t, "<>&", MaxPlanBytes/3-100)
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatalf("EndPhase after an accepted BeginPhase = %v", err)
+	}
+	cm, err := env.kube.CoreV1().ConfigMaps(ns).Get(context.Background(), recordName(envKey), metav1.GetOptions{})
+	if err != nil || len(cm.Data[stateKey]) > MaxRecordBytes {
+		t.Fatalf("record = %d bytes, %v", len(cm.Data[stateKey]), err)
+	}
+}
+
+func TestBeginPhaseRefusesAPlanWhoseRecordWouldNotFit(t *testing.T) {
+	in := bigFilePlan(t, `"\`, MaxPlanBytes/4-200) // every byte is escaped twice in the record
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	_, err := env.begin(h)
+	env.wantDenied(err, codes.InvalidArgument)
+	if !strings.Contains(err.Error(), "plan too large to record") {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	for _, e := range env.entries() {
+		if e.Type == audit.TypePhaseBegin {
+			t.Fatal("a refused BeginPhase wrote phase.begin")
+		}
 	}
 }
