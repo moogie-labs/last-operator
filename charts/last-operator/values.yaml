@@ -30,6 +30,7 @@ audit:
                             # with the gateway namespace (and this Secret in it) pre-created.
 
 gateway:
+  drainTimeoutSeconds: 300   # in-flight RPC drain on shutdown; the pod grace period is this plus 30
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 256Mi}

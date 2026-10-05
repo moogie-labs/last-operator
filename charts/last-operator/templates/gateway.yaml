@@ -164,7 +164,7 @@ spec:
         {{- include "last.labels" . | nindent 8 }}
     spec:
       serviceAccountName: last-gateway
-      terminationGracePeriodSeconds: 330 # covers LAST_DRAIN_TIMEOUT (5m)
+      terminationGracePeriodSeconds: {{ add .Values.gateway.drainTimeoutSeconds 30 }} # drain timeout plus 30s
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
@@ -192,7 +192,7 @@ spec:
             - {name: LAST_OPERATOR_IDENTITY, value: {{ printf "system:serviceaccount:%s:last-operator" .Release.Namespace | quote }}}
             - {name: LAST_SANDBOX_NAMESPACE, value: {{ .Values.namespaces.sandbox | quote }}}
             - {name: LAST_EGRESS_CANARIES, value: {{ .Values.sandbox.egressCanaries | default (printf "service/%s/last-gateway:8080,node:10250" $gw) | quote }}}
-            - {name: LAST_DRAIN_TIMEOUT, value: "5m"}
+            - {name: LAST_DRAIN_TIMEOUT, value: {{ printf "%ds" (int .Values.gateway.drainTimeoutSeconds) | quote }}}
             {{- with .Values.sandbox.image }}
             - {name: LAST_SANDBOX_IMAGE, value: {{ . | quote }}}
             {{- end }}

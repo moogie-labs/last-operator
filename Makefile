@@ -317,5 +317,7 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'resources: \[pods/log\]'
 	helm template last charts/last-operator -n last-system | grep -q 'resources: \[serviceaccounts/token\]'
 	helm template last charts/last-operator -n last-system | grep -q 'terminationGracePeriodSeconds: 330'
+	helm template last charts/last-operator -n last-system | grep -q 'LAST_DRAIN_TIMEOUT, value: "300s"'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-gateway-audit-guard'
 	helm template last charts/last-operator -n last-system --set sandbox.image=img:dev | grep -q 'name: LAST_SANDBOX_IMAGE, value: "img:dev"'
 	! helm template last charts/last-operator -n last-system | grep -q 'LAST_SANDBOX_IMAGE'

@@ -65,9 +65,9 @@ func clientAs(t *testing.T, user string, groups ...string) client.Client {
 	return c
 }
 
-func applyChartPolicy(t *testing.T, admin client.Client) {
+func applyChartPolicy(t *testing.T, admin client.Client, file string) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "last-operator", "files", "intentapproval-policy.yaml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "last-operator", "files", file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestIntentApprovalAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	grantApprovers(t, admin)
-	applyChartPolicy(t, admin)
+	applyChartPolicy(t, admin, "intentapproval-policy.yaml")
 	alice := clientAs(t, "alice")
 	operator := clientAs(t, operatorUser, "system:serviceaccounts", "system:serviceaccounts:last-system")
 
@@ -153,5 +153,100 @@ func TestIntentApprovalAdmission(t *testing.T) {
 	err = alice.Update(ctx, &got)
 	if err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("update = %v, want immutable", err)
+	}
+}
+
+func TestGatewayAuditGuard(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(adminCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ns = "last-gateway"
+	const gwUser = "system:serviceaccount:last-gateway:last-gateway"
+	const otherUser = "system:serviceaccount:last-gateway:other"
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"}, Rules: []rbacv1.PolicyRule{{
+		APIGroups: []string{""}, Resources: []string{"secrets", "configmaps"},
+		Verbs: []string{"get", "create", "update", "patch", "delete"}}}}
+	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.ServiceAccountKind, Name: "last-gateway", Namespace: ns},
+			{Kind: rbacv1.ServiceAccountKind, Name: "other", Namespace: ns},
+		}}
+	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}} {
+		if err := admin.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := func(name string) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			StringData: map[string]string{"k": "v"}}
+	}
+	cmap := func(name string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: map[string]string{"k": "v"}}
+	}
+	for _, o := range []client.Object{secret("last-audit-signing"), secret("last-audit-writer"), cmap("last-audit-config"),
+		secret("last-run-x-anchor"), cmap("last-audit-pubkey")} {
+		if err := admin.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyChartPolicy(t, admin, "gateway-audit-guard-policy.yaml")
+	gw := clientAs(t, gwUser, "system:serviceaccounts", "system:serviceaccounts:last-gateway")
+	other := clientAs(t, otherUser, "system:serviceaccounts", "system:serviceaccounts:last-gateway")
+
+	// Admission policies take effect asynchronously; wait for enforcement.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := gw.Delete(ctx, secret("last-audit-signing"))
+		if err != nil && strings.Contains(err.Error(), "may not change or delete") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the policy never took effect: %v", err)
+		}
+		if err == nil { // deleted before enforcement started; restore it
+			if err := admin.Create(ctx, secret("last-audit-signing")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	denied := func(what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "may not change or delete") {
+			t.Errorf("%s = %v, want a policy denial", what, err)
+		}
+	}
+	guarded := []client.Object{secret("last-audit-signing"), secret("last-audit-writer"), cmap("last-audit-config")}
+	for _, o := range guarded {
+		denied("delete "+o.GetName(), gw.Delete(ctx, o))
+		cur := o.DeepCopyObject().(client.Object)
+		if err := admin.Get(ctx, client.ObjectKeyFromObject(o), cur); err != nil {
+			t.Fatal(err)
+		}
+		cur.SetLabels(map[string]string{"tampered": "yes"})
+		denied("update "+o.GetName(), gw.Update(ctx, cur))
+	}
+
+	if err := gw.Delete(ctx, secret("last-run-x-anchor")); err != nil {
+		t.Errorf("deleting a run anchor: %v", err)
+	}
+	if err := gw.Create(ctx, secret("last-run-y-anchor")); err != nil {
+		t.Errorf("creating a Secret: %v", err)
+	}
+	pub := &corev1.ConfigMap{}
+	if err := gw.Get(ctx, client.ObjectKey{Namespace: ns, Name: "last-audit-pubkey"}, pub); err != nil {
+		t.Fatal(err)
+	}
+	pub.Data["fingerprint"] = "updated"
+	if err := gw.Update(ctx, pub); err != nil {
+		t.Errorf("updating the public key ConfigMap: %v", err)
+	}
+
+	if err := other.Delete(ctx, secret("last-audit-writer")); err != nil {
+		t.Errorf("another ServiceAccount deleting last-audit-writer: %v", err)
 	}
 }

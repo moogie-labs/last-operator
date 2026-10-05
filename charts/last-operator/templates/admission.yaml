@@ -1,1 +1,3 @@
 {{ .Files.Get "files/intentapproval-policy.yaml" }}
+---
+{{ .Files.Get "files/gateway-audit-guard-policy.yaml" }}

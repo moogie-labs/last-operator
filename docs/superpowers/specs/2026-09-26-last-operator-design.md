@@ -1204,6 +1204,7 @@ The CRs emit standard Kubernetes Events for phase transitions.
 | Operator hides its tracks | Fail-closed WORM audit written by the gateway; hash chain + signatures + compliance lock |
 | Command escapes its scope | Sandbox with no API token, per-execution egress, short-lived credentials limited to the named Providers |
 | Operator reads sandbox state directly | Operator RBAC has no access to pods, `pods/log`, or Secrets in the sandbox namespace (namespaced Roles, not a ClusterRole); results reach it only through the gateway, after redaction and audit |
+| Gateway tampers with its own audit trust anchors | A `ValidatingAdmissionPolicy` forbids the gateway ServiceAccount from changing or deleting its signing key, writer credentials or chain config |
 
 ### 17.2 Known limitations
 
