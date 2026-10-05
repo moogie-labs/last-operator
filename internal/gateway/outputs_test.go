@@ -197,9 +197,10 @@ func TestWriteOutputSecretMissingObjectsAndRefs(t *testing.T) {
 func TestWriteOutputSecretAuditPrecedesSecret(t *testing.T) {
 	env, h := newOutputEnv(t, envIntentUID)
 	var auditedAtCreate bool
+	n := len(env.entries())
 	env.kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if s := a.(k8stesting.CreateAction).GetObject().(*corev1.Secret); s.Name == outputSecret {
-			auditedAtCreate = env.last().Type == audit.TypeOutputWritten
+			auditedAtCreate = len(env.entries()) == n+1 && env.last().Type == audit.TypeOutputWritten
 		}
 		return false, nil, nil
 	})
@@ -269,11 +270,12 @@ func TestWriteOutputSecretForeignSecretVariants(t *testing.T) {
 	}
 	managed := map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue}
 	cases := map[string]*corev1.Secret{
-		"managed-by but another MR":       {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: envIntentUID}, OwnerReferences: mine("other-mr", true)}},
-		"this MR but unlabelled":          {ObjectMeta: metav1.ObjectMeta{OwnerReferences: mine("mr-uid", true)}},
-		"this MR but another intent uid":  {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: "b-uid"}, OwnerReferences: mine("mr-uid", true)}},
-		"this MR but not the controller":  {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: envIntentUID}, OwnerReferences: mine("mr-uid", false)}},
-		"managed-by without intent label": {ObjectMeta: metav1.ObjectMeta{Labels: managed, OwnerReferences: mine("mr-uid", true)}},
+		"managed-by but another MR":                     {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: envIntentUID}, OwnerReferences: mine("other-mr", true)}},
+		"this MR but unlabelled":                        {ObjectMeta: metav1.ObjectMeta{OwnerReferences: mine("mr-uid", true)}},
+		"this MR but another intent uid":                {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: "b-uid"}, OwnerReferences: mine("mr-uid", true)}},
+		"this MR but not the controller":                {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: envIntentUID}, OwnerReferences: mine("mr-uid", false)}},
+		"controller and intent label but no managed-by": {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelIntentUID: envIntentUID}, OwnerReferences: mine("mr-uid", true)}},
+		"managed-by without intent label":               {ObjectMeta: metav1.ObjectMeta{Labels: managed, OwnerReferences: mine("mr-uid", true)}},
 	}
 	for name, sec := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -326,8 +328,9 @@ func TestWriteOutputSecretConcurrentChangeIsAborted(t *testing.T) {
 				}
 			}
 			var auditedFirst bool
+			n := len(env.entries())
 			env.kube.PrependReactor(verb, "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
-				auditedFirst = env.last().Type == audit.TypeOutputWritten
+				auditedFirst = len(env.entries()) == n+1 && env.last().Type == audit.TypeOutputWritten
 				if verb == "create" {
 					return true, nil, apierrors.NewAlreadyExists(gr, outputSecret)
 				}
