@@ -1,0 +1,99 @@
+package controller
+
+import (
+	"strings"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+)
+
+var _ = Describe("Intent planning", func() {
+	var key types.NamespacedName
+	steps := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "namespaces")}
+
+	BeforeEach(func() {
+		key = types.NamespacedName{Namespace: newNamespace(), Name: intentName}
+	})
+
+	It("plans and waits for an approval of that exact plan", func() {
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		in := getIntent(key)
+		Expect(in.Status.Plan.Hash).To(Equal(hashOf(steps)))
+		Expect(in.Status.Plan.Summary).To(Equal("test plan"))
+		Expect(in.Status.Stage).To(Equal(lastv1alpha1.StageCreate))
+		Expect(in.Status.ObservedGeneration).To(Equal(in.Generation))
+		Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval))
+
+		By("ignoring approvals of another plan, stage, or Intent")
+		createApproval(key, lastv1alpha1.StageCreate, zeroHash(), lastv1alpha1.DecisionApprove)
+		createApproval(key, lastv1alpha1.StageDelete, in.Status.Plan.Hash, lastv1alpha1.DecisionApprove)
+		createApproval(types.NamespacedName{Namespace: key.Namespace, Name: "someone-else"}, lastv1alpha1.StageCreate,
+			in.Status.Plan.Hash, lastv1alpha1.DecisionApprove)
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM}))
+	})
+
+	It("fails when the plan is denied, even next to an approval", func() {
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+
+		approve(key, lastv1alpha1.DecisionDeny)
+		approve(key, lastv1alpha1.DecisionApprove)
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
+		Consistently(func() []string { return gw.calls(key) }).ShouldNot(ContainElement("BeginPhase"))
+	})
+
+	It("plans again when the spec changes before approval", func() {
+		v1 := []lastv1alpha1.Command{argvStep("s1", "echo", "v1")}
+		v2 := []lastv1alpha1.Command{argvStep("s1", "echo", "v2")}
+		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+			if strings.Contains(requestText(req), "v2") {
+				return answer(v2), nil
+			}
+			return answer(v1), nil
+		}})
+		createIntent(key, "say v1")
+		Eventually(planHash(key)).Should(Equal(hashOf(v1)))
+
+		editRequest(key, "say v2")
+		Eventually(planHash(key)).Should(Equal(hashOf(v2)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		in := getIntent(key)
+		Expect(in.Status.ObservedGeneration).To(Equal(in.Generation))
+	})
+
+	It("fails after MaxTurns answers that are not plans, and plans again after Failed when the spec changes", func() {
+		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+			if strings.Contains(requestText(req), "fixed") {
+				return answer(steps), nil
+			}
+			return "not a plan", nil
+		}})
+		createIntent(key, "broken")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, callLLM, callLLM}))
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+
+		editRequest(key, "fixed")
+		Eventually(planHash(key)).Should(Equal(hashOf(steps)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+	})
+
+	It("fails when the gateway has no LLM answer for the Intent", func() {
+		createIntent(key, "no script")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("no script for this intent"))
+	})
+})

@@ -12,6 +12,7 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: moogie-labs.com
   group: last
   kind: Intent
@@ -28,6 +29,7 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: moogie-labs.com
   group: last
   kind: ManagedResource

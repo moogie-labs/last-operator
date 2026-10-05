@@ -1,0 +1,85 @@
+package controller
+
+import (
+	"context"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+)
+
+// IntentReconciler drives an Intent through its lifecycle (spec §7). It acts
+// only by calling the gateway, the one component that can cause side effects
+// (spec §3).
+type IntentReconciler struct {
+	client.Client
+	Scheme   *runtime.Scheme
+	Gateway  gatewayv1.GatewayServiceClient
+	Planner  *agent.Planner
+	Recorder events.EventRecorder
+	// RetryDelay is the pause between retries of a gateway call within one reconcile.
+	RetryDelay time.Duration
+}
+
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents/finalizers,verbs=update
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intentapprovals,verbs=get;list;watch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+
+// Reconcile advances the Intent by one phase. Every status write triggers the
+// next reconcile, so each phase handler does its work and records the result.
+func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var in lastv1alpha1.Intent
+	if err := r.Get(ctx, req.NamespacedName, &in); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !in.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil // teardown arrives with the Delete stage
+	}
+	switch in.Status.Phase {
+	case "", lastv1alpha1.PhasePending:
+		return r.startPlanning(ctx, &in, "")
+	case lastv1alpha1.PhasePlanning:
+		return r.plan(ctx, &in)
+	case lastv1alpha1.PhaseAwaitingApproval:
+		return r.awaitApproval(ctx, &in)
+	case lastv1alpha1.PhaseFailed:
+		if in.Generation != in.Status.ObservedGeneration {
+			return r.startPlanning(ctx, &in, "") // a spec edit retries a failed Intent
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *IntentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&lastv1alpha1.Intent{}).
+		Owns(&lastv1alpha1.ManagedResource{}).
+		Watches(&lastv1alpha1.IntentApproval{}, handler.EnqueueRequestsFromMapFunc(approvedIntent)).
+		Named("intent").
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
+		Complete(r)
+}
+
+// approvedIntent maps an IntentApproval to the Intent it names.
+func approvedIntent(_ context.Context, o client.Object) []reconcile.Request {
+	a, ok := o.(*lastv1alpha1.IntentApproval)
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: a.Namespace, Name: a.Spec.IntentRef.Name}}}
+}
