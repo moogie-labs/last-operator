@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/audit/audittest"
@@ -22,11 +24,26 @@ import (
 
 const testChainID = "chain-1"
 
-func testGateway(t *testing.T, sink audit.Sink) *Gateway {
+const (
+	testCanary    = "10.96.0.10:8080"
+	testSandboxNS = "last-sandbox"
+)
+
+const testOperator = "system:serviceaccount:last-system:last-operator"
+
+func testGateway(t *testing.T, sink audit.Sink, objs ...client.Object) *Gateway {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	cfg := Config{Namespace: ns, PodName: "gw-0", ChainID: testChainID, Retention: 365 * 24 * time.Hour, HTTPAddr: ":0", LeaseName: "l"}
-	return New(cfg, fake.NewClientset(), sink, audit.NewSigner(key))
+	cfg := Config{Namespace: ns, PodName: "gw-0", ChainID: testChainID, Retention: 365 * 24 * time.Hour, HTTPAddr: ":0",
+		LeaseName: "l", SandboxNamespace: testSandboxNS, EgressCanaries: []string{testCanary},
+		OperatorIdentity: testOperator, DrainTimeout: time.Second}
+	crd := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	return New(cfg, fake.NewClientset(), crd, sink, audit.NewSigner(key))
+}
+
+func testGatewayWith(t *testing.T, objs ...client.Object) *Gateway {
+	t.Helper()
+	return testGateway(t, audittest.NewMemSink(), objs...)
 }
 
 func get(t *testing.T, g *Gateway, path string) (int, string) {

@@ -9,9 +9,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gateway"
 )
@@ -43,10 +47,21 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	client, err := audit.NewS3Client(ctx, cfg.Audit)
+	client3, err := audit.NewS3Client(ctx, cfg.Audit)
 	if err != nil {
 		return err
 	}
-	g := gateway.New(cfg, kube, audit.NewS3Sink(client, cfg.Audit.Bucket), audit.NewSigner(key))
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return err
+	}
+	if err := lastv1alpha1.AddToScheme(scheme); err != nil {
+		return err
+	}
+	crd, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	g := gateway.New(cfg, kube, crd, audit.NewS3Sink(client3, cfg.Audit.Bucket), audit.NewSigner(key))
 	return g.Run(ctx)
 }

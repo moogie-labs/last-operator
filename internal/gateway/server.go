@@ -7,16 +7,20 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
 var errLostLeadership = errors.New("gateway: lost audit-writer leadership")
@@ -27,14 +31,31 @@ var Version = "dev"
 type Gateway struct {
 	cfg     Config
 	kube    kubernetes.Interface
+	crd     client.Reader
 	sink    audit.Sink
 	signer  *audit.Signer
 	metrics *Metrics
 	writer  atomic.Pointer[audit.Writer]
+
+	epoch   string // per process; an open phase from another epoch was interrupted
+	sched   atomic.Pointer[sandbox.Scheduler]
+	logs    sandbox.LogReader
+	execCfg sandbox.ExecutorConfig
+	locks   keyedMutex //nolint:unused // used by the lifecycle RPCs added in later tasks
+
+	rpcMu    sync.Mutex
+	draining bool
+	inflight sync.WaitGroup
 }
 
-func New(cfg Config, kube kubernetes.Interface, sink audit.Sink, signer *audit.Signer) *Gateway {
-	return &Gateway{cfg: cfg, kube: kube, sink: sink, signer: signer, metrics: NewMetrics()}
+func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Sink, signer *audit.Signer) *Gateway {
+	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
+		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube)}
+	g.execCfg = sandbox.ExecutorConfig{
+		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
+		ProviderNamespace: cfg.Namespace,
+	}
+	return g
 }
 
 // Handler serves liveness, readiness (leader with a healthy writer), and metrics.
@@ -176,8 +197,14 @@ func (g *Gateway) lead(parent context.Context) error {
 		g.metrics.ObserveFailure(err)
 		cancel(fmt.Errorf("gateway: audit writer failed: %w", err))
 	})
+	if err := g.prepareLeading(ctx, w); err != nil {
+		return err
+	}
 	g.writer.Store(w)
 	defer g.writer.Store(nil)
+	// Deferred later, so it runs first: in-flight RPCs finish and record their
+	// outcomes before the writer is withdrawn.
+	defer g.drain(g.cfg.DrainTimeout)
 	slog.Info("audit writer ready", "chain", g.cfg.ChainID, "pod", g.cfg.PodName)
 
 	ticker := time.NewTicker(time.Minute)
