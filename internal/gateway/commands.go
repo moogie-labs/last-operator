@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -46,7 +47,7 @@ func decodeCommand(raw []byte) (lastv1alpha1.Command, error) {
 	if err := dec.Decode(&c); err != nil {
 		return lastv1alpha1.Command{}, err
 	}
-	if dec.More() {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return lastv1alpha1.Command{}, errors.New("trailing data after the command")
 	}
 	return c, nil
@@ -92,7 +93,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	}
 	given, err := decodeCommand(req.GetCommandJson())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "command_json: %v", err)
+		return nil, d.deny(codes.InvalidArgument, "command_json: %v", err)
 	}
 	expected, err := plan.Resolve(planned, p.results)
 	if err != nil {

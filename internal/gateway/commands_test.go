@@ -1,19 +1,25 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
@@ -129,32 +135,31 @@ func TestRunCommandRefusesAnythingButTheNextApprovedStep(t *testing.T) {
 	if _, err := env.begin(h); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.run(h, argvStep("s2", "echo", "x")); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("out of order = %v, want FailedPrecondition", err)
-	}
-	if env.last().Type != audit.TypePolicyDenied {
-		t.Fatal("out-of-order step did not write policy.denied")
-	}
+	_, err := env.run(h, argvStep("s2", "echo", "x"))
+	env.wantDenied(err, codes.FailedPrecondition)
 	tampered := in.Status.Plan.Steps[0]
 	tampered.Run.Argv = append(append([]string(nil), tampered.Run.Argv...), "--all-namespaces")
-	if _, err := env.run(h, tampered); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("tampered step = %v, want PermissionDenied", err)
-	}
+	_, err = env.run(h, tampered)
+	env.wantDenied(err, codes.PermissionDenied)
 	if _, err := env.run(h, in.Status.Plan.Steps[0]); err != nil {
 		t.Fatalf("a denied mismatch must leave the phase usable: %v", err)
 	}
-	if _, err := env.run(h, in.Status.Plan.Steps[1]); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("unresolved reference = %v, want PermissionDenied", err)
-	}
-	if _, err := env.runRaw(h, "s2", []byte(`{"id":"s2","run":{"argv":["echo","Namespace"]},"surprise":1}`)); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("unknown field = %v, want InvalidArgument", err)
+	_, err = env.run(h, in.Status.Plan.Steps[1])
+	env.wantDenied(err, codes.PermissionDenied)
+	_, err = env.runRaw(h, "s2", []byte(`{"id":"s2","run":{"argv":["echo","Namespace"]},"surprise":1}`))
+	env.wantDenied(err, codes.InvalidArgument)
+	for _, bad := range []string{`{"id":"s2","run":{"argv":["echo","Namespace"]}}}`, `{"id":"s2","run":{"argv":["echo","Namespace"]}}]`, `{"id":"s2"} {"id":"s2"}`} {
+		_, err = env.runRaw(h, "s2", []byte(bad))
+		env.wantDenied(err, codes.InvalidArgument)
 	}
 }
 
 func TestRunCommandComparesCanonicalJSON(t *testing.T) {
 	s1 := argvStep("s1", "true")
 	s1.Files = map[string]string{"/work/a": "1", "/work/b": "2"}
-	env, in := newRunEnv(t, []lastv1alpha1.Command{s1, argvStep("s2", "true")})
+	s2 := argvStep("s2", "true")
+	s2.Files = map[string]string{"/work/x": "data"}
+	env, in := newRunEnv(t, []lastv1alpha1.Command{s1, s2})
 	h := in.Status.Plan.Hash
 	if _, err := env.begin(h); err != nil {
 		t.Fatal(err)
@@ -163,9 +168,12 @@ func TestRunCommandComparesCanonicalJSON(t *testing.T) {
 	if _, err := env.runRaw(h, "s1", reordered); err != nil {
 		t.Fatalf("map order and nil-versus-empty must not matter: %v", err)
 	}
-	newline := []byte(`{"id":"s2","run":{"argv":["true"]},"files":{"/work/x":"\n"}}`)
-	if _, err := env.runRaw(h, "s2", newline); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("an added file = %v, want PermissionDenied", err)
+	newline := []byte(`{"id":"s2","run":{"argv":["true"]},"files":{"/work/x":"data\n"}}`)
+	_, err := env.runRaw(h, "s2", newline)
+	env.wantDenied(err, codes.PermissionDenied)
+	exact := []byte(`{"id":"s2","run":{"argv":["true"]},"files":{"/work/x":"data"}}`)
+	if _, err := env.runRaw(h, "s2", exact); err != nil {
+		t.Fatalf("the approved file content must run: %v", err)
 	}
 }
 
@@ -180,9 +188,8 @@ func TestRunCommandFailedStepEndsOnlyAsFailed(t *testing.T) {
 	if err != nil || r.GetResult().GetExitCode() != 3 {
 		t.Fatalf("failing step = %v, %v", r, err)
 	}
-	if _, err := env.run(h, argvStep("s2", "echo", "x")); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("after a failure = %v, want FailedPrecondition", err)
-	}
+	_, err = env.run(h, argvStep("s2", "echo", "x"))
+	env.wantDenied(err, codes.FailedPrecondition)
 	if _, err := env.end(h, true); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("EndPhase(succeeded) after a failure = %v", err)
 	}
@@ -207,6 +214,51 @@ func TestRunCommandIsSerializedAndFailsClosed(t *testing.T) {
 	resp, err := env.run(h, in.Status.Plan.Steps[0])
 	if status.Code(err) != codes.Unavailable || resp != nil {
 		t.Fatalf("with the audit log down = %v, %v; want Unavailable and no output", resp, err)
+	}
+	// The broken writer fails closed; give the same gateway a healthy one and
+	// check the phase itself stayed failed.
+	env.sink.SetFailPuts(false)
+	w, err := audit.Open(context.Background(), env.sink, env.signer,
+		audit.WriterConfig{ChainID: testChainID, Retention: time.Hour, Actor: sandbox.GatewayActor}, func(audit.StartInfo) any { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.g.writer.Store(w)
+	_, err = env.run(h, in.Status.Plan.Steps[0])
+	env.wantDenied(err, codes.FailedPrecondition)
+}
+
+func TestRunCommandExecutorErrorWithholdsOutputAndFailsThePhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	env.kube.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("pod creation refused")
+	})
+	resp, err := env.run(h, in.Status.Plan.Steps[0])
+	if status.Code(err) != codes.Internal || resp != nil {
+		t.Fatalf("executor error = %v, %v; want Internal and no output", resp, err)
+	}
+	_, err = env.run(h, in.Status.Plan.Steps[0])
+	env.wantDenied(err, codes.FailedPrecondition)
+}
+
+func TestRunCommandResolveFailureDeniesAndFailsThePhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	env.result = func(runnerapi.Command) runnerapi.Result { return runnerapi.Result{Stdout: "not json\n"} }
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.run(h, argvStep("s2", "echo", "Namespace"))
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !env.g.phases.get(envKey).failed {
+		t.Fatal("a resolve failure must fail the phase")
 	}
 }
 
@@ -258,5 +310,16 @@ func TestExecuteAllRunsAndEndsAPlan(t *testing.T) {
 	executeAll(t, env, in)
 	if env.g.phases.get(envKey) != nil {
 		t.Fatal("the phase is still open after executeAll")
+	}
+}
+
+// wantDenied asserts err has the code and the newest audit entry is policy.denied.
+func (e *testEnv) wantDenied(err error, code codes.Code) {
+	e.t.Helper()
+	if status.Code(err) != code {
+		e.t.Fatalf("error = %v, want code %v", err, code)
+	}
+	if e.last().Type != audit.TypePolicyDenied {
+		e.t.Fatalf("last entry = %s, want policy.denied", e.last().Type)
 	}
 }
