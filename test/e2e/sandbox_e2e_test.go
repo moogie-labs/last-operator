@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -264,6 +265,49 @@ func TestSandboxExecution(t *testing.T) {
 			Providers: []string{"e2e-cluster"}})
 		if denied.Result.ExitCode == 0 || !strings.Contains(denied.Result.Stderr, "forbidden") {
 			t.Fatalf("provider exceeded its RBAC: %+v", denied.Result)
+		}
+	})
+	t.Run("kubernetes tokens are revoked when the run ends", func(t *testing.T) {
+		ctx := context.Background()
+		tokens := make(chan string, 1)
+		stop := make(chan struct{})
+		go func() {
+			defer close(tokens)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				list, err := s.kube.CoreV1().Secrets("last-sandbox").List(ctx,
+					metav1.ListOptions{LabelSelector: sandbox.LabelManagedBy + "=" + sandbox.ManagedByValue})
+				if err == nil {
+					for _, sec := range list.Items {
+						if tok := sec.Data["e2e-cluster.token"]; len(tok) > 0 {
+							tokens <- string(tok)
+							return
+						}
+					}
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}()
+		r := s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: "sleep 8"}, Providers: []string{"e2e-cluster"}})
+		close(stop)
+		if r.Result.ExitCode != 0 || r.Result.Error != "" {
+			t.Fatalf("result = %+v", r.Result)
+		}
+		tok, ok := <-tokens
+		if !ok || tok == "" {
+			t.Fatal("never observed the run's token")
+		}
+		review, err := s.kube.AuthenticationV1().TokenReviews().Create(ctx,
+			&authv1.TokenReview{Spec: authv1.TokenReviewSpec{Token: tok}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if review.Status.Authenticated {
+			t.Fatal("the run's token still authenticates after cleanup")
 		}
 	})
 	t.Run("env-secret provider injects the value, redacts it and does not audit it", func(t *testing.T) {
