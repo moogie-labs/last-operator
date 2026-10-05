@@ -140,3 +140,30 @@ func TestRunProbesAllowsOneRunInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunProbesRefusesATamperedExecutedRecord(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	rec, err := env.g.state.Load(env.ctx, envKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Swap a probe's argv but keep PlanHash: the record no longer matches what was approved.
+	rec.Executed.Plan = strings.Replace(rec.Executed.Plan, `"kubectl"`, `"rm"`, 1)
+	if rec.Executed.Plan == "" || !strings.Contains(rec.Executed.Plan, `"rm"`) {
+		t.Fatal("test did not tamper with the record")
+	}
+	if err := env.g.state.Save(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	_, err = env.probe()
+	env.wantDenied(err, codes.Internal)
+	if !strings.Contains(err.Error(), "integrity check") {
+		t.Fatalf("error = %v", err)
+	}
+	for _, e := range env.entries() {
+		if e.Type == audit.TypeProbeStart {
+			t.Fatal("a probe ran from a tampered record")
+		}
+	}
+}

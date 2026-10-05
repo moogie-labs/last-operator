@@ -2,8 +2,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,8 +35,8 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	}
 	defer g.probing.Delete(key)
 
-	var intent lastv1alpha1.Intent
-	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
+	var existing lastv1alpha1.Intent // read only to answer NotFound for a missing Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing); err != nil {
 		return nil, notFoundOr(err, "intent")
 	}
 	rec, err := g.state.Load(ctx, key)
@@ -45,9 +49,19 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		return nil, d.deny(codes.FailedPrecondition, "intent has no executed plan to probe")
 	}
 	d.subject = rec.Executed.PlanHash
+	// The record is canonical plan JSON: it must still hash to the approved subject.
+	sum := sha256.Sum256([]byte(rec.Executed.Plan))
+	if got := "sha256:" + hex.EncodeToString(sum[:]); got != rec.Executed.PlanHash {
+		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: it hashes to %s", got)
+	}
 	var body plan.Body
-	if err := json.Unmarshal([]byte(rec.Executed.Plan), &body); err != nil {
-		return nil, status.Errorf(codes.Internal, "executed plan record is corrupt: %v", err)
+	dec := json.NewDecoder(strings.NewReader(rec.Executed.Plan))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: %v", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
 	}
 	var probes []lastv1alpha1.Probe
 	for _, r := range body.Resources {
@@ -79,6 +93,14 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 			return nil, status.Errorf(codes.Unavailable, "probe run: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "probe run: %v", err)
+	}
+	if len(outs) != len(probes) {
+		return nil, status.Errorf(codes.Internal, "probe run returned %d outcomes for %d probes", len(outs), len(probes))
+	}
+	for i, o := range outs {
+		if o.ID != probes[i].ID {
+			return nil, status.Errorf(codes.Internal, "probe run returned outcome %q where probe %q was expected", o.ID, probes[i].ID)
+		}
 	}
 	for _, o := range outs {
 		resp.Outcomes = append(resp.Outcomes, &gatewayv1.ProbeOutcome{Id: o.ID, Passed: o.Passed, Result: toProtoResult("", o.Result), Error: o.Error})
