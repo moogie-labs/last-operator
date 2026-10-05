@@ -5,6 +5,8 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,14 +35,13 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
-const (
-	lifecycleNS = "e2e-lifecycle"
-	lifecycleSA = "e2e-lifecycle-reader"
-)
-
 func TestGatewayLifecycle(t *testing.T) {
 	kubectl(t, "rollout", "status", "-n", "last-gateway", "deploy/last-gateway", "--timeout=5m")
 	ctx := context.Background()
+	// A unique suffix keeps this run's objects, and so its audit entries, distinct from any earlier run.
+	suffix := fmt.Sprintf("%x", time.Now().UnixNano())[:8]
+	lifecycleNS := "e2e-lifecycle-" + suffix
+	lifecycleSA := "e2e-lc-" + suffix
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
 	if err != nil {
@@ -56,16 +57,13 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 	create := func(o client.Object) {
 		t.Helper()
-		if err := crc.Create(ctx, o); err != nil && !apierrors.IsAlreadyExists(err) {
+		if err := crc.Create(ctx, o); err != nil {
 			t.Fatalf("create %T: %v", o, err)
 		}
 	}
 
 	// A namespace, a Provider that can only read that namespace, and a policy allowing the Provider.
 	create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}})
-	t.Cleanup(func() {
-		_ = crc.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}})
-	})
 	create(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA, Namespace: "last-gateway"}})
 	create(&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}, Rules: []rbacv1.PolicyRule{{
 		APIGroups: []string{""}, Resources: []string{"namespaces"}, ResourceNames: []string{lifecycleNS}, Verbs: []string{"get"}}}})
@@ -87,10 +85,37 @@ func TestGatewayLifecycle(t *testing.T) {
 	if op.Spec.Defaults == nil {
 		op.Spec.Defaults = &lastv1alpha1.IntentPolicySpec{}
 	}
-	op.Spec.Defaults.Providers = append(op.Spec.Defaults.Providers, lifecycleSA)
-	if err := crc.Update(ctx, &op); err != nil {
-		t.Fatal(err)
+	if !slices.Contains(op.Spec.Defaults.Providers, lifecycleSA) {
+		op.Spec.Defaults.Providers = append(op.Spec.Defaults.Providers, lifecycleSA)
+		if err := crc.Update(ctx, &op); err != nil {
+			t.Fatal(err)
+		}
 	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, o := range []client.Object{
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}},
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA, Namespace: "last-gateway"}},
+			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+			&lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+		} {
+			if err := crc.Delete(bg, o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("cleanup %T: %v", o, err)
+			}
+		}
+		for range 5 {
+			var cur lastv1alpha1.OperatorConfig
+			if err := crc.Get(bg, client.ObjectKey{Name: "default"}, &cur); err != nil || cur.Spec.Defaults == nil {
+				return
+			}
+			cur.Spec.Defaults.Providers = slices.DeleteFunc(cur.Spec.Defaults.Providers, func(n string) bool { return n == lifecycleSA })
+			if err := crc.Update(bg, &cur); err == nil {
+				return
+			}
+		}
+		t.Errorf("cleanup: could not remove %s from OperatorConfig defaults", lifecycleSA)
+	})
 
 	// The Intent and its plan. The plan is written as an admin would; the operator arrives in M2c.
 	getNS := lastv1alpha1.Command{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", "namespace", lifecycleNS, "-o", "json"}},
@@ -149,7 +174,10 @@ func TestGatewayLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, _ := json.Marshal(cmd)
+		raw, err := json.Marshal(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
 		c, cancel := call()
 		resp, err := gw.RunCommand(c, &gatewayv1.RunCommandRequest{Intent: ref, SubjectHash: hash, StepId: s.ID, CommandJson: raw})
 		cancel()
@@ -196,8 +224,8 @@ func TestGatewayLifecycle(t *testing.T) {
 	c, cancel = call()
 	_, err = gw.BeginPhase(c, &gatewayv1.BeginPhaseRequest{Intent: ref, Stage: "Create", SubjectHash: hash})
 	cancel()
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("re-running the executed plan = %v, want FailedPrecondition", err)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "already opened a phase") {
+		t.Fatalf("re-running the executed plan = %v, want FailedPrecondition (already opened a phase)", err)
 	}
 
 	// Every step is in the real WORM chain, in order.

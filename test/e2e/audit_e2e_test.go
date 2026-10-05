@@ -14,6 +14,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-logr/logr"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -22,6 +25,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	ctrllog.SetLogger(logr.Discard())
 	dir, err := os.MkdirTemp("", "last-e2e")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

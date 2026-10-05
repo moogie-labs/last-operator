@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,6 +272,9 @@ func TestSandboxExecution(t *testing.T) {
 		ctx := context.Background()
 		tokens := make(chan string, 1)
 		stop := make(chan struct{})
+		var stopOnce sync.Once
+		stopPoller := func() { stopOnce.Do(func() { close(stop) }) }
+		defer stopPoller()
 		go func() {
 			defer close(tokens)
 			for {
@@ -283,7 +287,14 @@ func TestSandboxExecution(t *testing.T) {
 					metav1.ListOptions{LabelSelector: sandbox.LabelManagedBy + "=" + sandbox.ManagedByValue})
 				if err == nil {
 					for _, sec := range list.Items {
-						if tok := sec.Data["e2e-cluster.token"]; len(tok) > 0 {
+						tok := sec.Data["e2e-cluster.token"]
+						if len(tok) == 0 {
+							continue
+						}
+						// Accept the token only once it authenticates, so revocation is shown against a live token.
+						live, err := s.kube.AuthenticationV1().TokenReviews().Create(ctx,
+							&authv1.TokenReview{Spec: authv1.TokenReviewSpec{Token: string(tok)}}, metav1.CreateOptions{})
+						if err == nil && live.Status.Authenticated {
 							tokens <- string(tok)
 							return
 						}
@@ -293,13 +304,13 @@ func TestSandboxExecution(t *testing.T) {
 			}
 		}()
 		r := s.run(t, lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: "sleep 8"}, Providers: []string{"e2e-cluster"}})
-		close(stop)
+		stopPoller()
 		if r.Result.ExitCode != 0 || r.Result.Error != "" {
 			t.Fatalf("result = %+v", r.Result)
 		}
 		tok, ok := <-tokens
 		if !ok || tok == "" {
-			t.Fatal("never observed the run's token")
+			t.Fatal("never observed a live token")
 		}
 		review, err := s.kube.AuthenticationV1().TokenReviews().Create(ctx,
 			&authv1.TokenReview{Spec: authv1.TokenReviewSpec{Token: tok}}, metav1.CreateOptions{})
