@@ -1,0 +1,31 @@
+{{- if not .Values.audit.bundled.enabled }}
+# External audit mode: the writer credentials live in a Secret with an operator-chosen name,
+# which the static guard (files/gateway-audit-guard-policy.yaml) cannot name.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: last-gateway-audit-guard-external
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: gateway-service-account
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-gateway')"
+  validations:
+    - expression: |-
+        oldObject.metadata.name != {{ .Values.audit.external.existingSecret | toJson }}
+      message: "the gateway may not change or delete its audit signing key, writer credentials, or chain config"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: last-gateway-audit-guard-external
+spec:
+  policyName: last-gateway-audit-guard-external
+  validationActions: [Deny]
+{{- end }}
