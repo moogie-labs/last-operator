@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -321,5 +322,61 @@ func (e *testEnv) wantDenied(err error, code codes.Code) {
 	}
 	if e.last().Type != audit.TypePolicyDenied {
 		e.t.Fatalf("last entry = %s, want policy.denied", e.last().Type)
+	}
+}
+
+func TestRunCommandRechecksApprovalAndPolicyOnEveryStep(t *testing.T) {
+	s1 := argvStep("s1", "true")
+	s2 := argvStep("s2", "true")
+	s2.Providers = []string{testProvider}
+	withdraw := func(t *testing.T, env *testEnv, in *lastv1alpha1.Intent) {
+		t.Helper()
+		if err := env.crd.Create(env.ctx, approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	narrow := func(t *testing.T, env *testEnv, _ *lastv1alpha1.Intent) {
+		t.Helper()
+		var cfg lastv1alpha1.OperatorConfig
+		if err := env.crd.Get(env.ctx, client.ObjectKey{Name: testConfigName}, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Spec.Defaults.Providers = []string{tokOther}
+		if err := env.crd.Update(env.ctx, &cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		change  func(*testing.T, *testEnv, *lastv1alpha1.Intent)
+		message string
+	}{{"approval withdrawn", withdraw, "approval withdrawn"}, {"policy narrowed", narrow, "policy:"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, in := newRunEnv(t, []lastv1alpha1.Command{s1, s2})
+			h := in.Status.Plan.Hash
+			if _, err := env.begin(h); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.run(h, s1); err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, env, in)
+			before := len(env.entries())
+			_, err := env.run(h, s2)
+			env.wantDenied(err, codes.PermissionDenied)
+			if !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("error = %v, want %q", err, tc.message)
+			}
+			for _, e := range env.entries()[before:] {
+				if e.Type == audit.TypeCommandStart {
+					t.Fatal("a denied step started")
+				}
+			}
+			_, err = env.end(h, true)
+			env.wantDenied(err, codes.FailedPrecondition)
+			if _, err := env.end(h, false); err != nil {
+				t.Fatalf("EndPhase(failed) = %v", err)
+			}
+		})
 	}
 }

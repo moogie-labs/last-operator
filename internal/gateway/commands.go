@@ -59,7 +59,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		return nil, err
 	}
 	defer release()
-	_, _, key, err := intentKey(req.GetIntent())
+	ns, name, key, err := intentKey(req.GetIntent())
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +102,31 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	}
 	if !sameCommand(given, expected) {
 		return nil, d.deny(codes.PermissionDenied, "command does not match approved step %s", planned.ID)
+	}
+	// Approval and policy are re-checked before every step (spec §8.3): a Deny or a
+	// narrowed policy after BeginPhase stops the phase.
+	eff, err := g.effectivePolicy(ctx, ns)
+	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
+		p.failed = true
+		return nil, d.deny(codes.FailedPrecondition, "%v", invalid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := eff.CheckCommand(expected); err != nil {
+		p.failed = true
+		return nil, d.deny(codes.PermissionDenied, "policy: %v", err)
+	}
+	approval, err := g.findApproval(ctx, ns, name, p.stage, p.subject)
+	switch {
+	case errors.Is(err, errApprovalDenied):
+		p.failed = true
+		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this plan", approval.Name)
+	case err != nil:
+		return nil, err
+	case approval == nil:
+		p.failed = true
+		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this plan")
 	}
 	image, err := g.sandboxImage(ctx)
 	if err != nil {
