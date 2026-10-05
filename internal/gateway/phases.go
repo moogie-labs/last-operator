@@ -157,6 +157,13 @@ func (d denial) deny(code codes.Code, format string, args ...any) error {
 // errInvalidPolicy marks a policy that does not resolve; callers audit it as a denial.
 type errInvalidPolicy struct{ error }
 
+func (e errInvalidPolicy) Error() string { return "invalid policy: " + e.error.Error() }
+
+// GRPCStatus keeps the code when a caller returns the error unchanged.
+func (e errInvalidPolicy) GRPCStatus() *status.Status {
+	return status.New(codes.FailedPrecondition, e.Error())
+}
+
 func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effective, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
@@ -283,7 +290,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 	eff, err := g.effectivePolicy(ctx, ns)
 	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
-		return nil, d.deny(codes.FailedPrecondition, "invalid policy: %v", invalid.error)
+		return nil, d.deny(codes.FailedPrecondition, "%v", invalid)
 	}
 	if err != nil {
 		return nil, err
@@ -374,6 +381,9 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 	d.stage = string(p.stage)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed && p.endSeq == 0 { // an interrupted phase; a closed phase with endSeq set is a save retry
+		return nil, d.deny(codes.FailedPrecondition, "this phase is already closed")
+	}
 	want := outcomeFailed
 	if req.GetSucceeded() {
 		want = outcomeSucceeded

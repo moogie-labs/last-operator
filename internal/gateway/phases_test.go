@@ -367,9 +367,20 @@ func TestTruncateReason(t *testing.T) {
 	if got := truncateReason("short"); got != "short" {
 		t.Fatalf("got %q", got)
 	}
-	long := strings.Repeat("é", 1000) // 2000 bytes
-	got := truncateReason(long)
-	if !utf8.ValidString(got) || !strings.HasSuffix(got, "…(truncated)") || len(got) > maxReasonBytes+len("…(truncated)") {
-		t.Fatalf("truncated reason = %d bytes, valid=%v", len(got), utf8.ValidString(got))
+	for _, r := range []string{"é", "€"} { // 2- and 3-byte runes; 1024 is mid-rune for "€"
+		got := truncateReason(strings.Repeat(r, 1000))
+		if !utf8.ValidString(got) || !strings.HasSuffix(got, "…(truncated)") || len(got) > maxReasonBytes+len("…(truncated)") {
+			t.Fatalf("truncated %q reason = %d bytes, valid=%v", r, len(got), utf8.ValidString(got))
+		}
+	}
+}
+
+func TestEffectivePolicyErrorCarriesAGRPCStatus(t *testing.T) {
+	bad := allowAll()
+	bad.Spec.Defaults.Egress.Allowed = []string{"not a pattern"}
+	env := newTestEnv(t, bad)
+	_, err := env.g.effectivePolicy(env.ctx, envNS)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "invalid policy") {
+		t.Fatalf("effectivePolicy = %v, want FailedPrecondition", err)
 	}
 }
