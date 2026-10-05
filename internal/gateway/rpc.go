@@ -46,3 +46,7 @@ func (s *rpcServer) BeginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReq
 func (s *rpcServer) EndPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) (*gatewayv1.EndPhaseResponse, error) {
 	return s.g.endPhase(ctx, req)
 }
+
+func (s *rpcServer) RunCommand(ctx context.Context, req *gatewayv1.RunCommandRequest) (*gatewayv1.RunCommandResponse, error) {
+	return s.g.runCommand(ctx, req)
+}

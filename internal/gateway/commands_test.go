@@ -1,0 +1,262 @@
+package gateway
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
+)
+
+func (e *testEnv) run(subject string, c lastv1alpha1.Command) (*gatewayv1.RunCommandResponse, error) {
+	e.t.Helper()
+	raw, err := json.Marshal(c)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return e.runRaw(subject, c.ID, raw)
+}
+
+func (e *testEnv) runRaw(subject, stepID string, raw []byte) (*gatewayv1.RunCommandResponse, error) {
+	return e.g.runCommand(e.ctx, &gatewayv1.RunCommandRequest{Intent: ref(), SubjectHash: subject, StepId: stepID, CommandJson: raw})
+}
+
+// runAll opens the intent's plan and runs every step as the operator would,
+// resolving references from earlier results. The phase stays open.
+func runAll(t *testing.T, env *testEnv, in *lastv1alpha1.Intent) plan.Results {
+	t.Helper()
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	results := plan.Results{}
+	for _, s := range in.Status.Plan.Steps {
+		c, err := plan.Resolve(s, results)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := env.run(h, c)
+		if err != nil {
+			t.Fatalf("step %s: %v", s.ID, err)
+		}
+		results[s.ID] = runnerapi.Result{ID: s.ID, ExitCode: int(resp.GetResult().GetExitCode()), Stdout: resp.GetResult().GetStdout()}
+	}
+	return results
+}
+
+// executeAll runs the whole plan and ends the phase successfully.
+func executeAll(t *testing.T, env *testEnv, in *lastv1alpha1.Intent) {
+	t.Helper()
+	runAll(t, env, in)
+	if _, err := env.end(in.Status.Plan.Hash, true); err != nil {
+		t.Fatalf("EndPhase: %v", err)
+	}
+}
+
+// kubectlJSON makes every kubectl command print a Namespace object and every
+// other command print "ok".
+func kubectlJSON(c runnerapi.Command) runnerapi.Result {
+	if len(c.Argv) > 0 && c.Argv[0] == "kubectl" {
+		return runnerapi.Result{Stdout: `{"kind":"Namespace","metadata":{"name":"team-x"},"password":"s3cr3t-value-123"}` + "\n"}
+	}
+	return runnerapi.Result{Stdout: "ok\n"}
+}
+
+// newRunEnv is an approved intent plus provider "cluster": an env-secret Provider
+// whose Secret lives in last-gateway (probes in Task 10 use it).
+func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) (*testEnv, *lastv1alpha1.Intent) { //nolint:unparam // Tasks 10 and 11 pass resources
+	t.Helper()
+	in := intentWithPlan(t, steps, resources...)
+	provider := &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}, Spec: lastv1alpha1.ProviderSpec{
+		Type: lastv1alpha1.ProviderEnvSecret, SecretRef: &lastv1alpha1.LocalRef{Name: "cluster-creds"}, Env: map[string]string{"CLUSTER_TOKEN": "token"}}}
+	env := newTestEnv(t, in, allowAll(), provider, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.kube.CoreV1().Secrets("last-gateway").Create(env.ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-creds", Namespace: "last-gateway"},
+		Data:       map[string][]byte{"token": []byte("probe-token-value")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	env.result = kubectlJSON
+	return env, in
+}
+
+func TestRunCommandRunsTheResolvedPlanAndEndsThePhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	r1, err := env.run(h, in.Status.Plan.Steps[0])
+	if err != nil || r1.GetResult().GetExitCode() != 0 || !strings.Contains(r1.GetResult().GetStdout(), "Namespace") {
+		t.Fatalf("s1 = %v, %v", r1, err)
+	}
+	r2, err := env.run(h, argvStep("s2", "echo", "Namespace"))
+	if err != nil || r2.GetResult().GetStdout() != "ok\n" || r2.GetResult().GetRunId() == "" {
+		t.Fatalf("s2 = %v, %v", r2, err)
+	}
+	var s2Start audit.Entry
+	for _, e := range env.entries() {
+		if e.Type == audit.TypeCommandStart && strings.Contains(string(e.Payload), `"echo"`) {
+			s2Start = e
+		}
+	}
+	if s2Start.Actor != testOperator || s2Start.SubjectHash != h || s2Start.AuthorizedBy == nil ||
+		s2Start.AuthorizedBy.Kind != "approval" || !strings.Contains(string(s2Start.Payload), `"Namespace"`) {
+		t.Fatalf("s2 command.start = %+v %s", s2Start, s2Start.Payload)
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := env.g.state.Load(env.ctx, envKey)
+	canonical, _ := plan.Canonical(plan.FromStatus(in.Status.Plan))
+	if rec.Executed == nil || rec.Executed.PlanHash != h || rec.Executed.Plan != string(canonical) {
+		t.Fatalf("executed record = %+v", rec.Executed)
+	}
+}
+
+func TestRunCommandRefusesAnythingButTheNextApprovedStep(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, argvStep("s2", "echo", "x")); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("out of order = %v, want FailedPrecondition", err)
+	}
+	if env.last().Type != audit.TypePolicyDenied {
+		t.Fatal("out-of-order step did not write policy.denied")
+	}
+	tampered := in.Status.Plan.Steps[0]
+	tampered.Run.Argv = append(append([]string(nil), tampered.Run.Argv...), "--all-namespaces")
+	if _, err := env.run(h, tampered); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("tampered step = %v, want PermissionDenied", err)
+	}
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); err != nil {
+		t.Fatalf("a denied mismatch must leave the phase usable: %v", err)
+	}
+	if _, err := env.run(h, in.Status.Plan.Steps[1]); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unresolved reference = %v, want PermissionDenied", err)
+	}
+	if _, err := env.runRaw(h, "s2", []byte(`{"id":"s2","run":{"argv":["echo","Namespace"]},"surprise":1}`)); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unknown field = %v, want InvalidArgument", err)
+	}
+}
+
+func TestRunCommandComparesCanonicalJSON(t *testing.T) {
+	s1 := argvStep("s1", "true")
+	s1.Files = map[string]string{"/work/a": "1", "/work/b": "2"}
+	env, in := newRunEnv(t, []lastv1alpha1.Command{s1, argvStep("s2", "true")})
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	reordered := []byte(`{"files":{"/work/b":"2","/work/a":"1"},"egress":[],"providers":null,"run":{"argv":["true"]},"id":"s1"}`)
+	if _, err := env.runRaw(h, "s1", reordered); err != nil {
+		t.Fatalf("map order and nil-versus-empty must not matter: %v", err)
+	}
+	newline := []byte(`{"id":"s2","run":{"argv":["true"]},"files":{"/work/x":"\n"}}`)
+	if _, err := env.runRaw(h, "s2", newline); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("an added file = %v, want PermissionDenied", err)
+	}
+}
+
+func TestRunCommandFailedStepEndsOnlyAsFailed(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	env.result = func(runnerapi.Command) runnerapi.Result { return runnerapi.Result{ExitCode: 3, Stderr: "boom"} }
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	r, err := env.run(h, in.Status.Plan.Steps[0])
+	if err != nil || r.GetResult().GetExitCode() != 3 {
+		t.Fatalf("failing step = %v, %v", r, err)
+	}
+	if _, err := env.run(h, argvStep("s2", "echo", "x")); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("after a failure = %v, want FailedPrecondition", err)
+	}
+	if _, err := env.end(h, true); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("EndPhase(succeeded) after a failure = %v", err)
+	}
+	if _, err := env.end(h, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunCommandIsSerializedAndFailsClosed(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	p.mu.Lock()
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); status.Code(err) != codes.Aborted {
+		t.Fatalf("concurrent step = %v, want Aborted", err)
+	}
+	p.mu.Unlock()
+	env.sink.SetFailPuts(true)
+	resp, err := env.run(h, in.Status.Plan.Steps[0])
+	if status.Code(err) != codes.Unavailable || resp != nil {
+		t.Fatalf("with the audit log down = %v, %v; want Unavailable and no output", resp, err)
+	}
+}
+
+func TestRunCommandRefusesAClosedPhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	if _, err := env.end(h, false); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("after EndPhase = %v, want FailedPrecondition", err)
+	}
+	env.g.phases.put(envKey, p) // a stale pointer to the closed phase
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("closed phase = %v, want FailedPrecondition", err)
+	}
+	es := env.entries()
+	if env.last().Type != audit.TypePolicyDenied || !strings.Contains(string(env.last().Payload), "phase is closed") {
+		t.Fatalf("closed phase did not write policy.denied: %+v", env.last())
+	}
+	for _, e := range es[before:] {
+		if e.Type == audit.TypeCommandStart {
+			t.Fatal("a closed phase ran a command")
+		}
+	}
+}
+
+func TestRunCommandRejectsAMalformedSubject(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	if _, err := env.begin(in.Status.Plan.Hash); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.run("nope", in.Status.Plan.Steps[0]); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed subject = %v, want InvalidArgument", err)
+	}
+	if len(env.entries()) != before {
+		t.Fatal("a malformed subject wrote an audit entry")
+	}
+}
+
+func TestExecuteAllRunsAndEndsAPlan(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	if env.g.phases.get(envKey) != nil {
+		t.Fatal("the phase is still open after executeAll")
+	}
+}
