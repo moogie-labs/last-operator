@@ -188,6 +188,7 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ include "last.writerSecret" . }}, key: accessKey}}
             - name: LAST_AUDIT_SECRET_KEY
               valueFrom: {secretKeyRef: {name: {{ include "last.writerSecret" . }}, key: secretKey}}
+            - {name: LAST_AUDIT_WRITER_SECRET, value: {{ include "last.writerSecret" . | quote }}}
             - {name: LAST_GRPC_ADDR, value: ":9090"}
             - {name: LAST_OPERATOR_IDENTITY, value: {{ printf "system:serviceaccount:%s:last-operator" .Release.Namespace | quote }}}
             - {name: LAST_SANDBOX_NAMESPACE, value: {{ .Values.namespaces.sandbox | quote }}}

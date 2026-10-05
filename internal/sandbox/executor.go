@@ -44,6 +44,9 @@ func KubeLogReader(kube kubernetes.Interface) LogReader {
 type ExecutorConfig struct {
 	Pod               PodConfig
 	ProviderNamespace string
+	// ForbiddenSecrets are extra Secret names (the external audit writer Secret) that
+	// no Provider may reference.
+	ForbiddenSecrets []string
 	// EgressCanaries are IP:port literals that would be reachable if egress were open.
 	// When set, the runner runs nothing until dials to all of them have timed out for a
 	// stable window, so a CNI that applies a new pod's NetworkPolicy late cannot leak
@@ -259,7 +262,7 @@ func (e *Executor) prepare(ctx context.Context, cmds []lastv1alpha1.Command, pro
 	if err != nil {
 		return prepared{}, err
 	}
-	plans, err := PlanCredentials(ctx, e.providers, e.cfg.ProviderNamespace, providers)
+	plans, err := PlanCredentials(ctx, e.providers, e.cfg.ProviderNamespace, providers, e.cfg.ForbiddenSecrets...)
 	if err != nil {
 		return prepared{}, err
 	}

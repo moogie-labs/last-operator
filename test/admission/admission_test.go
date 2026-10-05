@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +29,7 @@ const (
 	operatorUser = "system:serviceaccount:last-system:last-operator"
 	approvalsNS  = "approvals"
 	approverName = "approver"
+	verbCreate   = "create"
 )
 
 var (
@@ -90,7 +92,7 @@ func grantApprovers(t *testing.T, admin client.Client) {
 	ctx := context.Background()
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: approverName}, Rules: []rbacv1.PolicyRule{{
 		APIGroups: []string{"last.moogie-labs.com"}, Resources: []string{"intentapprovals"},
-		Verbs: []string{"create", "get", "update", "patch"}}}}
+		Verbs: []string{verbCreate, "get", "update", "patch"}}}}
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: approverName},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: approverName},
 		Subjects: []rbacv1.Subject{
@@ -167,7 +169,8 @@ func TestGatewayAuditGuard(t *testing.T) {
 	const otherUser = "system:serviceaccount:last-gateway:other"
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"}, Rules: []rbacv1.PolicyRule{{
 		APIGroups: []string{""}, Resources: []string{"secrets", "configmaps"},
-		Verbs: []string{"get", "create", "update", "patch", "delete"}}}}
+		Verbs: []string{"get", verbCreate, "update", "patch", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{verbCreate}}}}
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
 		Subjects: []rbacv1.Subject{
@@ -248,5 +251,26 @@ func TestGatewayAuditGuard(t *testing.T) {
 
 	if err := other.Delete(ctx, secret("last-audit-writer")); err != nil {
 		t.Errorf("another ServiceAccount deleting last-audit-writer: %v", err)
+	}
+
+	// The gateway may mint tokens for provider ServiceAccounts, never for its own identity.
+	for _, name := range []string{"last-gateway", "deployer"} {
+		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		if err := admin.Create(ctx, sa); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mint := func(c client.Client, name string) error {
+		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		return c.SubResource("token").Create(ctx, sa, &authv1.TokenRequest{})
+	}
+	if err := mint(gw, "last-gateway"); err == nil || !strings.Contains(err.Error(), "may not mint") {
+		t.Errorf("gateway minting its own token = %v, want a policy denial", err)
+	}
+	if err := mint(gw, "deployer"); err != nil {
+		t.Errorf("gateway minting a token for another ServiceAccount: %v", err)
+	}
+	if err := mint(other, "last-gateway"); err != nil {
+		t.Errorf("another ServiceAccount minting a last-gateway token: %v", err)
 	}
 }

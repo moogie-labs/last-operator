@@ -41,6 +41,9 @@ var (
 	ErrMultipleKubernetesProviders = errors.New("sandbox: at most one kubernetes provider per command")
 	ErrUnsupportedProvider         = errors.New("sandbox: unsupported provider type")
 	ErrReservedEnv                 = errors.New("sandbox: reserved or invalid env var name")
+	// ErrForbiddenProvider marks a Provider that would hand the sandbox the gateway's
+	// identity or audit credentials.
+	ErrForbiddenProvider = errors.New("sandbox: provider would expose gateway credentials")
 )
 
 // AnchorSuffix names the per-run Secret in the provider namespace that kubernetes
@@ -85,9 +88,23 @@ type Materialized struct {
 	NeedsAPIServer bool
 }
 
+const (
+	gatewayServiceAccount = "last-gateway"
+	runSecretPrefix       = "last-run-"
+)
+
+// gatewaySecrets are the gateway's own Secrets, which no Provider may reference.
+var gatewaySecrets = []string{"last-audit-signing", "last-audit-writer"}
+
+func forbiddenSecret(name string, extra []string) bool {
+	return slices.Contains(gatewaySecrets, name) || slices.Contains(extra, name) || strings.HasPrefix(name, runSecretPrefix)
+}
+
 // PlanCredentials resolves and validates providers without touching any secret,
-// so the caller can audit the issuance before it happens.
-func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace string, names []string) ([]CredentialPlan, error) {
+// so the caller can audit the issuance before it happens. A provider that names
+// the gateway's ServiceAccount or one of its audit or run Secrets (or any of
+// forbiddenSecrets) is refused with ErrForbiddenProvider.
+func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace string, names []string, forbiddenSecrets ...string) ([]CredentialPlan, error) {
 	plans := make([]CredentialPlan, 0, len(names))
 	envSeen := map[string]string{}
 	filePathsSeen := map[string]string{}
@@ -102,6 +119,9 @@ func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace 
 		case lastv1alpha1.ProviderEnvSecret:
 			if p.Spec.SecretRef == nil {
 				return nil, fmt.Errorf("sandbox: provider %q has no secretRef", name)
+			}
+			if forbiddenSecret(p.Spec.SecretRef.Name, forbiddenSecrets) {
+				return nil, fmt.Errorf("%w: provider %q references Secret %q", ErrForbiddenProvider, name, p.Spec.SecretRef.Name)
 			}
 			for _, v := range sortedKeys(p.Spec.Env) {
 				if err := isValidEnvName(v); err != nil {
@@ -132,6 +152,9 @@ func PlanCredentials(ctx context.Context, get ProviderGetter, providerNamespace 
 			}
 			if p.Spec.Kubernetes == nil {
 				return nil, fmt.Errorf("sandbox: provider %q has no kubernetes section", name)
+			}
+			if p.Spec.Kubernetes.ServiceAccountRef.Name == gatewayServiceAccount {
+				return nil, fmt.Errorf("%w: provider %q references ServiceAccount %q", ErrForbiddenProvider, name, gatewayServiceAccount)
 			}
 			issued.ServiceAccount = providerNamespace + "/" + p.Spec.Kubernetes.ServiceAccountRef.Name
 			issued.TTL = tokenTTL(p).String()

@@ -58,6 +58,9 @@ func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Si
 		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
 		ProviderNamespace: cfg.Namespace,
 	}
+	if cfg.AuditWriterSecret != "" {
+		g.execCfg.ForbiddenSecrets = []string{cfg.AuditWriterSecret}
+	}
 	return g
 }
 

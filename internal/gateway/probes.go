@@ -92,6 +92,9 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		if errors.Is(err, audit.ErrAuditUnavailable) {
 			return nil, status.Errorf(codes.Unavailable, "probe run: %v", err)
 		}
+		if errors.Is(err, sandbox.ErrForbiddenProvider) {
+			return nil, d.deny(codes.PermissionDenied, "probe run: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "probe run: %v", err)
 	}
 	if len(outs) != len(probes) {

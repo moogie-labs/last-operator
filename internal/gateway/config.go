@@ -29,6 +29,9 @@ type Config struct {
 	// AllowNewChain (LAST_AUDIT_ALLOW_NEW_CHAIN) permits starting a new chain in a
 	// bucket that already holds other chains.
 	AllowNewChain bool
+	// AuditWriterSecret (LAST_AUDIT_WRITER_SECRET, optional) names the Secret holding
+	// the audit writer credentials; no Provider may reference it.
+	AuditWriterSecret string
 	// SandboxNamespace (LAST_SANDBOX_NAMESPACE, default last-sandbox) holds sandbox pods.
 	SandboxNamespace string
 	// SandboxImage (LAST_SANDBOX_IMAGE) is used only when OperatorConfig
@@ -70,6 +73,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		OperatorIdentity:   strings.TrimSpace(getenv("LAST_OPERATOR_IDENTITY")),
 		SandboxNamespace:   or("LAST_SANDBOX_NAMESPACE", "last-sandbox"),
 		SandboxImage:       strings.TrimSpace(getenv("LAST_SANDBOX_IMAGE")),
+		AuditWriterSecret:  strings.TrimSpace(getenv("LAST_AUDIT_WRITER_SECRET")),
 	}
 	// A fixed-order slice keeps the reported variable deterministic.
 	for _, req := range []struct{ name, value string }{

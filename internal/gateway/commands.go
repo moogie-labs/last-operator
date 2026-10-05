@@ -140,6 +140,9 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		if errors.Is(err, audit.ErrAuditUnavailable) {
 			return nil, status.Errorf(codes.Unavailable, "step %s: %v", planned.ID, err)
 		}
+		if errors.Is(err, sandbox.ErrForbiddenProvider) {
+			return nil, d.deny(codes.PermissionDenied, "step %s: %v", planned.ID, err)
+		}
 		return nil, status.Errorf(codes.Internal, "step %s: %v", planned.ID, err)
 	}
 	p.results[planned.ID] = res.Result

@@ -10,12 +10,20 @@ spec:
         apiVersions: ["v1"]
         operations: ["UPDATE", "DELETE"]
         resources: ["secrets", "configmaps"]
+      # Admission can match the token subresource; a Provider must never be able to mint
+      # tokens for the gateway's own identity.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["serviceaccounts/token"]
   matchConditions:
     - name: gateway-service-account
       expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-gateway')"
   validations:
-    - expression: "!(request.resource.resource == 'secrets' && oldObject.metadata.name in ['last-audit-signing', 'last-audit-writer']) && !(request.resource.resource == 'configmaps' && oldObject.metadata.name == 'last-audit-config')"
+    - expression: "request.operation == 'CREATE' || (!(request.resource.resource == 'secrets' && oldObject.metadata.name in ['last-audit-signing', 'last-audit-writer']) && !(request.resource.resource == 'configmaps' && oldObject.metadata.name == 'last-audit-config'))"
       message: "the gateway may not change or delete its audit signing key, writer credentials, or chain config"
+    - expression: "!(request.operation == 'CREATE' && request.subResource == 'token' && request.name == 'last-gateway')"
+      message: "the gateway may not mint tokens for its own ServiceAccount"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

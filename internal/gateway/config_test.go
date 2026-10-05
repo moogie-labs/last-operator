@@ -141,3 +141,14 @@ func TestConfigFromEnvSandboxSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigFromEnvReadsTheWriterSecretName(t *testing.T) {
+	cfg, err := ConfigFromEnv(envWith(map[string]string{"LAST_AUDIT_WRITER_SECRET": " my-writer "}))
+	if err != nil || cfg.AuditWriterSecret != "my-writer" {
+		t.Fatalf("cfg = %+v, %v", cfg, err)
+	}
+	cfg, err = ConfigFromEnv(envWith(nil))
+	if err != nil || cfg.AuditWriterSecret != "" {
+		t.Fatalf("default cfg = %+v, %v", cfg, err)
+	}
+}

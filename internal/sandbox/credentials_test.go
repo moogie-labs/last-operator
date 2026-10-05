@@ -627,3 +627,37 @@ func TestMaterializeRefusesAnAnchorWithoutUID(t *testing.T) {
 		t.Fatalf("Materialize = %v, want an anchor uid error", err)
 	}
 }
+
+func TestPlanRejectsProvidersThatWouldHandOutGatewayCredentials(t *testing.T) {
+	const external = "my-audit-writer"
+	cases := []struct {
+		name string
+		p    *lastv1alpha1.Provider
+	}{
+		{"gateway service account", k8sProvider(clusterName)},
+		{"signing key", envProvider()},
+		{"writer secret", envProvider()},
+		{"external writer secret", envProvider()},
+		{"run secret", envProvider()},
+	}
+	cases[0].p.Spec.Kubernetes.ServiceAccountRef.Name = "last-gateway"
+	cases[1].p.Spec.SecretRef.Name = "last-audit-signing"
+	cases[2].p.Spec.SecretRef.Name = "last-audit-writer"
+	cases[3].p.Spec.SecretRef.Name = external
+	cases[4].p.Spec.SecretRef.Name = "last-run-abc-creds"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sandbox.PlanCredentials(context.Background(), providers(tc.p), gatewayNS, []string{tc.p.Name}, external)
+			if !errors.Is(err, sandbox.ErrForbiddenProvider) {
+				t.Fatalf("PlanCredentials = %v, want ErrForbiddenProvider", err)
+			}
+		})
+	}
+	// Without the configured name, the external writer Secret is not recognised, and ordinary names pass.
+	if _, err := sandbox.PlanCredentials(context.Background(), providers(cases[3].p), gatewayNS, []string{demoProvider}); err != nil {
+		t.Fatalf("an unlisted Secret name = %v", err)
+	}
+	if _, err := sandbox.PlanCredentials(context.Background(), providers(envProvider()), gatewayNS, []string{demoProvider}, external); err != nil {
+		t.Fatalf("an ordinary Secret = %v", err)
+	}
+}

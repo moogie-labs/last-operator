@@ -380,3 +380,41 @@ func TestRunCommandRechecksApprovalAndPolicyOnEveryStep(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCommandRefusesAProviderThatNamesTheExternalWriterSecret(t *testing.T) {
+	const writer = "ext-writer"
+	step := argvStep("s1", "true")
+	step.Providers = []string{testProvider}
+	env, in := newRunEnv(t, []lastv1alpha1.Command{step})
+	var prov lastv1alpha1.Provider
+	if err := env.crd.Get(env.ctx, client.ObjectKey{Name: testProvider}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	prov.Spec.SecretRef.Name = writer
+	if err := env.crd.Update(env.ctx, &prov); err != nil {
+		t.Fatal(err)
+	}
+	env.g.cfg.AuditWriterSecret = writer
+	env.g.execCfg.ForbiddenSecrets = []string{writer}
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.run(h, step)
+	env.wantDenied(err, codes.PermissionDenied)
+	for _, e := range env.entries() {
+		if e.Type == audit.TypeCommandStart || e.Type == audit.TypeCredentialIssued {
+			t.Fatalf("a refused provider wrote %s", e.Type)
+		}
+	}
+}
+
+func TestNewForbidsTheConfiguredWriterSecret(t *testing.T) {
+	g := New(Config{Namespace: ns, AuditWriterSecret: "ext-writer"}, nil, nil, nil, nil)
+	if len(g.execCfg.ForbiddenSecrets) != 1 || g.execCfg.ForbiddenSecrets[0] != "ext-writer" {
+		t.Fatalf("ForbiddenSecrets = %v", g.execCfg.ForbiddenSecrets)
+	}
+	if g := New(Config{Namespace: ns}, nil, nil, nil, nil); len(g.execCfg.ForbiddenSecrets) != 0 {
+		t.Fatalf("ForbiddenSecrets = %v", g.execCfg.ForbiddenSecrets)
+	}
+}
