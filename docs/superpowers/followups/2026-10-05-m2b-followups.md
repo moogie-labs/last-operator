@@ -4,7 +4,9 @@ Deferred findings from the per-task and final whole-branch reviews of
 `docs/superpowers/plans/2026-10-04-m2b-gateway-lifecycle-api.md`. Items fixed
 by the final fix wave (W1–W6) are not listed.
 
-## M2c (operator side) must respect or build
+## M2c (operator side) must respect or build — done in M2c
+
+All items are addressed by `docs/superpowers/plans/2026-10-05-m2c-operator-lifecycle.md`. The Intent identity decision is deferred: see the M2c follow-ups.
 
 - **Operator RBAC excludes:**
   - Secrets anywhere (the output-Secret ownership check relies on it);

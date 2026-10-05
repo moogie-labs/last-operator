@@ -37,6 +37,7 @@ import (
 
 func TestGatewayLifecycle(t *testing.T) {
 	kubectl(t, "rollout", "status", "-n", "last-gateway", "deploy/last-gateway", "--timeout=5m")
+	pauseOperator(t)
 	ctx := context.Background()
 	// A unique suffix keeps this run's objects, and so its audit entries, distinct from any earlier run.
 	suffix := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
@@ -284,4 +285,16 @@ func containsInOrder(have, want []string) bool {
 		}
 	}
 	return i == len(want)
+}
+
+// pauseOperator scales the operator to zero for the rest of the test, so a test
+// that drives the gateway by hand owns its Intents.
+func pauseOperator(t *testing.T) {
+	t.Helper()
+	kubectl(t, "scale", "-n", "last-system", "deploy/last-operator", "--replicas=0")
+	kubectl(t, "wait", "-n", "last-system", "--for=delete", "pod", "-l", "app.kubernetes.io/name=last-operator", "--timeout=2m")
+	t.Cleanup(func() {
+		kubectl(t, "scale", "-n", "last-system", "deploy/last-operator", "--replicas=1")
+		kubectl(t, "rollout", "status", "-n", "last-system", "deploy/last-operator", "--timeout=5m")
+	})
 }
