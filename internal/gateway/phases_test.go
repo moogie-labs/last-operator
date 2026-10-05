@@ -105,6 +105,9 @@ func TestBeginPhaseDenials(t *testing.T) {
 		{"approved by the operator", func(in *lastv1alpha1.Intent) []runtime.Object {
 			return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, testOperator)}
 		}, codes.PermissionDenied, "names the operator"},
+		{"approved by a gateway-namespace ServiceAccount", func(in *lastv1alpha1.Intent) []runtime.Object {
+			return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, "system:serviceaccount:"+ns+":anything")}
+		}, codes.PermissionDenied, "gateway-namespace ServiceAccount"},
 		{"provider not allowed", func(in *lastv1alpha1.Intent) []runtime.Object {
 			in.Status.Plan.Steps[0].Providers = []string{"prod"}
 			h, _ := plan.Hash(plan.FromStatus(in.Status.Plan))

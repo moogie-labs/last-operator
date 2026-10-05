@@ -30,6 +30,9 @@ const (
 	approvalsNS  = "approvals"
 	approverName = "approver"
 	verbCreate   = "create"
+	gatewayName  = "last-gateway" // the gateway namespace and its ServiceAccount
+
+	gatewayNamespaceUser = "system:serviceaccount:last-gateway:sneaky"
 )
 
 var (
@@ -98,6 +101,7 @@ func grantApprovers(t *testing.T, admin client.Client) {
 		Subjects: []rbacv1.Subject{
 			{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice"},
 			{Kind: rbacv1.ServiceAccountKind, Name: "last-operator", Namespace: "last-system"},
+			{Kind: rbacv1.ServiceAccountKind, Name: "sneaky", Namespace: gatewayName},
 		}}
 	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: approvalsNS}}} {
 		if err := admin.Create(ctx, o); err != nil {
@@ -147,6 +151,11 @@ func TestIntentApprovalAdmission(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "operator may not") {
 		t.Fatalf("operator approval = %v", err)
 	}
+	gwSA := clientAs(t, gatewayNamespaceUser, "system:serviceaccounts", "system:serviceaccounts:last-gateway")
+	err = gwSA.Create(ctx, approval("gw-sa", gatewayNamespaceUser))
+	if err == nil || !strings.Contains(err.Error(), "gateway namespace may not approve") {
+		t.Fatalf("gateway-namespace ServiceAccount approval = %v", err)
+	}
 	var got lastv1alpha1.IntentApproval
 	if err := alice.Get(ctx, client.ObjectKey{Namespace: approvalsNS, Name: "ok"}, &got); err != nil {
 		t.Fatal(err)
@@ -164,7 +173,7 @@ func TestGatewayAuditGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const ns = "last-gateway"
+	const ns = gatewayName
 	const gwUser = "system:serviceaccount:last-gateway:last-gateway"
 	const otherUser = "system:serviceaccount:last-gateway:other"
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"}, Rules: []rbacv1.PolicyRule{{
@@ -174,7 +183,7 @@ func TestGatewayAuditGuard(t *testing.T) {
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "audit-guard-broad"},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
 		Subjects: []rbacv1.Subject{
-			{Kind: rbacv1.ServiceAccountKind, Name: "last-gateway", Namespace: ns},
+			{Kind: rbacv1.ServiceAccountKind, Name: gatewayName, Namespace: ns},
 			{Kind: rbacv1.ServiceAccountKind, Name: "other", Namespace: ns},
 		}}
 	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}} {
@@ -254,7 +263,7 @@ func TestGatewayAuditGuard(t *testing.T) {
 	}
 
 	// The gateway may mint tokens for provider ServiceAccounts, never for its own identity.
-	for _, name := range []string{"last-gateway", "deployer"} {
+	for _, name := range []string{gatewayName, "deployer"} {
 		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 		if err := admin.Create(ctx, sa); err != nil {
 			t.Fatal(err)
@@ -264,13 +273,13 @@ func TestGatewayAuditGuard(t *testing.T) {
 		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 		return c.SubResource("token").Create(ctx, sa, &authv1.TokenRequest{})
 	}
-	if err := mint(gw, "last-gateway"); err == nil || !strings.Contains(err.Error(), "may not mint") {
+	if err := mint(gw, gatewayName); err == nil || !strings.Contains(err.Error(), "may not mint") {
 		t.Errorf("gateway minting its own token = %v, want a policy denial", err)
 	}
 	if err := mint(gw, "deployer"); err != nil {
 		t.Errorf("gateway minting a token for another ServiceAccount: %v", err)
 	}
-	if err := mint(other, "last-gateway"); err != nil {
+	if err := mint(other, gatewayName); err != nil {
 		t.Errorf("another ServiceAccount minting a last-gateway token: %v", err)
 	}
 }

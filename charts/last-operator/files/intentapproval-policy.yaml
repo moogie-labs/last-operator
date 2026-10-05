@@ -17,6 +17,11 @@ spec:
       message: "spec.approvedBy must be the requesting user"
     - expression: "!(request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-operator'))"
       message: "the operator may not create IntentApprovals"
+    # This file is static, so it names the default gateway namespace, last-gateway. A chart
+    # install with a different gateway namespace is covered by the gateway-side check in
+    # BeginPhase, which refuses approvals whose approvedBy is a ServiceAccount of its own namespace.
+    - expression: "!request.userInfo.username.startsWith('system:serviceaccount:last-gateway:')"
+      message: "ServiceAccounts in the gateway namespace may not approve"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

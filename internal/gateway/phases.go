@@ -333,6 +333,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
 		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
+	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
+		return nil, d.deny(codes.PermissionDenied, "approval %s names a gateway-namespace ServiceAccount as approver", approval.Name)
 	}
 
 	auth := &audit.Authorization{Kind: "approval", Name: ns + "/" + approval.Name}
