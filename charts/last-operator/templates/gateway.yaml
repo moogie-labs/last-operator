@@ -241,6 +241,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: last-operator
       ports:
         - {port: 9090, protocol: TCP}
     # This rule must stay open from anywhere (no from:): the sandbox egress gate uses

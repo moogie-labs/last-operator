@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -20,7 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/controller"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/gatewayclient"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -44,11 +48,15 @@ func main() {
 	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
+	var gatewayAddr, gatewayTokenFile string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
+	flag.StringVar(&gatewayAddr, "gateway-address", "last-gateway.last-gateway.svc:9090", "The gateway's gRPC address.")
+	flag.StringVar(&gatewayTokenFile, "gateway-token-file", "/var/run/secrets/last-operator/gateway/token",
+		"The projected ServiceAccount token (audience last-gateway) sent with every gateway call.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -166,16 +174,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	conn, err := gatewayclient.Dial(gatewayAddr, gatewayTokenFile)
+	if err != nil {
+		setupLog.Error(err, "Failed to create gateway client", "address", gatewayAddr)
+		os.Exit(1)
+	}
+	gw := gatewayv1.NewGatewayServiceClient(conn)
 	if err := (&controller.IntentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Reader:     mgr.GetAPIReader(),
+		Scheme:     mgr.GetScheme(),
+		Gateway:    gw,
+		Planner:    &agent.Planner{LLM: gw},
+		Recorder:   mgr.GetEventRecorder("last-operator"),
+		RetryDelay: 5 * time.Second,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "intent")
 		os.Exit(1)
 	}
 	if err := (&controller.ManagedResourceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Gateway: gw,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "managedresource")
 		os.Exit(1)

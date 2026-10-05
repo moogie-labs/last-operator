@@ -35,6 +35,11 @@ gateway:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 256Mi}
 
+operator:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
 sandbox:
   # Fallback sandbox image, used only while OperatorConfig spec.sandbox.baseImage is
   # unset (development and e2e). Production pins the image by digest in OperatorConfig.

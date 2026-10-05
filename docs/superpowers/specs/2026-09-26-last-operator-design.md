@@ -155,19 +155,27 @@ A kubebuilder controller manager. It:
 - Creates `CommandRuleSuggestion`s (§9.5).
 - Writes status on its CRs.
 
-**RBAC:**
+**RBAC** (one ClusterRole, `charts/last-operator/files/operator-clusterrole.yaml`,
+checked by `test/admission`; plus Leases and Events in its own namespace for
+leader election):
 
-- get/list/watch/update/patch on `Intent` and `ManagedResource`, their
-  status subresources, `Events`, and `Leases`.
-- create/delete on `ManagedResource`.
-- create on `CommandRuleSuggestion`. The `spec.decision` field is
-  excluded by admission (§9.5).
-- get/list/watch on `OperatorConfig`, `IntentPolicy`, `Provider`,
-  `LLMProvider`, `IntentApproval`, `CommandRule`,
-  `ClusterCommandRule`, and `CommandRuleSuggestion`.
+- get/list/watch on `Intent`; update/patch on `intents/status`; update on
+  `intents/finalizers`.
+- get/list/watch/create/update/patch on `ManagedResource` and its status.
+  **No delete**: deleting a ManagedResource garbage-collects its output
+  Secret with no audit entry.
+- get/list/watch on `IntentApproval`, `IntentPolicy`, and `OperatorConfig`.
+- create/patch on `events.k8s.io` Events.
+- Later milestones add:
+  - create on `CommandRuleSuggestion` (M7). The `spec.decision` field is
+    excluded by admission (§9.5).
+  - get/list/watch on `CommandRule` and `ClusterCommandRule` (M6).
+  - update/patch on `Intent`, for finalizers (M5).
 - **No** create on `IntentApproval`, `CommandRule`, or
-  `ClusterCommandRule`.
-- **No** access to Secrets, Pods, NetworkPolicies, or anything else.
+  `ClusterCommandRule`. **No** writes to `IntentPolicy`, `OperatorConfig`,
+  `Provider`, `LLMProvider`, RBAC, or admission policies.
+- **No** access to Secrets, Pods, ConfigMaps, NetworkPolicies,
+  ServiceAccount tokens, impersonation, or anything else.
 
 ### 4.2 Gateway (`cmd/gateway`)
 
@@ -179,7 +187,7 @@ carries the operator's projected ServiceAccount token (audience
 `last-gateway`, short-lived, mounted by the kubelet). The gateway validates
 it with the TokenReview API and accepts only the operator's ServiceAccount
 (`system:serviceaccount:last-system:last-operator`). A NetworkPolicy limits
-ingress to the gRPC port to pods in `last-system`. There is no mTLS in v1.
+ingress to the gRPC port to the operator's pods in `last-system`. There is no mTLS in v1.
 The token check is the authentication boundary, and the audit entry records
 the authenticated caller.
 

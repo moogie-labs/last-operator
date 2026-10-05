@@ -328,3 +328,11 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	! helm template last charts/last-operator -n last-system | grep -q 'last-gateway-audit-guard-external'
 	helm template last charts/last-operator -n last-system --set sandbox.image=img:dev | grep -q 'name: LAST_SANDBOX_IMAGE, value: "img:dev"'
 	! helm template last charts/last-operator -n last-system | grep -q 'LAST_SANDBOX_IMAGE'
+	helm template last charts/last-operator -n last-system | grep -q 'image: ghcr.io/moogie-labs/last-operator:'
+	helm template last charts/last-operator -n last-system | grep -q 'audience: last-gateway'
+	helm template last charts/last-operator -n last-system | grep -q -- '--gateway-address=last-gateway.last-gateway.svc:9090'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-operator-leader-election'
+	@# The gateway's gRPC port admits only the operator's pods: the podSelector shares the namespaceSelector's from: element.
+	helm template last charts/last-operator -n last-system | grep -A1 'kubernetes.io/metadata.name: last-system' | grep -q '^          podSelector:'
+	@# The operator never gets Secrets or ManagedResource deletes (spec §4.1; test/admission checks the full list).
+	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|delete)' charts/last-operator/files/operator-clusterrole.yaml

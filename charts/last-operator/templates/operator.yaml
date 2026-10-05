@@ -6,3 +6,101 @@ metadata:
   name: last-operator
   namespace: {{ .Release.Namespace }}
   labels: {{- include "last.labels" . | nindent 4 }}
+---
+{{ .Files.Get "files/operator-clusterrole.yaml" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: last-operator
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: last-operator}
+subjects:
+  - {kind: ServiceAccount, name: last-operator, namespace: {{ .Release.Namespace }}}
+---
+# Leader election, in the operator's own namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: last-operator-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: last-operator-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-operator-leader-election}
+subjects:
+  - {kind: ServiceAccount, name: last-operator, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: last-operator
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: last-operator
+  template:
+    metadata:
+      labels:
+        # The gateway's NetworkPolicy admits gRPC from pods with this label only.
+        app.kubernetes.io/name: last-operator
+        {{- include "last.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: last-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: operator
+          image: {{ include "last.image" (list . "operator") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+            - --metrics-secure=false
+            - --gateway-address={{ printf "last-gateway.%s.svc:9090" .Values.namespaces.gateway }}
+            - --gateway-token-file=/var/run/secrets/last-operator/gateway/token
+          ports:
+            - {name: metrics, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 20
+          volumeMounts:
+            - {name: gateway-token, mountPath: /var/run/secrets/last-operator/gateway, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.operator.resources | nindent 12 }}
+      volumes:
+        # The gateway authenticates every call with this token (spec §4.2).
+        - name: gateway-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: last-gateway
+                  expirationSeconds: 3600
+                  path: token

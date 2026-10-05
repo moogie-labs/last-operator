@@ -1,0 +1,32 @@
+# The operator's cluster-wide permissions (spec §4.1). The operator is
+# untrusted: it reads approvals, policy and configuration, and writes only
+# Intent status and ManagedResources. It has no access to Secrets, Pods,
+# ConfigMaps or anything in the gateway, sandbox or audit namespaces, cannot
+# impersonate or mint tokens, and cannot delete ManagedResources (that would
+# garbage-collect output Secrets unaudited). test/admission checks this file.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: last-operator
+rules:
+  - apiGroups: [last.moogie-labs.com]
+    resources: [intents]
+    verbs: [get, list, watch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [intents/status]
+    verbs: [get, update, patch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [intents/finalizers]
+    verbs: [update]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [managedresources]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [managedresources/status]
+    verbs: [get, update, patch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [intentapprovals, intentpolicies, operatorconfigs]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
