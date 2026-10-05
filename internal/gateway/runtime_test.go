@@ -39,7 +39,7 @@ func openWriter(t *testing.T, sink audit.Sink) *audit.Writer {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	w, err := audit.Open(context.Background(), sink, audit.NewSigner(key),
-		audit.WriterConfig{ChainID: testChainID, Retention: time.Hour, Actor: "gateway"}, func(audit.StartInfo) any { return nil })
+		audit.WriterConfig{ChainID: testChainID, Retention: time.Hour, Actor: sandbox.GatewayActor}, func(audit.StartInfo) any { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

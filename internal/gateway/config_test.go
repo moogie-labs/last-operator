@@ -11,7 +11,7 @@ const envCanaries = "LAST_EGRESS_CANARIES"
 
 func baseEnv() map[string]string {
 	return map[string]string{
-		"POD_NAMESPACE": ns, "POD_NAME": "gw-0",
+		"POD_NAMESPACE": ns, "POD_NAME": testPodName,
 		"LAST_AUDIT_ENDPOINT": "http://last-rustfs.last-audit.svc:9000",
 		"LAST_AUDIT_BUCKET":   "last-audit", "LAST_AUDIT_CHAIN_ID": testChainID,
 		"LAST_OPERATOR_IDENTITY": operatorID,

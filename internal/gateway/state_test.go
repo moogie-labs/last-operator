@@ -20,13 +20,13 @@ func TestStateStoreRoundTrip(t *testing.T) {
 	if err != nil || r.Intent != "team-x/web" || r.Open != nil || r.Executed != nil {
 		t.Fatalf("missing record = %+v, %v", r, err)
 	}
-	r.Open = &OpenPhase{Stage: "Create", SubjectHash: "sha256:a", BeginSeq: 7, Epoch: "e1"}
+	r.Open = &OpenPhase{Stage: testStage, SubjectHash: "sha256:a", BeginSeq: 7, Epoch: "e1"}
 	r.MarkUsed("sha256:a")
 	if err := s.Save(ctx, r); err != nil {
 		t.Fatal(err)
 	}
 	r.Open = nil
-	r.Executed = &ExecutedPlan{Stage: "Create", PlanHash: "sha256:a", Plan: `{"steps":[]}`, EndSeq: 9}
+	r.Executed = &ExecutedPlan{Stage: testStage, PlanHash: "sha256:a", Plan: `{"steps":[]}`, EndSeq: 9}
 	if err := s.Save(ctx, r); err != nil {
 		t.Fatalf("second save (update): %v", err)
 	}

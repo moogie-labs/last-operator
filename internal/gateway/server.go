@@ -41,7 +41,9 @@ type Gateway struct {
 	sched   atomic.Pointer[sandbox.Scheduler]
 	logs    sandbox.LogReader
 	execCfg sandbox.ExecutorConfig
-	locks   keyedMutex //nolint:unused // used by the lifecycle RPCs added in later tasks
+	locks   keyedMutex
+	state   *StateStore
+	phases  phaseTable
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -50,7 +52,7 @@ type Gateway struct {
 
 func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Sink, signer *audit.Signer) *Gateway {
 	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
-		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube)}
+		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace)}
 	g.execCfg = sandbox.ExecutorConfig{
 		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
 		ProviderNamespace: cfg.Namespace,

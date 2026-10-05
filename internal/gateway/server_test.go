@@ -22,7 +22,11 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit/audittest"
 )
 
-const testChainID = "chain-1"
+const (
+	testChainID = "chain-1"
+	testPodName = "gw-0"
+	testStage   = "Create"
+)
 
 const (
 	testCanary    = "10.96.0.10:8080"
@@ -35,7 +39,7 @@ const testOperator = "system:serviceaccount:last-system:last-operator"
 func testGateway(t *testing.T, sink audit.Sink, objs ...client.Object) *Gateway {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	cfg := Config{Namespace: ns, PodName: "gw-0", ChainID: testChainID, Retention: 365 * 24 * time.Hour, HTTPAddr: ":0",
+	cfg := Config{Namespace: ns, PodName: testPodName, ChainID: testChainID, Retention: 365 * 24 * time.Hour, HTTPAddr: ":0",
 		LeaseName: "l", SandboxNamespace: testSandboxNS, EgressCanaries: []string{testCanary},
 		OperatorIdentity: testOperator, DrainTimeout: time.Second}
 	crd := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()

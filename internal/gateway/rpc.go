@@ -38,3 +38,11 @@ func (g *Gateway) GRPCServer(auth *Authenticator) *grpc.Server {
 	gatewayv1.RegisterGatewayServiceServer(srv, &rpcServer{g: g})
 	return srv
 }
+
+func (s *rpcServer) BeginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
+	return s.g.beginPhase(ctx, req)
+}
+
+func (s *rpcServer) EndPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) (*gatewayv1.EndPhaseResponse, error) {
+	return s.g.endPhase(ctx, req)
+}

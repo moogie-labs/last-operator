@@ -1,0 +1,357 @@
+package gateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/policy"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
+)
+
+// MaxPlanBytes bounds a plan's canonical JSON; the executed plan is kept in a ConfigMap.
+const MaxPlanBytes = 512 << 10
+
+const (
+	outcomeSucceeded   = "succeeded"
+	outcomeFailed      = "failed"
+	outcomeInterrupted = "interrupted"
+	outcomeAborted     = "aborted"
+)
+
+// phase is an open phase of this gateway process.
+type phase struct {
+	mu       sync.Mutex // held while a step or output write runs
+	stage    lastv1alpha1.Stage
+	subject  string
+	body     plan.Body
+	auth     *audit.Authorization
+	beginSeq uint64
+	next     int          // index of the next step to run; also the count of steps that succeeded
+	results  plan.Results // results of steps that ran, by step ID
+	failed   bool         // a step failed or could not run; only EndPhase(failed) remains
+}
+
+type phaseTable struct {
+	mu   sync.Mutex
+	open map[string]*phase
+}
+
+func (t *phaseTable) get(key string) *phase {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.open[key]
+}
+
+func (t *phaseTable) put(key string, p *phase) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.open == nil {
+		t.open = map[string]*phase{}
+	}
+	t.open[key] = p
+}
+
+func (t *phaseTable) remove(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.open, key)
+}
+
+type phaseBegin struct {
+	Plan  string `json:"plan"` // canonical JSON, kept as text so any number survives the audit writer
+	Steps int    `json:"steps"`
+}
+
+type phaseEnd struct {
+	BeginSeq uint64 `json:"beginSeq"`
+	Outcome  string `json:"outcome"`
+	Reason   string `json:"reason,omitempty"`
+	StepsRun int    `json:"stepsRun"`
+}
+
+type approvalObserved struct {
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	ApprovedBy string `json:"approvedBy"`
+	Decision   string `json:"decision"`
+	Created    string `json:"created"`
+}
+
+type policyDenied struct {
+	RPC    string `json:"rpc"`
+	Reason string `json:"reason"`
+}
+
+var errApprovalDenied = errors.New("approval denied")
+
+func intentKey(ref *gatewayv1.IntentRef) (ns, name, key string, err error) {
+	if ref.GetNamespace() == "" || ref.GetName() == "" {
+		return "", "", "", status.Error(codes.InvalidArgument, "intent namespace and name are required")
+	}
+	return ref.GetNamespace(), ref.GetName(), ref.GetNamespace() + "/" + ref.GetName(), nil
+}
+
+func notFoundOr(err error, what string) error {
+	if apierrors.IsNotFound(err) {
+		return status.Errorf(codes.NotFound, "%s not found", what)
+	}
+	return status.Errorf(codes.Unavailable, "read %s: %v", what, err)
+}
+
+// denial writes policy.denied before refusing an RPC (spec §8.3).
+type denial struct {
+	ctx                                context.Context
+	w                                  *audit.Writer
+	actor, intent, stage, subject, rpc string
+}
+
+func (d denial) deny(code codes.Code, format string, args ...any) error {
+	reason := fmt.Sprintf(format, args...)
+	if _, err := d.w.Append(d.ctx, audit.Draft{Type: audit.TypePolicyDenied, Actor: d.actor, Intent: d.intent,
+		Stage: d.stage, SubjectHash: d.subject, Payload: policyDenied{RPC: d.rpc, Reason: reason}}); err != nil {
+		return status.Errorf(codes.Unavailable, "record policy.denied: %v", err)
+	}
+	return status.Error(code, reason)
+}
+
+func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effective, error) {
+	op, err := g.operatorConfig(ctx)
+	if err != nil {
+		return policy.Effective{}, err
+	}
+	var list lastv1alpha1.IntentPolicyList
+	if err := g.crd.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return policy.Effective{}, status.Errorf(codes.Unavailable, "list IntentPolicies: %v", err)
+	}
+	eff, err := policy.Resolve(op, list.Items)
+	if err != nil {
+		return policy.Effective{}, status.Errorf(codes.FailedPrecondition, "invalid policy: %v", err)
+	}
+	return eff, nil
+}
+
+// checkPlanPolicy checks every command the plan can ever run: steps, probes, teardown.
+func checkPlanPolicy(eff policy.Effective, b plan.Body) error {
+	for _, s := range b.Steps {
+		if err := eff.CheckCommand(s); err != nil {
+			return fmt.Errorf("step %s: %w", s.ID, err)
+		}
+	}
+	for _, r := range b.Resources {
+		for _, p := range r.Probes {
+			if err := eff.CheckCommand(p.Command); err != nil {
+				return fmt.Errorf("probe %s: %w", p.ID, err)
+			}
+		}
+		for i, c := range r.Teardown {
+			if err := eff.CheckCommand(c); err != nil {
+				return fmt.Errorf("teardown command %d: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// findApproval returns the approving IntentApproval for the subject. Any matching
+// Deny wins over every Approve (errApprovalDenied, with the denying object).
+func (g *Gateway) findApproval(ctx context.Context, ns, name string, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+	var list lastv1alpha1.IntentApprovalList
+	if err := g.crd.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "list IntentApprovals: %v", err)
+	}
+	var found *lastv1alpha1.IntentApproval
+	for i := range list.Items {
+		a := &list.Items[i]
+		if a.Spec.IntentRef.Name != name || a.Spec.Stage != stage || a.Spec.SubjectHash != subject {
+			continue
+		}
+		if a.Spec.Decision == lastv1alpha1.DecisionDeny {
+			return a, errApprovalDenied
+		}
+		if found == nil || a.Name < found.Name {
+			found = a
+		}
+	}
+	return found, nil
+}
+
+func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
+	w, release, err := g.beginRPC()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	ns, name, key, err := intentKey(req.GetIntent())
+	if err != nil {
+		return nil, err
+	}
+	stage, subject := lastv1alpha1.Stage(req.GetStage()), req.GetSubjectHash()
+	if stage != lastv1alpha1.StageCreate {
+		return nil, status.Errorf(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create phases only", stage)
+	}
+	unlock := g.locks.lock(key)
+	defer unlock()
+	actor := CallerFrom(ctx)
+	d := denial{ctx: ctx, w: w, actor: actor, intent: key, stage: string(stage), subject: subject, rpc: "BeginPhase"}
+
+	var intent lastv1alpha1.Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
+		return nil, notFoundOr(err, "intent")
+	}
+	if intent.Status.Plan == nil {
+		return nil, d.deny(codes.FailedPrecondition, "intent has no plan")
+	}
+	body := plan.FromStatus(intent.Status.Plan)
+	canonical, err := plan.Canonical(body)
+	if err != nil {
+		return nil, d.deny(codes.InvalidArgument, "plan cannot be encoded: %v", err)
+	}
+	if len(canonical) > MaxPlanBytes {
+		return nil, d.deny(codes.InvalidArgument, "plan is %d bytes; the limit is %d", len(canonical), MaxPlanBytes)
+	}
+	hash, err := plan.Hash(body)
+	if err != nil {
+		return nil, d.deny(codes.InvalidArgument, "%v", err)
+	}
+	if hash != subject || intent.Status.Plan.Hash != subject {
+		return nil, d.deny(codes.PermissionDenied, "plan hash %s does not match the subject", hash)
+	}
+	if err := plan.Validate(body); err != nil {
+		return nil, d.deny(codes.InvalidArgument, "%v", err)
+	}
+
+	rec, err := g.state.Load(ctx, key)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if rec.Open != nil {
+		if rec.Open.Epoch == g.epoch && g.phases.get(key) != nil {
+			return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
+		}
+		if err := g.closeInterrupted(ctx, w, key, rec); err != nil {
+			return nil, err
+		}
+	}
+	if slices.Contains(rec.Used, subject) {
+		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
+	}
+	eff, err := g.effectivePolicy(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPlanPolicy(eff, body); err != nil {
+		return nil, d.deny(codes.PermissionDenied, "%v", err)
+	}
+	approval, err := g.findApproval(ctx, ns, name, stage, subject)
+	switch {
+	case errors.Is(err, errApprovalDenied):
+		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", approval.Name)
+	case err != nil:
+		return nil, err
+	case approval == nil:
+		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this plan")
+	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
+		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
+	}
+
+	auth := &audit.Authorization{Kind: "approval", Name: ns + "/" + approval.Name}
+	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeApprovalObserved, Actor: actor, Intent: key, Stage: string(stage), SubjectHash: subject,
+		Payload: approvalObserved{Name: approval.Name, UID: string(approval.UID), ApprovedBy: approval.Spec.ApprovedBy,
+			Decision: string(approval.Spec.Decision), Created: approval.CreationTimestamp.UTC().Format(time.RFC3339)}}); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
+	}
+	begin, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseBegin, Actor: actor, Intent: key, Stage: string(stage),
+		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps)}})
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "record phase.begin: %v", err)
+	}
+	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch}
+	rec.MarkUsed(subject)
+	if err := g.state.Save(ctx, rec); err != nil {
+		_, _ = w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: string(stage),
+			SubjectHash: subject, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}})
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	g.phases.put(key, &phase{stage: stage, subject: subject, body: body, auth: auth, beginSeq: begin.Seq, results: plan.Results{}})
+	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
+}
+
+// closeInterrupted ends a phase that an earlier gateway process opened. Its
+// subject stays in Used, so the same plan never runs twice without replanning.
+func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord) error {
+	open := *rec.Open
+	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: open.Stage,
+		SubjectHash: open.SubjectHash, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
+			Reason: "the gateway restarted or lost leadership during the phase"}}); err != nil {
+		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+	}
+	g.phases.remove(key)
+	rec.Open = nil
+	if err := g.state.Save(ctx, rec); err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	return nil
+}
+
+func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) (*gatewayv1.EndPhaseResponse, error) {
+	w, release, err := g.beginRPC()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	_, _, key, err := intentKey(req.GetIntent())
+	if err != nil {
+		return nil, err
+	}
+	unlock := g.locks.lock(key)
+	defer unlock()
+	p := g.phases.get(key)
+	if p == nil || p.subject != req.GetSubjectHash() {
+		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if req.GetSucceeded() && (p.failed || p.next < len(p.body.Steps)) {
+		return nil, status.Errorf(codes.FailedPrecondition, "the phase cannot succeed: %d of %d steps succeeded", p.next, len(p.body.Steps))
+	}
+	outcome := outcomeFailed
+	if req.GetSucceeded() {
+		outcome = outcomeSucceeded
+	}
+	end, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: CallerFrom(ctx), Intent: key, Stage: string(p.stage),
+		SubjectHash: p.subject, AuthorizedBy: p.auth,
+		Payload: phaseEnd{BeginSeq: p.beginSeq, Outcome: outcome, Reason: req.GetReason(), StepsRun: p.next}})
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+	}
+	g.phases.remove(key)
+	rec, err := g.state.Load(ctx, key)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	rec.Open = nil
+	if req.GetSucceeded() {
+		canonical, err := plan.Canonical(p.body)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
+		}
+		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: end.Seq}
+	}
+	if err := g.state.Save(ctx, rec); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	return &gatewayv1.EndPhaseResponse{EndSeq: end.Seq}, nil
+}

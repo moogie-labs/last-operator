@@ -212,14 +212,11 @@ func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 }
 
 // keyedMutex serializes work per key (per Intent).
-//
-//nolint:unused // used by the lifecycle RPCs added in later tasks
 type keyedMutex struct {
 	mu sync.Mutex
 	m  map[string]*sync.Mutex
 }
 
-//nolint:unused // used by the lifecycle RPCs added in later tasks
 func (k *keyedMutex) lock(key string) func() {
 	k.mu.Lock()
 	if k.m == nil {
