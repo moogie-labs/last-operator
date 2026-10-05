@@ -63,7 +63,10 @@ func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if wr := g.writer.Load(); wr == nil || wr.Broken() {
+		g.rpcMu.Lock()
+		draining := g.draining
+		g.rpcMu.Unlock()
+		if wr := g.writer.Load(); draining || wr == nil || wr.Broken() {
 			http.Error(w, "audit writer not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -97,21 +100,24 @@ func (g *Gateway) Run(ctx context.Context) error {
 			cancel(fmt.Errorf("gateway: grpc server: %w", err))
 		}
 	}()
-	defer func() {
+	// stopGRPC runs after lead's drain, so in-flight RPCs are not cut short.
+	stopGRPC := func() {
 		done := make(chan struct{})
 		go func() { grpcSrv.GracefulStop(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(g.cfg.DrainTimeout):
 			grpcSrv.Stop()
 		}
-	}()
+	}
 
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta:  metav1.ObjectMeta{Name: g.cfg.LeaseName, Namespace: g.cfg.Namespace},
 		Client:     g.kube.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{Identity: g.cfg.PodName},
 	}
+	var started atomic.Bool
+	leadDone := make(chan struct{})
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 		Lock: lock,
 		// ReleaseOnCancel defaults to false: on shutdown or a failed renewal we let the
@@ -126,6 +132,8 @@ func (g *Gateway) Run(ctx context.Context) error {
 		RetryPeriod:   2 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(lctx context.Context) {
+				started.Store(true)
+				defer close(leadDone)
 				if err := g.lead(lctx); shouldReportLeadError(lctx, err) {
 					cancel(err)
 				}
@@ -133,6 +141,17 @@ func (g *Gateway) Run(ctx context.Context) error {
 			OnStoppedLeading: func() { cancel(errLostLeadership) },
 		},
 	})
+	// client-go runs OnStartedLeading in its own goroutine and RunOrDie returns
+	// without waiting for it; wait for lead's drain so outcomes are recorded
+	// before the process exits.
+	if started.Load() {
+		select {
+		case <-leadDone:
+		case <-time.After(g.cfg.DrainTimeout + 10*time.Second):
+			slog.Warn("Gave up waiting for the leader to drain")
+		}
+	}
+	stopGRPC()
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return cause
 	}

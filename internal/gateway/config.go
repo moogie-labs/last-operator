@@ -119,7 +119,7 @@ func validateCanarySpec(spec string) error {
 	if strings.Count(spec, ":") > 1 || strings.HasPrefix(spec, "[") {
 		head, portStr, ok = "", "", false
 		if ap, err := netip.ParseAddrPort(spec); err == nil && ap.Port() != 0 {
-			return nil
+			return checkCanaryAddr(ap.Addr())
 		}
 	}
 	if !ok {
@@ -138,9 +138,21 @@ func validateCanarySpec(spec string) error {
 		}
 		return fmt.Errorf("canary %q: want service/<namespace>/<name>:<port>", spec)
 	default:
-		if _, err := netip.ParseAddr(head); err != nil {
+		addr, err := netip.ParseAddr(head)
+		if err != nil {
 			return fmt.Errorf("canary %q: %q is not an IP address", spec, head)
 		}
-		return nil
+		return checkCanaryAddr(addr)
 	}
+}
+
+// checkCanaryAddr refuses addresses a network policy can never block (loopback,
+// unspecified, link-local, multicast, zoned): a canary there would be "denied"
+// trivially and prove nothing about egress.
+func checkCanaryAddr(a netip.Addr) error {
+	if a.Zone() != "" || a.IsLoopback() || a.IsUnspecified() || a.IsLinkLocalUnicast() ||
+		a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast() {
+		return fmt.Errorf("canary address %q is loopback, unspecified, link-local, multicast or zoned; network policy cannot block it", a)
+	}
+	return nil
 }

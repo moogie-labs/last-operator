@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +52,9 @@ func (g *Gateway) beginRPC() (*audit.Writer, func(), error) {
 
 // drain refuses new side-effecting RPCs and waits up to timeout for in-flight ones,
 // so their outcome entries are written before the writer is released.
+//
+// lead runs once per process (a lost lease exits the process), so the WaitGroup
+// and draining flag are never reused across leadership terms.
 func (g *Gateway) drain(timeout time.Duration) bool {
 	g.rpcMu.Lock()
 	g.draining = true
@@ -125,9 +130,15 @@ func (g *Gateway) resolveCanaries(ctx context.Context) ([]string, error) {
 			if ip == "" {
 				return nil, fmt.Errorf("gateway: canary %s: no node has an InternalIP", spec)
 			}
+			if err := checkResolvedIP(spec, ip); err != nil {
+				return nil, err
+			}
 			out = append(out, net.JoinHostPort(ip, port))
 		case strings.HasPrefix(head, "service/"):
 			parts := strings.Split(head, "/")
+			if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+				return nil, fmt.Errorf("gateway: canary %s: want service/<namespace>/<name>:<port>", spec)
+			}
 			svc, err := g.kube.CoreV1().Services(parts[1]).Get(ctx, parts[2], metav1.GetOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("gateway: canary %s: %w", spec, err)
@@ -135,12 +146,26 @@ func (g *Gateway) resolveCanaries(ctx context.Context) ([]string, error) {
 			if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
 				return nil, fmt.Errorf("gateway: canary %s: service has no ClusterIP", spec)
 			}
+			if err := checkResolvedIP(spec, svc.Spec.ClusterIP); err != nil {
+				return nil, err
+			}
 			out = append(out, net.JoinHostPort(svc.Spec.ClusterIP, port))
 		default:
 			out = append(out, spec)
 		}
 	}
 	return out, nil
+}
+
+func checkResolvedIP(spec, ip string) error {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return fmt.Errorf("gateway: canary %s: resolved %q is not an IP address", spec, ip)
+	}
+	if err := checkCanaryAddr(addr); err != nil {
+		return fmt.Errorf("gateway: canary %s: %w", spec, err)
+	}
+	return nil
 }
 
 func firstInternalIP(nodes []corev1.Node) string {
@@ -161,6 +186,9 @@ func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 	canaries, err := g.resolveCanaries(ctx)
 	if err != nil {
 		return err
+	}
+	if len(canaries) == 0 {
+		return errors.New("gateway: no egress canaries resolved; refusing to lead without an egress gate")
 	}
 	g.execCfg.EgressCanaries = canaries
 	maxConcurrent := defaultMaxConcurrent

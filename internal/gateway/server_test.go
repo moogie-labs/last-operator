@@ -27,6 +27,7 @@ const testChainID = "chain-1"
 const (
 	testCanary    = "10.96.0.10:8080"
 	testSandboxNS = "last-sandbox"
+	testLockMode  = "COMPLIANCE"
 )
 
 const testOperator = "system:serviceaccount:last-system:last-operator"
@@ -177,7 +178,7 @@ func (r *recordingSink) Put(ctx context.Context, key string, body []byte, until 
 func TestLeadUsesLongerBucketDefaultRetention(t *testing.T) {
 	const year = 365 * 24 * time.Hour
 	sink := &recordingSink{MemSink: audittest.NewMemSink()}
-	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: 2 * year})
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: testLockMode, DefaultRetention: 2 * year})
 	g := testGateway(t, sink) // configured retention: 1 year
 	start := time.Now()
 	cancel, done := startLead(t, g)

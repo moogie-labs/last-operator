@@ -134,7 +134,8 @@ func TestConfigFromEnvSandboxSettings(t *testing.T) {
 	if strings.Join(cfg.EgressCanaries, ",") != strings.Join(want, ",") {
 		t.Fatalf("canaries = %q", cfg.EgressCanaries)
 	}
-	for _, bad := range []string{"", "  ", "example.com:80", "service/x:80", "node:0", "10.0.0.1:99999", "pod/a/b:1"} {
+	for _, bad := range []string{"", "  ", "example.com:80", "service/x:80", "node:0", "10.0.0.1:99999", "pod/a/b:1",
+		"127.0.0.1:80", "0.0.0.0:80", "[fe80::1%eth0]:80", "[::1]:80", "224.0.0.1:80"} {
 		if _, err := ConfigFromEnv(envWith(map[string]string{envCanaries: bad})); err == nil {
 			t.Errorf("LAST_EGRESS_CANARIES=%q was accepted", bad)
 		}

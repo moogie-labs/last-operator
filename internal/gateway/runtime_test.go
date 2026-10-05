@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -130,7 +131,7 @@ func TestResolveCanaries(t *testing.T) {
 
 func TestLeadReapsOrphanedRunsBeforeServing(t *testing.T) {
 	sink := audittest.NewMemSink()
-	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: "COMPLIANCE", DefaultRetention: 365 * 24 * time.Hour})
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: testLockMode, DefaultRetention: 365 * 24 * time.Hour})
 	g := testGateway(t, sink)
 	orphan := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "last-run-o", Namespace: testSandboxNS,
 		Labels: sandbox.RunLabels("o"), CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour))}}
@@ -152,5 +153,90 @@ func TestLeadReapsOrphanedRunsBeforeServing(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("lead = %v", err)
+	}
+}
+
+func TestRunWaitsForLeadDrainBeforeReturning(t *testing.T) {
+	sink := audittest.NewMemSink()
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: testLockMode, DefaultRetention: 365 * 24 * time.Hour})
+	g := testGateway(t, sink)
+	g.cfg.GRPCAddr = "127.0.0.1:0"
+	g.cfg.HTTPAddr = "127.0.0.1:0"
+	g.cfg.DrainTimeout = 30 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for g.writer.Load() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if g.writer.Load() == nil {
+		cancel()
+		t.Fatalf("lead never published a writer: %v", <-done)
+	}
+	_, release, err := g.beginRPC()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned while an RPC was in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the in-flight RPC finished")
+	}
+}
+
+func TestResolveCanariesRefusesVacuousAddresses(t *testing.T) {
+	g := testGatewayWith(t)
+	g.kube = fake.NewClientset(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "lo", Namespace: ns}, Spec: corev1.ServiceSpec{ClusterIP: "127.0.0.1"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "169.254.1.1"}}}},
+	)
+	for _, spec := range []string{"service/last-gateway/lo:80", "node:80", "service/x:80", "service/a/b/c:80", "service//b:80"} {
+		g.cfg.EgressCanaries = []string{spec}
+		if _, err := g.resolveCanaries(context.Background()); err == nil {
+			t.Errorf("canary %q was accepted", spec)
+		}
+	}
+}
+
+func TestLeadFailsClosedWhenCanariesCannotBeResolved(t *testing.T) {
+	sink := audittest.NewMemSink()
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: testLockMode, DefaultRetention: 365 * 24 * time.Hour})
+	g := testGateway(t, sink)
+	g.cfg.EgressCanaries = []string{"service/last-gateway/missing:8080"}
+	if err := g.lead(context.Background()); err == nil {
+		t.Fatal("lead must fail when a canary cannot be resolved")
+	}
+	if g.writer.Load() != nil {
+		t.Fatal("a writer was published without an egress gate")
+	}
+}
+
+func TestPrepareLeadingRefusesZeroCanaries(t *testing.T) {
+	g := testGatewayWith(t)
+	g.cfg.EgressCanaries = nil
+	if err := g.prepareLeading(context.Background(), openWriter(t, audittest.NewMemSink())); err == nil {
+		t.Fatal("prepareLeading must fail without any canary")
+	}
+}
+
+func TestReadyzIsUnreadyWhileDraining(t *testing.T) {
+	g := testGatewayWith(t)
+	g.writer.Store(openWriter(t, audittest.NewMemSink()))
+	if code, _ := get(t, g, "/readyz"); code != http.StatusOK {
+		t.Fatalf("readyz = %d, want 200", code)
+	}
+	g.drain(time.Millisecond)
+	if code, _ := get(t, g, "/readyz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz while draining = %d, want 503", code)
 	}
 }
