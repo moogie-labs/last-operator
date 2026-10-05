@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -129,6 +130,13 @@ func intentKey(ref *gatewayv1.IntentRef) (ns, name, key string, err error) {
 	if ref.GetNamespace() == "" || ref.GetName() == "" {
 		return "", "", "", status.Error(codes.InvalidArgument, "intent namespace and name are required")
 	}
+	// Both parts end up in an audit key, a ConfigMap name hash, and error text.
+	if errs := validation.IsDNS1123Label(ref.GetNamespace()); len(errs) > 0 {
+		return "", "", "", status.Errorf(codes.InvalidArgument, "intent namespace %q is not a DNS label", truncateReason(ref.GetNamespace()))
+	}
+	if errs := validation.IsDNS1123Subdomain(ref.GetName()); len(errs) > 0 {
+		return "", "", "", status.Errorf(codes.InvalidArgument, "intent name %q is not a DNS subdomain", truncateReason(ref.GetName()))
+	}
 	return ref.GetNamespace(), ref.GetName(), ref.GetNamespace() + "/" + ref.GetName(), nil
 }
 
@@ -147,7 +155,7 @@ type denial struct {
 }
 
 func (d denial) deny(code codes.Code, format string, args ...any) error {
-	reason := fmt.Sprintf(format, args...)
+	reason := truncateReason(fmt.Sprintf(format, args...))
 	if _, err := d.w.Append(d.ctx, audit.Draft{Type: audit.TypePolicyDenied, Actor: d.actor, Intent: d.intent,
 		Stage: d.stage, SubjectHash: d.subject, Payload: policyDenied{RPC: d.rpc, Reason: reason}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record policy.denied: %v", err)
@@ -218,6 +226,9 @@ func (g *Gateway) findApproval(ctx context.Context, ns, name string, stage lastv
 		}
 		if a.Spec.Decision == lastv1alpha1.DecisionDeny {
 			return a, errApprovalDenied
+		}
+		if a.Spec.Decision != lastv1alpha1.DecisionApprove {
+			continue
 		}
 		if found == nil || a.Name < found.Name {
 			found = a
@@ -348,11 +359,11 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "record phase.begin: %v", err)
 	}
-	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch}
+	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch, Auth: auth}
 	rec.MarkUsed(subject)
 	if err := g.state.Save(ctx, rec); err != nil {
 		if _, aerr := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(stage),
-			SubjectHash: subject, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}}); aerr != nil {
+			SubjectHash: subject, AuthorizedBy: auth, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}}); aerr != nil {
 			slog.Warn("Could not record aborted phase", "err", aerr)
 		}
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
@@ -366,7 +377,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord) error {
 	open := *rec.Open
 	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: open.Stage,
-		SubjectHash: open.SubjectHash, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
+		SubjectHash: open.SubjectHash, AuthorizedBy: open.Auth, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
 			Reason: "the gateway restarted or lost leadership during the phase"}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
 	}

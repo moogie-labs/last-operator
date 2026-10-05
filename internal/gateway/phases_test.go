@@ -431,3 +431,89 @@ func TestBeginPhaseRefusesAPlanWhoseRecordWouldNotFit(t *testing.T) {
 		}
 	}
 }
+
+func TestFindApprovalNeedsAnExplicitApprove(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("odd", h, lastv1alpha1.Decision("Maybe"), approver))
+	_, err := env.begin(h)
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !strings.Contains(err.Error(), msgNoApproval) {
+		t.Fatalf("BeginPhase = %v, want %q", err, msgNoApproval)
+	}
+}
+
+func TestDenyTruncatesItsReason(t *testing.T) {
+	env := newTestEnv(t)
+	w, release, err := env.g.beginRPC()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	d := denial{ctx: env.ctx, w: w, actor: testOperator, intent: envKey, rpc: "Test"}
+	err = d.deny(codes.PermissionDenied, "%s", strings.Repeat("x", 5000))
+	if status.Code(err) != codes.PermissionDenied || len(err.Error()) > 2*maxReasonBytes {
+		t.Fatalf("deny = %d bytes, %v", len(err.Error()), status.Code(err))
+	}
+	if n := len(env.last().Payload); n > 2*maxReasonBytes {
+		t.Fatalf("policy.denied payload = %d bytes", n)
+	}
+}
+
+func TestIntentKeyValidatesNames(t *testing.T) {
+	long := strings.Repeat("a", 254)
+	for _, tc := range []struct {
+		ns, name string
+		ok       bool
+	}{
+		{envNS, envIntent, true}, {envNS, envIntent + ".v1", true}, {"Team", envIntent, false}, {envNS, "we b", false},
+		{envNS, "../web", false}, {"team/x", envIntent, false}, {envNS, "web\n", false}, {envNS, long, false},
+		{long, envIntent, false}, {"", envIntent, false}, {envNS, "", false}, {"-team", envIntent, false},
+	} {
+		_, _, key, err := intentKey(&gatewayv1.IntentRef{Namespace: tc.ns, Name: tc.name})
+		if tc.ok != (err == nil) || (!tc.ok && status.Code(err) != codes.InvalidArgument) {
+			t.Errorf("intentKey(%q, %q) = %q, %v; want ok=%v InvalidArgument", tc.ns, tc.name, key, err, tc.ok)
+		}
+	}
+}
+
+func TestInterruptedAndAbortedPhaseEndsCarryTheAuthorization(t *testing.T) {
+	phaseEndFor := func(env *testEnv, outcome string) audit.Entry {
+		for _, e := range env.entries() {
+			var p phaseEnd
+			if e.Type == audit.TypePhaseEnd && json.Unmarshal(e.Payload, &p) == nil && p.Outcome == outcome {
+				return e
+			}
+		}
+		t.Fatalf("no phase.end %s entry", outcome)
+		return audit.Entry{}
+	}
+	want := envNS + "/ok"
+	t.Run("interrupted", func(t *testing.T) {
+		in := intentWithPlan(t, twoSteps())
+		h := in.Status.Plan.Hash
+		env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+		if _, err := env.begin(h); err != nil {
+			t.Fatal(err)
+		}
+		env.g = env.newGateway()
+		_, _ = env.begin(h)
+		if e := phaseEndFor(env, outcomeInterrupted); e.AuthorizedBy == nil || e.AuthorizedBy.Name != want {
+			t.Fatalf("interrupted phase.end AuthorizedBy = %+v", e.AuthorizedBy)
+		}
+	})
+	t.Run("aborted", func(t *testing.T) {
+		in := intentWithPlan(t, twoSteps())
+		h := in.Status.Plan.Hash
+		env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+		env.kube.PrependReactor("create", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("etcd unavailable")
+		})
+		if _, err := env.begin(h); status.Code(err) != codes.Unavailable {
+			t.Fatalf("BeginPhase = %v, want Unavailable", err)
+		}
+		if e := phaseEndFor(env, outcomeAborted); e.AuthorizedBy == nil || e.AuthorizedBy.Name != want {
+			t.Fatalf("aborted phase.end AuthorizedBy = %+v", e.AuthorizedBy)
+		}
+	})
+}

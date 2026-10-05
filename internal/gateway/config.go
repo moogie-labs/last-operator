@@ -154,6 +154,7 @@ func validateCanarySpec(spec string) error {
 // unspecified, link-local, multicast, zoned): a canary there would be "denied"
 // trivially and prove nothing about egress.
 func checkCanaryAddr(a netip.Addr) error {
+	a = a.Unmap() // ::ffff:0.0.0.0 is the unspecified address too
 	if a.Zone() != "" || a.IsLoopback() || a.IsUnspecified() || a.IsLinkLocalUnicast() ||
 		a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast() {
 		return fmt.Errorf("canary address %q is loopback, unspecified, link-local, multicast or zoned; network policy cannot block it", a)

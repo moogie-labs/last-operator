@@ -63,6 +63,16 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
 	}
+	// The approval must still stand: a Deny after execution stops the probes too.
+	approval, err := g.findApproval(ctx, ns, name, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash)
+	switch {
+	case errors.Is(err, errApprovalDenied):
+		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", approval.Name)
+	case err != nil:
+		return nil, err
+	case approval == nil:
+		return nil, d.deny(codes.PermissionDenied, "no IntentApproval approves this plan")
+	}
 	var probes []lastv1alpha1.Probe
 	for _, r := range body.Resources {
 		probes = append(probes, r.Probes...)

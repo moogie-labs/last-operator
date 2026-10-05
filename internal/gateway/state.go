@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -44,6 +45,8 @@ type OpenPhase struct {
 	SubjectHash string `json:"subjectHash"`
 	BeginSeq    uint64 `json:"beginSeq"`
 	Epoch       string `json:"epoch"`
+	// Auth is the authorization phase.begin recorded, so an interrupted phase.end can carry it.
+	Auth *audit.Authorization `json:"auth,omitempty"`
 }
 
 // ExecutedPlan is the last plan whose phase ended successfully.

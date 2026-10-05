@@ -167,3 +167,32 @@ func TestRunProbesRefusesATamperedExecutedRecord(t *testing.T) {
 		}
 	}
 }
+
+func TestRunProbesRechecksTheApproval(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	if _, err := env.probe(); err != nil {
+		t.Fatalf("RunProbes with the approval in place = %v", err)
+	}
+	if err := env.crd.Create(env.ctx, approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	_, err := env.probe()
+	env.wantDenied(err, codes.PermissionDenied)
+	for _, e := range env.entries()[before:] {
+		if e.Type == audit.TypeProbeStart {
+			t.Fatal("a probe ran without an approval")
+		}
+	}
+}
+
+func TestRunProbesNeedsAnApprovalToExist(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	if err := env.crd.Delete(env.ctx, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.probe()
+	env.wantDenied(err, codes.PermissionDenied)
+}
