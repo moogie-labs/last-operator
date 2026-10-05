@@ -27,10 +27,11 @@ import (
 )
 
 const (
-	envNS     = "team-x"
-	envIntent = "web"
-	envKey    = envNS + "/" + envIntent
-	approver  = "alice@example.com"
+	envNS        = "team-x"
+	envIntent    = "web"
+	envKey       = envNS + "/" + envIntent
+	envIntentUID = "intent-uid"
+	approver     = "alice@example.com"
 
 	testConfigName = "default"
 	testProvider   = "cluster"
@@ -166,7 +167,7 @@ func intentWithPlan(t *testing.T, steps []lastv1alpha1.Command, resources ...las
 		t.Fatal(err)
 	}
 	return &lastv1alpha1.Intent{
-		ObjectMeta: metav1.ObjectMeta{Name: envIntent, Namespace: envNS, UID: "intent-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: envIntent, Namespace: envNS, UID: envIntentUID},
 		Spec:       lastv1alpha1.IntentSpec{Request: "run a web server"},
 		Status: lastv1alpha1.IntentStatus{Phase: lastv1alpha1.PhaseAwaitingApproval, Stage: lastv1alpha1.StageCreate,
 			Plan: &lastv1alpha1.Plan{Hash: h, Steps: steps, Resources: resources}},

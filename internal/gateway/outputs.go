@@ -16,6 +16,7 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -46,12 +47,28 @@ func ownedByIntent(mr *lastv1alpha1.ManagedResource, intent *lastv1alpha1.Intent
 	return false
 }
 
-func isOutputSecretOf(s *corev1.Secret, mr *lastv1alpha1.ManagedResource) bool {
-	if s.Labels[sandbox.LabelManagedBy] != sandbox.ManagedByValue {
+// labelIntentUID binds an output Secret to the Intent whose phase wrote it.
+const labelIntentUID = "last.moogie-labs.com/intent-uid"
+
+// isOutputSecretOf reports whether the gateway wrote s as mr's output Secret for
+// this Intent: the managed-by label, this Intent's UID label, and a controller
+// ownerReference to mr. Anything else is foreign and is never overwritten.
+func isOutputSecretOf(s *corev1.Secret, mr *lastv1alpha1.ManagedResource, intent *lastv1alpha1.Intent) bool {
+	if s.Labels[sandbox.LabelManagedBy] != sandbox.ManagedByValue || s.Labels[labelIntentUID] != string(intent.UID) {
 		return false
 	}
 	for _, o := range s.OwnerReferences {
-		if o.UID == mr.UID && o.Kind == "ManagedResource" {
+		if o.UID == mr.UID && o.Kind == "ManagedResource" && o.Controller != nil && *o.Controller {
+			return true
+		}
+	}
+	return false
+}
+
+// plannedOutputSecret reports whether the approved plan declares name as an output Secret.
+func plannedOutputSecret(b plan.Body, name string) bool {
+	for _, r := range b.Resources {
+		if r.OutputsSecretRef != nil && r.OutputsSecretRef.Name == name {
 			return true
 		}
 	}
@@ -105,6 +122,11 @@ func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOut
 		return nil, d.deny(codes.InvalidArgument, "managed resource %s has no outputsSecretRef", mr.Name)
 	}
 	secretName := mr.Spec.OutputsSecretRef.Name
+	// The operator can edit a ManagedResource, so its Secret name is trusted only
+	// when the approved plan declares it.
+	if !plannedOutputSecret(p.body, secretName) {
+		return nil, d.deny(codes.PermissionDenied, "secret %s is not an output secret of the approved plan", secretName)
+	}
 
 	data := make(map[string][]byte, len(req.GetValues()))
 	hashes := make(map[string]string, len(req.GetValues()))
@@ -128,7 +150,7 @@ func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOut
 		existing = nil
 	case err != nil:
 		return nil, status.Errorf(codes.Unavailable, "read secret: %v", err)
-	case !isOutputSecretOf(existing, &mr):
+	case !isOutputSecretOf(existing, &mr, &intent):
 		return nil, d.deny(codes.PermissionDenied, "secret %s/%s exists and is not %s's output secret", ns, secretName, mr.Name)
 	}
 	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeOutputWritten, Actor: actor, Intent: key, Stage: string(p.stage),
@@ -136,19 +158,27 @@ func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOut
 		Payload: outputWritten{ManagedResource: mr.Name, Secret: secretName, Values: hashes}}); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "record output.written: %v", err)
 	}
-	desired := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns,
-			Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: "ManagedResource",
-				Name: mr.Name, UID: mr.UID}}},
-		Type: corev1.SecretTypeOpaque,
-		Data: data,
+	// Data is replaced wholesale: keys absent from this write are removed. An
+	// existing Secret keeps its annotations and any other labels.
+	desired := &corev1.Secret{Type: corev1.SecretTypeOpaque}
+	if existing != nil {
+		desired = existing.DeepCopy()
 	}
+	desired.Name, desired.Namespace, desired.Data = secretName, ns, data
+	if desired.Labels == nil {
+		desired.Labels = map[string]string{}
+	}
+	desired.Labels[sandbox.LabelManagedBy] = sandbox.ManagedByValue
+	desired.Labels[labelIntentUID] = string(intent.UID)
+	desired.OwnerReferences = []metav1.OwnerReference{{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: "ManagedResource",
+		Name: mr.Name, UID: mr.UID, Controller: new(true)}}
 	if existing == nil {
 		_, err = secrets.Create(ctx, desired, metav1.CreateOptions{})
 	} else {
-		desired.ResourceVersion = existing.ResourceVersion
 		_, err = secrets.Update(ctx, desired, metav1.UpdateOptions{})
+	}
+	if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
+		return nil, status.Error(codes.Aborted, "output secret changed concurrently; retry")
 	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "write output secret: %v", err)
