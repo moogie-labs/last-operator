@@ -192,6 +192,7 @@ the authenticated caller.
 | `WriteOutputSecret` | Write provisioned outputs to a Secret in the Intent's namespace |
 | `BeginPhase` / `EndPhase` | Open/close a phase context (intent, stage, subject hash) that later calls are checked against |
 | `QueryAudit` | Read-only, filtered queries over the audit log (used for rule suggestions) |
+| `RunProbes` | Run the probes of the Intent's last executed plan (§10), from the gateway's own record |
 
 **Responsibilities:**
 
@@ -313,7 +314,9 @@ spec:
 
 - A **ValidatingAdmissionPolicy** requires `spec.approvedBy ==
   request.userInfo.username`, makes the object immutable, and denies
-  the operator's ServiceAccount.
+  the operator's ServiceAccount and every ServiceAccount in the
+  gateway namespace (Kubernetes Provider identities must never be able
+  to approve). The gateway re-checks both when it uses an approval.
 - Who may approve is decided by RBAC: `create` on `intentapprovals` in
   that namespace.
 - An approval is valid only for the matching `(intent, stage,
@@ -595,7 +598,8 @@ open phase and the last executed plan per Intent) in a gateway-owned
 ConfigMap in `last-gateway`, written only after the matching
 `phase.begin`/`phase.end`. The operator has no access to it, and a
 gateway restart closes an open phase as `interrupted` rather than
-resuming it.
+resuming it. The record is bounded (about 900 KiB), so the
+gateway refuses at `BeginPhase` a plan too large to record once executed.
 
 - **Auto-mode remediation** is limited to re-running commands from that
   plan. If the remediation plan contains any other command, it needs
@@ -978,6 +982,13 @@ operator never sees them, and sandboxes receive only the Providers
 named in the command, for the lifetime of that pod. Scoping
 credentials to namespaces or requesters is out of scope for v1 (§21).
 
+Kubernetes Provider tokens are bound to a per-run anchor Secret in the
+gateway namespace, so cleanup (or the reaper) revokes them at once. A
+Provider may never name the gateway's own ServiceAccount, the audit
+signing key or writer credentials, or another run's objects; the
+gateway refuses such a Provider, and an admission policy forbids the
+gateway from minting a token for its own ServiceAccount.
+
 ## 14. Audit log (write-once, read-many)
 
 ### 14.1 Guarantees
@@ -1043,6 +1054,12 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 `approval.observed`, `rule.observed` (a rule created, changed, or
 deleted, seen via watch), `suggestion.decided`, `policy.denied`,
 `output.written` (records a WriteOutputSecret with each value as its SHA-256).
+
+`phase.end` records an outcome: `succeeded` (every step ran and exited 0),
+`failed` (the operator ended a phase whose step failed or was refused),
+`interrupted` (a gateway restart or leadership change closed an open
+phase; its plan never reopens), or `aborted` (the gateway could not record
+the phase it just began).
 
 **Redaction:** credential values are never logged. Values written to
 output Secrets are logged as SHA-256 hashes. LLM payloads are logged in
