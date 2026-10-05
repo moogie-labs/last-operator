@@ -131,6 +131,962 @@ func (x *PingResponse) GetAuditReady() bool {
 	return false
 }
 
+// IntentRef names an Intent.
+type IntentRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IntentRef) Reset() {
+	*x = IntentRef{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IntentRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IntentRef) ProtoMessage() {}
+
+func (x *IntentRef) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IntentRef.ProtoReflect.Descriptor instead.
+func (*IntentRef) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *IntentRef) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *IntentRef) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// BeginPhaseRequest names the approval subject to open a phase for.
+type BeginPhaseRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Intent *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	// Stage, e.g. "Create".
+	Stage string `protobuf:"bytes,2,opt,name=stage,proto3" json:"stage,omitempty"`
+	// The plan hash ("sha256:<hex>").
+	SubjectHash   string `protobuf:"bytes,3,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPhaseRequest) Reset() {
+	*x = BeginPhaseRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPhaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPhaseRequest) ProtoMessage() {}
+
+func (x *BeginPhaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPhaseRequest.ProtoReflect.Descriptor instead.
+func (*BeginPhaseRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BeginPhaseRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *BeginPhaseRequest) GetStage() string {
+	if x != nil {
+		return x.Stage
+	}
+	return ""
+}
+
+func (x *BeginPhaseRequest) GetSubjectHash() string {
+	if x != nil {
+		return x.SubjectHash
+	}
+	return ""
+}
+
+// BeginPhaseResponse identifies the opened phase.
+type BeginPhaseResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Sequence number of the phase.begin audit entry.
+	BeginSeq uint64 `protobuf:"varint,1,opt,name=begin_seq,json=beginSeq,proto3" json:"begin_seq,omitempty"`
+	// Number of plan steps the phase must run.
+	Steps         int32 `protobuf:"varint,2,opt,name=steps,proto3" json:"steps,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPhaseResponse) Reset() {
+	*x = BeginPhaseResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPhaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPhaseResponse) ProtoMessage() {}
+
+func (x *BeginPhaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPhaseResponse.ProtoReflect.Descriptor instead.
+func (*BeginPhaseResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BeginPhaseResponse) GetBeginSeq() uint64 {
+	if x != nil {
+		return x.BeginSeq
+	}
+	return 0
+}
+
+func (x *BeginPhaseResponse) GetSteps() int32 {
+	if x != nil {
+		return x.Steps
+	}
+	return 0
+}
+
+// EndPhaseRequest closes the open phase.
+type EndPhaseRequest struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Intent      *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	SubjectHash string                 `protobuf:"bytes,2,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
+	// True only when every step ran and exited 0.
+	Succeeded bool `protobuf:"varint,3,opt,name=succeeded,proto3" json:"succeeded,omitempty"`
+	// Why the phase failed, shown in the audit log.
+	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EndPhaseRequest) Reset() {
+	*x = EndPhaseRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EndPhaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EndPhaseRequest) ProtoMessage() {}
+
+func (x *EndPhaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EndPhaseRequest.ProtoReflect.Descriptor instead.
+func (*EndPhaseRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *EndPhaseRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *EndPhaseRequest) GetSubjectHash() string {
+	if x != nil {
+		return x.SubjectHash
+	}
+	return ""
+}
+
+func (x *EndPhaseRequest) GetSucceeded() bool {
+	if x != nil {
+		return x.Succeeded
+	}
+	return false
+}
+
+func (x *EndPhaseRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// EndPhaseResponse reports the phase.end entry.
+type EndPhaseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EndSeq        uint64                 `protobuf:"varint,1,opt,name=end_seq,json=endSeq,proto3" json:"end_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EndPhaseResponse) Reset() {
+	*x = EndPhaseResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EndPhaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EndPhaseResponse) ProtoMessage() {}
+
+func (x *EndPhaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EndPhaseResponse.ProtoReflect.Descriptor instead.
+func (*EndPhaseResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *EndPhaseResponse) GetEndSeq() uint64 {
+	if x != nil {
+		return x.EndSeq
+	}
+	return 0
+}
+
+// RunCommandRequest is the operator's copy of the next step, with ${steps…} resolved.
+type RunCommandRequest struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Intent      *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	SubjectHash string                 `protobuf:"bytes,2,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
+	StepId      string                 `protobuf:"bytes,3,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// JSON of the resolved lastv1alpha1.Command; it must equal the gateway's own resolution.
+	CommandJson   []byte `protobuf:"bytes,4,opt,name=command_json,json=commandJson,proto3" json:"command_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCommandRequest) Reset() {
+	*x = RunCommandRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCommandRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCommandRequest) ProtoMessage() {}
+
+func (x *RunCommandRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCommandRequest.ProtoReflect.Descriptor instead.
+func (*RunCommandRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RunCommandRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *RunCommandRequest) GetSubjectHash() string {
+	if x != nil {
+		return x.SubjectHash
+	}
+	return ""
+}
+
+func (x *RunCommandRequest) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *RunCommandRequest) GetCommandJson() []byte {
+	if x != nil {
+		return x.CommandJson
+	}
+	return nil
+}
+
+// CommandResult is one sandboxed command's outcome.
+type CommandResult struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RunId           string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ExitCode        int32                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Stdout          string                 `protobuf:"bytes,3,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	Stderr          string                 `protobuf:"bytes,4,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	StdoutTruncated bool                   `protobuf:"varint,5,opt,name=stdout_truncated,json=stdoutTruncated,proto3" json:"stdout_truncated,omitempty"`
+	StderrTruncated bool                   `protobuf:"varint,6,opt,name=stderr_truncated,json=stderrTruncated,proto3" json:"stderr_truncated,omitempty"`
+	// Set when the command could not run or did not finish.
+	Error         string `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommandResult) Reset() {
+	*x = CommandResult{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandResult) ProtoMessage() {}
+
+func (x *CommandResult) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
+func (*CommandResult) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CommandResult) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *CommandResult) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *CommandResult) GetStdout() string {
+	if x != nil {
+		return x.Stdout
+	}
+	return ""
+}
+
+func (x *CommandResult) GetStderr() string {
+	if x != nil {
+		return x.Stderr
+	}
+	return ""
+}
+
+func (x *CommandResult) GetStdoutTruncated() bool {
+	if x != nil {
+		return x.StdoutTruncated
+	}
+	return false
+}
+
+func (x *CommandResult) GetStderrTruncated() bool {
+	if x != nil {
+		return x.StderrTruncated
+	}
+	return false
+}
+
+func (x *CommandResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// RunCommandResponse carries the step's result.
+type RunCommandResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Result        *CommandResult         `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCommandResponse) Reset() {
+	*x = RunCommandResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCommandResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCommandResponse) ProtoMessage() {}
+
+func (x *RunCommandResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCommandResponse.ProtoReflect.Descriptor instead.
+func (*RunCommandResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *RunCommandResponse) GetResult() *CommandResult {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+// RunProbesRequest names the Intent whose probes to run.
+type RunProbesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Intent        *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunProbesRequest) Reset() {
+	*x = RunProbesRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunProbesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunProbesRequest) ProtoMessage() {}
+
+func (x *RunProbesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunProbesRequest.ProtoReflect.Descriptor instead.
+func (*RunProbesRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RunProbesRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+// ProbeOutcome is one probe's result and assertion outcome.
+type ProbeOutcome struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Passed        bool                   `protobuf:"varint,2,opt,name=passed,proto3" json:"passed,omitempty"`
+	Result        *CommandResult         `protobuf:"bytes,3,opt,name=result,proto3" json:"result,omitempty"`
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeOutcome) Reset() {
+	*x = ProbeOutcome{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeOutcome) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeOutcome) ProtoMessage() {}
+
+func (x *ProbeOutcome) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeOutcome.ProtoReflect.Descriptor instead.
+func (*ProbeOutcome) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ProbeOutcome) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ProbeOutcome) GetPassed() bool {
+	if x != nil {
+		return x.Passed
+	}
+	return false
+}
+
+func (x *ProbeOutcome) GetResult() *CommandResult {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *ProbeOutcome) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// RunProbesResponse lists outcomes in plan order.
+type RunProbesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Hash of the executed plan the probes came from.
+	PlanHash      string          `protobuf:"bytes,1,opt,name=plan_hash,json=planHash,proto3" json:"plan_hash,omitempty"`
+	Outcomes      []*ProbeOutcome `protobuf:"bytes,2,rep,name=outcomes,proto3" json:"outcomes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunProbesResponse) Reset() {
+	*x = RunProbesResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunProbesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunProbesResponse) ProtoMessage() {}
+
+func (x *RunProbesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunProbesResponse.ProtoReflect.Descriptor instead.
+func (*RunProbesResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RunProbesResponse) GetPlanHash() string {
+	if x != nil {
+		return x.PlanHash
+	}
+	return ""
+}
+
+func (x *RunProbesResponse) GetOutcomes() []*ProbeOutcome {
+	if x != nil {
+		return x.Outcomes
+	}
+	return nil
+}
+
+// WriteOutputSecretRequest writes step outputs into a ManagedResource's output Secret.
+type WriteOutputSecretRequest struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Intent      *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	SubjectHash string                 `protobuf:"bytes,2,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
+	// Name of the ManagedResource (same namespace as the Intent).
+	ManagedResource string `protobuf:"bytes,3,opt,name=managed_resource,json=managedResource,proto3" json:"managed_resource,omitempty"`
+	// Secret key -> step reference such as "${steps.s1.json.password}".
+	Values        map[string]string `protobuf:"bytes,4,rep,name=values,proto3" json:"values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteOutputSecretRequest) Reset() {
+	*x = WriteOutputSecretRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteOutputSecretRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteOutputSecretRequest) ProtoMessage() {}
+
+func (x *WriteOutputSecretRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteOutputSecretRequest.ProtoReflect.Descriptor instead.
+func (*WriteOutputSecretRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *WriteOutputSecretRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *WriteOutputSecretRequest) GetSubjectHash() string {
+	if x != nil {
+		return x.SubjectHash
+	}
+	return ""
+}
+
+func (x *WriteOutputSecretRequest) GetManagedResource() string {
+	if x != nil {
+		return x.ManagedResource
+	}
+	return ""
+}
+
+func (x *WriteOutputSecretRequest) GetValues() map[string]string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+// WriteOutputSecretResponse names the Secret written.
+type WriteOutputSecretResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SecretName    string                 `protobuf:"bytes,1,opt,name=secret_name,json=secretName,proto3" json:"secret_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteOutputSecretResponse) Reset() {
+	*x = WriteOutputSecretResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteOutputSecretResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteOutputSecretResponse) ProtoMessage() {}
+
+func (x *WriteOutputSecretResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteOutputSecretResponse.ProtoReflect.Descriptor instead.
+func (*WriteOutputSecretResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *WriteOutputSecretResponse) GetSecretName() string {
+	if x != nil {
+		return x.SecretName
+	}
+	return ""
+}
+
+// Message is one turn of an LLM conversation.
+type Message struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "system", "user", or "assistant".
+	Role          string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Message) Reset() {
+	*x = Message{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Message) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Message) ProtoMessage() {}
+
+func (x *Message) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Message.ProtoReflect.Descriptor instead.
+func (*Message) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *Message) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *Message) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+// CallLLMRequest is a provider-neutral LLM request.
+type CallLLMRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Intent        *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	Messages      []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	MaxTokens     int32                  `protobuf:"varint,3,opt,name=max_tokens,json=maxTokens,proto3" json:"max_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CallLLMRequest) Reset() {
+	*x = CallLLMRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CallLLMRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CallLLMRequest) ProtoMessage() {}
+
+func (x *CallLLMRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CallLLMRequest.ProtoReflect.Descriptor instead.
+func (*CallLLMRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *CallLLMRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *CallLLMRequest) GetMessages() []*Message {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
+}
+
+func (x *CallLLMRequest) GetMaxTokens() int32 {
+	if x != nil {
+		return x.MaxTokens
+	}
+	return 0
+}
+
+// CallLLMResponse is the model's reply.
+type CallLLMResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	InputTokens   int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens  int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CallLLMResponse) Reset() {
+	*x = CallLLMResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CallLLMResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CallLLMResponse) ProtoMessage() {}
+
+func (x *CallLLMResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CallLLMResponse.ProtoReflect.Descriptor instead.
+func (*CallLLMResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CallLLMResponse) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *CallLLMResponse) GetInputTokens() int32 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *CallLLMResponse) GetOutputTokens() int32 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
 var File_last_gateway_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_last_gateway_v1_gateway_proto_rawDesc = "" +
@@ -142,9 +1098,82 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x19\n" +
 	"\bchain_id\x18\x03 \x01(\tR\achainId\x12\x1f\n" +
 	"\vaudit_ready\x18\x04 \x01(\bR\n" +
-	"auditReady2U\n" +
+	"auditReady\"=\n" +
+	"\tIntentRef\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"\x80\x01\n" +
+	"\x11BeginPhaseRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12\x14\n" +
+	"\x05stage\x18\x02 \x01(\tR\x05stage\x12!\n" +
+	"\fsubject_hash\x18\x03 \x01(\tR\vsubjectHash\"G\n" +
+	"\x12BeginPhaseResponse\x12\x1b\n" +
+	"\tbegin_seq\x18\x01 \x01(\x04R\bbeginSeq\x12\x14\n" +
+	"\x05steps\x18\x02 \x01(\x05R\x05steps\"\x9e\x01\n" +
+	"\x0fEndPhaseRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12!\n" +
+	"\fsubject_hash\x18\x02 \x01(\tR\vsubjectHash\x12\x1c\n" +
+	"\tsucceeded\x18\x03 \x01(\bR\tsucceeded\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"+\n" +
+	"\x10EndPhaseResponse\x12\x17\n" +
+	"\aend_seq\x18\x01 \x01(\x04R\x06endSeq\"\xa6\x01\n" +
+	"\x11RunCommandRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12!\n" +
+	"\fsubject_hash\x18\x02 \x01(\tR\vsubjectHash\x12\x17\n" +
+	"\astep_id\x18\x03 \x01(\tR\x06stepId\x12!\n" +
+	"\fcommand_json\x18\x04 \x01(\fR\vcommandJson\"\xdf\x01\n" +
+	"\rCommandResult\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
+	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\x06stdout\x18\x03 \x01(\tR\x06stdout\x12\x16\n" +
+	"\x06stderr\x18\x04 \x01(\tR\x06stderr\x12)\n" +
+	"\x10stdout_truncated\x18\x05 \x01(\bR\x0fstdoutTruncated\x12)\n" +
+	"\x10stderr_truncated\x18\x06 \x01(\bR\x0fstderrTruncated\x12\x14\n" +
+	"\x05error\x18\a \x01(\tR\x05error\"L\n" +
+	"\x12RunCommandResponse\x126\n" +
+	"\x06result\x18\x01 \x01(\v2\x1e.last.gateway.v1.CommandResultR\x06result\"F\n" +
+	"\x10RunProbesRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\"\x84\x01\n" +
+	"\fProbeOutcome\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06passed\x18\x02 \x01(\bR\x06passed\x126\n" +
+	"\x06result\x18\x03 \x01(\v2\x1e.last.gateway.v1.CommandResultR\x06result\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"k\n" +
+	"\x11RunProbesResponse\x12\x1b\n" +
+	"\tplan_hash\x18\x01 \x01(\tR\bplanHash\x129\n" +
+	"\boutcomes\x18\x02 \x03(\v2\x1d.last.gateway.v1.ProbeOutcomeR\boutcomes\"\xa6\x02\n" +
+	"\x18WriteOutputSecretRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12!\n" +
+	"\fsubject_hash\x18\x02 \x01(\tR\vsubjectHash\x12)\n" +
+	"\x10managed_resource\x18\x03 \x01(\tR\x0fmanagedResource\x12M\n" +
+	"\x06values\x18\x04 \x03(\v25.last.gateway.v1.WriteOutputSecretRequest.ValuesEntryR\x06values\x1a9\n" +
+	"\vValuesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"<\n" +
+	"\x19WriteOutputSecretResponse\x12\x1f\n" +
+	"\vsecret_name\x18\x01 \x01(\tR\n" +
+	"secretName\"7\n" +
+	"\aMessage\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\"\x99\x01\n" +
+	"\x0eCallLLMRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x124\n" +
+	"\bmessages\x18\x02 \x03(\v2\x18.last.gateway.v1.MessageR\bmessages\x12\x1d\n" +
+	"\n" +
+	"max_tokens\x18\x03 \x01(\x05R\tmaxTokens\"s\n" +
+	"\x0fCallLLMResponse\x12\x18\n" +
+	"\acontent\x18\x01 \x01(\tR\acontent\x12!\n" +
+	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens2\xe2\x04\n" +
 	"\x0eGatewayService\x12C\n" +
-	"\x04Ping\x12\x1c.last.gateway.v1.PingRequest\x1a\x1d.last.gateway.v1.PingResponseBNZLgithub.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1b\x06proto3"
+	"\x04Ping\x12\x1c.last.gateway.v1.PingRequest\x1a\x1d.last.gateway.v1.PingResponse\x12U\n" +
+	"\n" +
+	"BeginPhase\x12\".last.gateway.v1.BeginPhaseRequest\x1a#.last.gateway.v1.BeginPhaseResponse\x12O\n" +
+	"\bEndPhase\x12 .last.gateway.v1.EndPhaseRequest\x1a!.last.gateway.v1.EndPhaseResponse\x12U\n" +
+	"\n" +
+	"RunCommand\x12\".last.gateway.v1.RunCommandRequest\x1a#.last.gateway.v1.RunCommandResponse\x12R\n" +
+	"\tRunProbes\x12!.last.gateway.v1.RunProbesRequest\x1a\".last.gateway.v1.RunProbesResponse\x12j\n" +
+	"\x11WriteOutputSecret\x12).last.gateway.v1.WriteOutputSecretRequest\x1a*.last.gateway.v1.WriteOutputSecretResponse\x12L\n" +
+	"\aCallLLM\x12\x1f.last.gateway.v1.CallLLMRequest\x1a .last.gateway.v1.CallLLMResponseBNZLgithub.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1b\x06proto3"
 
 var (
 	file_last_gateway_v1_gateway_proto_rawDescOnce sync.Once
@@ -158,19 +1187,59 @@ func file_last_gateway_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_last_gateway_v1_gateway_proto_rawDescData
 }
 
-var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_last_gateway_v1_gateway_proto_goTypes = []any{
-	(*PingRequest)(nil),  // 0: last.gateway.v1.PingRequest
-	(*PingResponse)(nil), // 1: last.gateway.v1.PingResponse
+	(*PingRequest)(nil),               // 0: last.gateway.v1.PingRequest
+	(*PingResponse)(nil),              // 1: last.gateway.v1.PingResponse
+	(*IntentRef)(nil),                 // 2: last.gateway.v1.IntentRef
+	(*BeginPhaseRequest)(nil),         // 3: last.gateway.v1.BeginPhaseRequest
+	(*BeginPhaseResponse)(nil),        // 4: last.gateway.v1.BeginPhaseResponse
+	(*EndPhaseRequest)(nil),           // 5: last.gateway.v1.EndPhaseRequest
+	(*EndPhaseResponse)(nil),          // 6: last.gateway.v1.EndPhaseResponse
+	(*RunCommandRequest)(nil),         // 7: last.gateway.v1.RunCommandRequest
+	(*CommandResult)(nil),             // 8: last.gateway.v1.CommandResult
+	(*RunCommandResponse)(nil),        // 9: last.gateway.v1.RunCommandResponse
+	(*RunProbesRequest)(nil),          // 10: last.gateway.v1.RunProbesRequest
+	(*ProbeOutcome)(nil),              // 11: last.gateway.v1.ProbeOutcome
+	(*RunProbesResponse)(nil),         // 12: last.gateway.v1.RunProbesResponse
+	(*WriteOutputSecretRequest)(nil),  // 13: last.gateway.v1.WriteOutputSecretRequest
+	(*WriteOutputSecretResponse)(nil), // 14: last.gateway.v1.WriteOutputSecretResponse
+	(*Message)(nil),                   // 15: last.gateway.v1.Message
+	(*CallLLMRequest)(nil),            // 16: last.gateway.v1.CallLLMRequest
+	(*CallLLMResponse)(nil),           // 17: last.gateway.v1.CallLLMResponse
+	nil,                               // 18: last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
 }
 var file_last_gateway_v1_gateway_proto_depIdxs = []int32{
-	0, // 0: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
-	1, // 1: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	2,  // 0: last.gateway.v1.BeginPhaseRequest.intent:type_name -> last.gateway.v1.IntentRef
+	2,  // 1: last.gateway.v1.EndPhaseRequest.intent:type_name -> last.gateway.v1.IntentRef
+	2,  // 2: last.gateway.v1.RunCommandRequest.intent:type_name -> last.gateway.v1.IntentRef
+	8,  // 3: last.gateway.v1.RunCommandResponse.result:type_name -> last.gateway.v1.CommandResult
+	2,  // 4: last.gateway.v1.RunProbesRequest.intent:type_name -> last.gateway.v1.IntentRef
+	8,  // 5: last.gateway.v1.ProbeOutcome.result:type_name -> last.gateway.v1.CommandResult
+	11, // 6: last.gateway.v1.RunProbesResponse.outcomes:type_name -> last.gateway.v1.ProbeOutcome
+	2,  // 7: last.gateway.v1.WriteOutputSecretRequest.intent:type_name -> last.gateway.v1.IntentRef
+	18, // 8: last.gateway.v1.WriteOutputSecretRequest.values:type_name -> last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
+	2,  // 9: last.gateway.v1.CallLLMRequest.intent:type_name -> last.gateway.v1.IntentRef
+	15, // 10: last.gateway.v1.CallLLMRequest.messages:type_name -> last.gateway.v1.Message
+	0,  // 11: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
+	3,  // 12: last.gateway.v1.GatewayService.BeginPhase:input_type -> last.gateway.v1.BeginPhaseRequest
+	5,  // 13: last.gateway.v1.GatewayService.EndPhase:input_type -> last.gateway.v1.EndPhaseRequest
+	7,  // 14: last.gateway.v1.GatewayService.RunCommand:input_type -> last.gateway.v1.RunCommandRequest
+	10, // 15: last.gateway.v1.GatewayService.RunProbes:input_type -> last.gateway.v1.RunProbesRequest
+	13, // 16: last.gateway.v1.GatewayService.WriteOutputSecret:input_type -> last.gateway.v1.WriteOutputSecretRequest
+	16, // 17: last.gateway.v1.GatewayService.CallLLM:input_type -> last.gateway.v1.CallLLMRequest
+	1,  // 18: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
+	4,  // 19: last.gateway.v1.GatewayService.BeginPhase:output_type -> last.gateway.v1.BeginPhaseResponse
+	6,  // 20: last.gateway.v1.GatewayService.EndPhase:output_type -> last.gateway.v1.EndPhaseResponse
+	9,  // 21: last.gateway.v1.GatewayService.RunCommand:output_type -> last.gateway.v1.RunCommandResponse
+	12, // 22: last.gateway.v1.GatewayService.RunProbes:output_type -> last.gateway.v1.RunProbesResponse
+	14, // 23: last.gateway.v1.GatewayService.WriteOutputSecret:output_type -> last.gateway.v1.WriteOutputSecretResponse
+	17, // 24: last.gateway.v1.GatewayService.CallLLM:output_type -> last.gateway.v1.CallLLMResponse
+	18, // [18:25] is the sub-list for method output_type
+	11, // [11:18] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_last_gateway_v1_gateway_proto_init() }
@@ -184,7 +1253,7 @@ func file_last_gateway_v1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_last_gateway_v1_gateway_proto_rawDesc), len(file_last_gateway_v1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

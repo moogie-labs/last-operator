@@ -5,10 +5,22 @@ package last.gateway.v1;
 option go_package = "github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1";
 
 // GatewayService is the trusted gateway's API. Only the operator's ServiceAccount
-// may call it (spec §4.2). Command-running methods arrive with enforcement in M2b.
+// may call it (spec §4.2). Every side effect is audited before it happens.
 service GatewayService {
   // Ping reports the authenticated caller and whether the audit log is writable.
   rpc Ping(PingRequest) returns (PingResponse);
+  // BeginPhase opens an approved phase for the Intent's current plan (spec §8.3).
+  rpc BeginPhase(BeginPhaseRequest) returns (BeginPhaseResponse);
+  // EndPhase closes the open phase and records its outcome.
+  rpc EndPhase(EndPhaseRequest) returns (EndPhaseResponse);
+  // RunCommand runs the next approved step of the open phase in a sandbox.
+  rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
+  // RunProbes runs the probes of the Intent's last executed plan (spec §10).
+  rpc RunProbes(RunProbesRequest) returns (RunProbesResponse);
+  // WriteOutputSecret writes step outputs to a ManagedResource's output Secret (spec §15).
+  rpc WriteOutputSecret(WriteOutputSecretRequest) returns (WriteOutputSecretResponse);
+  // CallLLM sends a conversation to the configured LLM provider (spec §12).
+  rpc CallLLM(CallLLMRequest) returns (CallLLMResponse);
 }
 
 // PingRequest has no fields.
@@ -24,4 +36,124 @@ message PingResponse {
   string chain_id = 3;
   // Whether this gateway currently holds a healthy audit writer.
   bool audit_ready = 4;
+}
+
+// IntentRef names an Intent.
+message IntentRef {
+  string namespace = 1;
+  string name = 2;
+}
+
+// BeginPhaseRequest names the approval subject to open a phase for.
+message BeginPhaseRequest {
+  IntentRef intent = 1;
+  // Stage, e.g. "Create".
+  string stage = 2;
+  // The plan hash ("sha256:<hex>").
+  string subject_hash = 3;
+}
+
+// BeginPhaseResponse identifies the opened phase.
+message BeginPhaseResponse {
+  // Sequence number of the phase.begin audit entry.
+  uint64 begin_seq = 1;
+  // Number of plan steps the phase must run.
+  int32 steps = 2;
+}
+
+// EndPhaseRequest closes the open phase.
+message EndPhaseRequest {
+  IntentRef intent = 1;
+  string subject_hash = 2;
+  // True only when every step ran and exited 0.
+  bool succeeded = 3;
+  // Why the phase failed, shown in the audit log.
+  string reason = 4;
+}
+
+// EndPhaseResponse reports the phase.end entry.
+message EndPhaseResponse {
+  uint64 end_seq = 1;
+}
+
+// RunCommandRequest is the operator's copy of the next step, with ${steps…} resolved.
+message RunCommandRequest {
+  IntentRef intent = 1;
+  string subject_hash = 2;
+  string step_id = 3;
+  // JSON of the resolved lastv1alpha1.Command; it must equal the gateway's own resolution.
+  bytes command_json = 4;
+}
+
+// CommandResult is one sandboxed command's outcome.
+message CommandResult {
+  string run_id = 1;
+  int32 exit_code = 2;
+  string stdout = 3;
+  string stderr = 4;
+  bool stdout_truncated = 5;
+  bool stderr_truncated = 6;
+  // Set when the command could not run or did not finish.
+  string error = 7;
+}
+
+// RunCommandResponse carries the step's result.
+message RunCommandResponse {
+  CommandResult result = 1;
+}
+
+// RunProbesRequest names the Intent whose probes to run.
+message RunProbesRequest {
+  IntentRef intent = 1;
+}
+
+// ProbeOutcome is one probe's result and assertion outcome.
+message ProbeOutcome {
+  string id = 1;
+  bool passed = 2;
+  CommandResult result = 3;
+  string error = 4;
+}
+
+// RunProbesResponse lists outcomes in plan order.
+message RunProbesResponse {
+  // Hash of the executed plan the probes came from.
+  string plan_hash = 1;
+  repeated ProbeOutcome outcomes = 2;
+}
+
+// WriteOutputSecretRequest writes step outputs into a ManagedResource's output Secret.
+message WriteOutputSecretRequest {
+  IntentRef intent = 1;
+  string subject_hash = 2;
+  // Name of the ManagedResource (same namespace as the Intent).
+  string managed_resource = 3;
+  // Secret key -> step reference such as "${steps.s1.json.password}".
+  map<string, string> values = 4;
+}
+
+// WriteOutputSecretResponse names the Secret written.
+message WriteOutputSecretResponse {
+  string secret_name = 1;
+}
+
+// Message is one turn of an LLM conversation.
+message Message {
+  // "system", "user", or "assistant".
+  string role = 1;
+  string content = 2;
+}
+
+// CallLLMRequest is a provider-neutral LLM request.
+message CallLLMRequest {
+  IntentRef intent = 1;
+  repeated Message messages = 2;
+  int32 max_tokens = 3;
+}
+
+// CallLLMResponse is the model's reply.
+message CallLLMResponse {
+  string content = 1;
+  int32 input_tokens = 2;
+  int32 output_tokens = 3;
 }

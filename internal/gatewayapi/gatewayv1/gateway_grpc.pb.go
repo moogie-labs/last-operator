@@ -19,7 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GatewayService_Ping_FullMethodName = "/last.gateway.v1.GatewayService/Ping"
+	GatewayService_Ping_FullMethodName              = "/last.gateway.v1.GatewayService/Ping"
+	GatewayService_BeginPhase_FullMethodName        = "/last.gateway.v1.GatewayService/BeginPhase"
+	GatewayService_EndPhase_FullMethodName          = "/last.gateway.v1.GatewayService/EndPhase"
+	GatewayService_RunCommand_FullMethodName        = "/last.gateway.v1.GatewayService/RunCommand"
+	GatewayService_RunProbes_FullMethodName         = "/last.gateway.v1.GatewayService/RunProbes"
+	GatewayService_WriteOutputSecret_FullMethodName = "/last.gateway.v1.GatewayService/WriteOutputSecret"
+	GatewayService_CallLLM_FullMethodName           = "/last.gateway.v1.GatewayService/CallLLM"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -27,10 +33,22 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // GatewayService is the trusted gateway's API. Only the operator's ServiceAccount
-// may call it (spec §4.2). Command-running methods arrive with enforcement in M2b.
+// may call it (spec §4.2). Every side effect is audited before it happens.
 type GatewayServiceClient interface {
 	// Ping reports the authenticated caller and whether the audit log is writable.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// BeginPhase opens an approved phase for the Intent's current plan (spec §8.3).
+	BeginPhase(ctx context.Context, in *BeginPhaseRequest, opts ...grpc.CallOption) (*BeginPhaseResponse, error)
+	// EndPhase closes the open phase and records its outcome.
+	EndPhase(ctx context.Context, in *EndPhaseRequest, opts ...grpc.CallOption) (*EndPhaseResponse, error)
+	// RunCommand runs the next approved step of the open phase in a sandbox.
+	RunCommand(ctx context.Context, in *RunCommandRequest, opts ...grpc.CallOption) (*RunCommandResponse, error)
+	// RunProbes runs the probes of the Intent's last executed plan (spec §10).
+	RunProbes(ctx context.Context, in *RunProbesRequest, opts ...grpc.CallOption) (*RunProbesResponse, error)
+	// WriteOutputSecret writes step outputs to a ManagedResource's output Secret (spec §15).
+	WriteOutputSecret(ctx context.Context, in *WriteOutputSecretRequest, opts ...grpc.CallOption) (*WriteOutputSecretResponse, error)
+	// CallLLM sends a conversation to the configured LLM provider (spec §12).
+	CallLLM(ctx context.Context, in *CallLLMRequest, opts ...grpc.CallOption) (*CallLLMResponse, error)
 }
 
 type gatewayServiceClient struct {
@@ -51,15 +69,87 @@ func (c *gatewayServiceClient) Ping(ctx context.Context, in *PingRequest, opts .
 	return out, nil
 }
 
+func (c *gatewayServiceClient) BeginPhase(ctx context.Context, in *BeginPhaseRequest, opts ...grpc.CallOption) (*BeginPhaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginPhaseResponse)
+	err := c.cc.Invoke(ctx, GatewayService_BeginPhase_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) EndPhase(ctx context.Context, in *EndPhaseRequest, opts ...grpc.CallOption) (*EndPhaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EndPhaseResponse)
+	err := c.cc.Invoke(ctx, GatewayService_EndPhase_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) RunCommand(ctx context.Context, in *RunCommandRequest, opts ...grpc.CallOption) (*RunCommandResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunCommandResponse)
+	err := c.cc.Invoke(ctx, GatewayService_RunCommand_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) RunProbes(ctx context.Context, in *RunProbesRequest, opts ...grpc.CallOption) (*RunProbesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunProbesResponse)
+	err := c.cc.Invoke(ctx, GatewayService_RunProbes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) WriteOutputSecret(ctx context.Context, in *WriteOutputSecretRequest, opts ...grpc.CallOption) (*WriteOutputSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriteOutputSecretResponse)
+	err := c.cc.Invoke(ctx, GatewayService_WriteOutputSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) CallLLM(ctx context.Context, in *CallLLMRequest, opts ...grpc.CallOption) (*CallLLMResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CallLLMResponse)
+	err := c.cc.Invoke(ctx, GatewayService_CallLLM_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayServiceServer is the server API for GatewayService service.
 // All implementations must embed UnimplementedGatewayServiceServer
 // for forward compatibility.
 //
 // GatewayService is the trusted gateway's API. Only the operator's ServiceAccount
-// may call it (spec §4.2). Command-running methods arrive with enforcement in M2b.
+// may call it (spec §4.2). Every side effect is audited before it happens.
 type GatewayServiceServer interface {
 	// Ping reports the authenticated caller and whether the audit log is writable.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// BeginPhase opens an approved phase for the Intent's current plan (spec §8.3).
+	BeginPhase(context.Context, *BeginPhaseRequest) (*BeginPhaseResponse, error)
+	// EndPhase closes the open phase and records its outcome.
+	EndPhase(context.Context, *EndPhaseRequest) (*EndPhaseResponse, error)
+	// RunCommand runs the next approved step of the open phase in a sandbox.
+	RunCommand(context.Context, *RunCommandRequest) (*RunCommandResponse, error)
+	// RunProbes runs the probes of the Intent's last executed plan (spec §10).
+	RunProbes(context.Context, *RunProbesRequest) (*RunProbesResponse, error)
+	// WriteOutputSecret writes step outputs to a ManagedResource's output Secret (spec §15).
+	WriteOutputSecret(context.Context, *WriteOutputSecretRequest) (*WriteOutputSecretResponse, error)
+	// CallLLM sends a conversation to the configured LLM provider (spec §12).
+	CallLLM(context.Context, *CallLLMRequest) (*CallLLMResponse, error)
 	mustEmbedUnimplementedGatewayServiceServer()
 }
 
@@ -72,6 +162,24 @@ type UnimplementedGatewayServiceServer struct{}
 
 func (UnimplementedGatewayServiceServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedGatewayServiceServer) BeginPhase(context.Context, *BeginPhaseRequest) (*BeginPhaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginPhase not implemented")
+}
+func (UnimplementedGatewayServiceServer) EndPhase(context.Context, *EndPhaseRequest) (*EndPhaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method EndPhase not implemented")
+}
+func (UnimplementedGatewayServiceServer) RunCommand(context.Context, *RunCommandRequest) (*RunCommandResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunCommand not implemented")
+}
+func (UnimplementedGatewayServiceServer) RunProbes(context.Context, *RunProbesRequest) (*RunProbesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunProbes not implemented")
+}
+func (UnimplementedGatewayServiceServer) WriteOutputSecret(context.Context, *WriteOutputSecretRequest) (*WriteOutputSecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WriteOutputSecret not implemented")
+}
+func (UnimplementedGatewayServiceServer) CallLLM(context.Context, *CallLLMRequest) (*CallLLMResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CallLLM not implemented")
 }
 func (UnimplementedGatewayServiceServer) mustEmbedUnimplementedGatewayServiceServer() {}
 func (UnimplementedGatewayServiceServer) testEmbeddedByValue()                        {}
@@ -112,6 +220,114 @@ func _GatewayService_Ping_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_BeginPhase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginPhaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).BeginPhase(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_BeginPhase_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).BeginPhase(ctx, req.(*BeginPhaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_EndPhase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EndPhaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).EndPhase(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_EndPhase_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).EndPhase(ctx, req.(*EndPhaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_RunCommand_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunCommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).RunCommand(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_RunCommand_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).RunCommand(ctx, req.(*RunCommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_RunProbes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunProbesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).RunProbes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_RunProbes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).RunProbes(ctx, req.(*RunProbesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_WriteOutputSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteOutputSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).WriteOutputSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_WriteOutputSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).WriteOutputSecret(ctx, req.(*WriteOutputSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_CallLLM_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CallLLMRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).CallLLM(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_CallLLM_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).CallLLM(ctx, req.(*CallLLMRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayService_ServiceDesc is the grpc.ServiceDesc for GatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -122,6 +338,30 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _GatewayService_Ping_Handler,
+		},
+		{
+			MethodName: "BeginPhase",
+			Handler:    _GatewayService_BeginPhase_Handler,
+		},
+		{
+			MethodName: "EndPhase",
+			Handler:    _GatewayService_EndPhase_Handler,
+		},
+		{
+			MethodName: "RunCommand",
+			Handler:    _GatewayService_RunCommand_Handler,
+		},
+		{
+			MethodName: "RunProbes",
+			Handler:    _GatewayService_RunProbes_Handler,
+		},
+		{
+			MethodName: "WriteOutputSecret",
+			Handler:    _GatewayService_WriteOutputSecret_Handler,
+		},
+		{
+			MethodName: "CallLLM",
+			Handler:    _GatewayService_CallLLM_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
