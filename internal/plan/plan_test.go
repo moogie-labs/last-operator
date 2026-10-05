@@ -14,6 +14,8 @@ import (
 	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
+const outSecret = "out"
+
 const echoStdoutRef = "${steps.echo.stdout}"
 
 func step(id string, argv ...string) lastv1alpha1.Command {
@@ -84,16 +86,32 @@ func TestValidate(t *testing.T) {
 		{"duplicate id", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a"), step("s1", "b")}}, `duplicate step id "s1"`},
 		{"duplicate probe", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Probes: []lastv1alpha1.Probe{probe("p")}}, {Probes: []lastv1alpha1.Probe{probe("p")}}}}, `duplicate probe id "p"`},
+		{"outputs without secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{Outputs: map[string]string{"k": "${steps.s1.stdout}"}}}}, "has outputs but no outputsSecretRef"},
+		{"literal output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "hunter2"}}}}, `output "k" is not a single step reference`},
+		{"unknown step output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "${steps.nope.stdout}"}}}}, `names unknown step "nope"`},
+		{"duplicate output secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}}, {OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}}}}, `duplicate output secret "out"`},
 	}
 	for _, tc := range cases {
 		err := plan.Validate(tc.body)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: Validate = %v, want %q", tc.name, err, tc.want)
 		}
+		if err != nil && strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("%s: the error repeats an output value: %v", tc.name, err)
+		}
 	}
 	ok := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a"), step("s2", "b")}}
 	if err := plan.Validate(ok); err != nil {
 		t.Fatalf("Validate(ok) = %v", err)
+	}
+	withOutputs := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "${steps.s1.json.a.b}", "s": "${steps.s1.stdout}"}}}}
+	if err := plan.Validate(withOutputs); err != nil {
+		t.Fatalf("Validate(withOutputs) = %v", err)
 	}
 }
 

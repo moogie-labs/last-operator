@@ -127,7 +127,8 @@ func TestGatewayLifecycle(t *testing.T) {
 	resource := lastv1alpha1.ManagedResourceSpec{Description: "the e2e namespace",
 		Probes: []lastv1alpha1.Probe{{ID: "ns-exists", Command: lastv1alpha1.Command{Run: getNS.Run, Providers: getNS.Providers},
 			Assert: `result.exitCode == 0 && result.json.metadata.name == "` + lifecycleNS + `"`}},
-		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"}}
+		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
+		Outputs:          map[string]string{"namespace": "${steps.s1.json.metadata.name}"}}
 	steps := []lastv1alpha1.Command{getNS, echo}
 	hash, err := plan.Hash(plan.Body{Steps: steps, Resources: []lastv1alpha1.ManagedResourceSpec{resource}})
 	if err != nil {

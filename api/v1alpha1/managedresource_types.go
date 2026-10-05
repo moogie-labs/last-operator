@@ -24,6 +24,11 @@ type ManagedResourceSpec struct {
 	Probes []Probe `json:"probes,omitempty"`
 	// +optional
 	OutputsSecretRef *LocalRef `json:"outputsSecretRef,omitempty"`
+	// Outputs maps output Secret keys to step references such as
+	// "${steps.s1.json.password}". The gateway writes exactly these values to
+	// outputsSecretRef (spec §15).
+	// +optional
+	Outputs map[string]string `json:"outputs,omitempty"`
 	// +optional
 	Teardown []Command `json:"teardown,omitempty"`
 }

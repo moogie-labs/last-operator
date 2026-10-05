@@ -50,7 +50,14 @@ func (e *testEnv) writeOutputs(subject, mr string, values map[string]string) (*g
 
 func newOutputEnv(t *testing.T, ownerUID types.UID) (*testEnv, string) {
 	t.Helper()
-	env, in := newRunEnv(t, twoSteps(), lastv1alpha1.ManagedResourceSpec{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outputSecret}})
+	return newOutputEnvWith(t, ownerUID, map[string]string{passwordKey: passwordRef})
+}
+
+// newOutputEnvWith runs a two-step plan whose one resource declares outputs.
+func newOutputEnvWith(t *testing.T, ownerUID types.UID, outputs map[string]string) (*testEnv, string) {
+	t.Helper()
+	env, in := newRunEnv(t, twoSteps(), lastv1alpha1.ManagedResourceSpec{
+		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outputSecret}, Outputs: outputs})
 	if err := env.crd.Create(context.Background(), managedResource(ownerUID)); err != nil {
 		t.Fatal(err)
 	}
@@ -115,24 +122,23 @@ func TestWriteOutputSecretRefusals(t *testing.T) {
 		if _, err := env.writeOutputs(h, outputMR, values); err != nil {
 			t.Fatal(err)
 		}
-		values["name"] = "${steps.s1.json.metadata.name}"
 		if _, err := env.writeOutputs(h, outputMR, values); err != nil {
 			t.Fatalf("second write = %v", err)
 		}
-		s, _ := env.kube.CoreV1().Secrets(envNS).Get(context.Background(), outputSecret, metav1.GetOptions{})
-		if string(s.Data["name"]) != envNS {
-			t.Fatalf("data = %v", s.Data)
+		if got := env.secret(outputSecret); string(got.Data[passwordKey]) != outputValue {
+			t.Fatalf("data = %v", got.Data)
 		}
 	})
-	t.Run("bad reference, bad key, literal value, no phase", func(t *testing.T) {
+	t.Run("values must be the approved plan's outputs", func(t *testing.T) {
 		env, h := newOutputEnv(t, envIntentUID)
 		cases := map[string]struct {
 			values map[string]string
 			code   codes.Code
 		}{
-			"missing key": {map[string]string{"p": "${steps.s1.json.nope}"}, codes.FailedPrecondition},
-			"literal":     {map[string]string{"p": "hunter2"}, codes.FailedPrecondition},
-			"bad key":     {map[string]string{"pass word": passwordRef}, codes.InvalidArgument},
+			"literal":     {map[string]string{passwordKey: "hunter2"}, codes.PermissionDenied},
+			"other ref":   {map[string]string{passwordKey: "${steps.s1.stdout}"}, codes.PermissionDenied},
+			"extra key":   {map[string]string{passwordKey: passwordRef, "name": "${steps.s1.json.metadata.name}"}, codes.PermissionDenied},
+			"missing key": {map[string]string{"absent": passwordRef}, codes.PermissionDenied},
 			"no values":   {map[string]string{}, codes.InvalidArgument},
 		}
 		for name, tc := range cases {
@@ -144,8 +150,27 @@ func TestWriteOutputSecretRefusals(t *testing.T) {
 				t.Errorf("%s: the literal leaked into the error or audit entry", name)
 			}
 		}
-		_, err := env.writeOutputs("sha256:"+strings.Repeat("0", 64), outputMR, map[string]string{"p": "${steps.s1.stdout}"})
+		_, err := env.writeOutputs("sha256:"+strings.Repeat("0", 64), outputMR, map[string]string{passwordKey: passwordRef})
 		env.wantDenied(err, codes.FailedPrecondition)
+		if _, gerr := env.kube.CoreV1().Secrets(envNS).Get(context.Background(), outputSecret, metav1.GetOptions{}); gerr == nil {
+			t.Fatal("a refused write created the secret")
+		}
+	})
+	t.Run("an unresolvable or invalid planned output is refused", func(t *testing.T) {
+		cases := map[string]struct {
+			outputs map[string]string
+			code    codes.Code
+		}{
+			"missing json key": {map[string]string{"p": "${steps.s1.json.nope}"}, codes.FailedPrecondition},
+			"bad key":          {map[string]string{"pass word": passwordRef}, codes.InvalidArgument},
+		}
+		for name, tc := range cases {
+			env, h := newOutputEnvWith(t, envIntentUID, tc.outputs)
+			_, err := env.writeOutputs(h, outputMR, tc.outputs)
+			if status.Code(err) != tc.code || env.last().Type != audit.TypePolicyDenied {
+				t.Errorf("%s: %v (last %s), want %v with policy.denied", name, err, env.last().Type, tc.code)
+			}
+		}
 	})
 }
 
@@ -295,10 +320,11 @@ func TestWriteOutputSecretForeignSecretVariants(t *testing.T) {
 
 func TestWriteOutputSecretUpdateKeepsAnnotationsAndReplacesData(t *testing.T) {
 	env, h := newOutputEnv(t, envIntentUID)
-	if _, err := env.writeOutputs(h, outputMR, map[string]string{passwordKey: passwordRef, "extra": passwordRef}); err != nil {
+	if _, err := env.writeOutputs(h, outputMR, map[string]string{passwordKey: passwordRef}); err != nil {
 		t.Fatal(err)
 	}
 	s := env.secret(outputSecret)
+	s.Data["extra"] = []byte("stale")
 	s.Annotations = map[string]string{"note": "keep-me"}
 	s.Labels["team"] = "x"
 	if _, err := env.kube.CoreV1().Secrets(envNS).Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {

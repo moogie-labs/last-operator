@@ -338,6 +338,7 @@ spec:
   desired: { … snapshot of the approved desired state … }
   probes: [ … §10 … ]
   outputsSecretRef: { name: team-x-web-outputs }                         # optional
+  outputs: { password: "${steps.s3.json.password}" }                     # Secret key → step reference
   teardown: [ … commands that delete this resource … ]
 status:
   observed: { … last probe results … }
@@ -1182,8 +1183,10 @@ configuration.
 - Sensitive outputs (passwords, connection strings) are written by the
   gateway (`WriteOutputSecret`) to a Secret in the Intent's namespace.
   The Secret is owned by the ManagedResource and referenced by
-  `outputsSecretRef`. Values come from a named step's output
-  (`${steps.<id>.json.<path>}`), so the LLM never needs to repeat them.
+  `outputsSecretRef`. The plan declares each value in the resource's
+  `outputs` (Secret key → `${steps.<id>.json.<path>}`), so the LLM never
+  needs to repeat it, and approvers see what will be written. The gateway
+  writes exactly the declared outputs and refuses any other values.
 - The operator can create Secrets only through this RPC, never
   directly.
 

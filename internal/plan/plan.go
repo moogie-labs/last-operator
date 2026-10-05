@@ -50,7 +50,8 @@ func Hash(b Body) (string, error) {
 }
 
 // Validate checks what the gateway relies on: step IDs name the steps that
-// ${steps…} references and RunCommand use, and probe IDs name probe outcomes.
+// ${steps…} references and RunCommand use, probe IDs name probe outcomes, and
+// each declared output is a single reference to a step of the plan.
 func Validate(b Body) error {
 	if len(b.Steps) == 0 {
 		return errors.New("plan: a plan needs at least one step")
@@ -66,12 +67,32 @@ func Validate(b Body) error {
 		seen[s.ID] = true
 	}
 	probes := map[string]bool{}
-	for _, r := range b.Resources {
+	secrets := map[string]bool{}
+	for i, r := range b.Resources {
 		for _, p := range r.Probes {
 			if probes[p.ID] {
 				return fmt.Errorf("plan: duplicate probe id %q", p.ID)
 			}
 			probes[p.ID] = true
+		}
+		if r.OutputsSecretRef != nil {
+			if secrets[r.OutputsSecretRef.Name] {
+				return fmt.Errorf("plan: duplicate output secret %q", r.OutputsSecretRef.Name)
+			}
+			secrets[r.OutputsSecretRef.Name] = true
+		}
+		if len(r.Outputs) > 0 && r.OutputsSecretRef == nil {
+			return fmt.Errorf("plan: resource %d has outputs but no outputsSecretRef", i)
+		}
+		for k, expr := range r.Outputs {
+			// Errors never repeat expr: a mistaken literal could be a credential.
+			m := refPattern.FindStringSubmatch(expr)
+			if m == nil || m[0] != expr {
+				return fmt.Errorf("plan: resource %d output %q is not a single step reference", i, k)
+			}
+			if !seen[m[1]] {
+				return fmt.Errorf("plan: resource %d output %q names unknown step %q", i, k, m[1])
+			}
 		}
 	}
 	return nil

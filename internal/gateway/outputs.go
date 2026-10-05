@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"regexp"
 
 	"google.golang.org/grpc/codes"
@@ -65,14 +66,15 @@ func isOutputSecretOf(s *corev1.Secret, mr *lastv1alpha1.ManagedResource, intent
 	return false
 }
 
-// plannedOutputSecret reports whether the approved plan declares name as an output Secret.
-func plannedOutputSecret(b plan.Body, name string) bool {
+// plannedOutputs returns the outputs the approved plan declares for the output
+// Secret name, and whether the plan declares that Secret at all.
+func plannedOutputs(b plan.Body, name string) (map[string]string, bool) {
 	for _, r := range b.Resources {
 		if r.OutputsSecretRef != nil && r.OutputsSecretRef.Name == name {
-			return true
+			return r.Outputs, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOutputSecretRequest) (*gatewayv1.WriteOutputSecretResponse, error) {
@@ -124,8 +126,13 @@ func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOut
 	secretName := mr.Spec.OutputsSecretRef.Name
 	// The operator can edit a ManagedResource, so its Secret name is trusted only
 	// when the approved plan declares it.
-	if !plannedOutputSecret(p.body, secretName) {
+	planned, ok := plannedOutputs(p.body, secretName)
+	if !ok {
 		return nil, d.deny(codes.PermissionDenied, "secret %s is not an output secret of the approved plan", secretName)
+	}
+	// The operator sends the plan's outputs; any other value was not approved.
+	if !maps.Equal(planned, req.GetValues()) {
+		return nil, d.deny(codes.PermissionDenied, "values for secret %s differ from the approved plan's outputs", secretName)
 	}
 
 	data := make(map[string][]byte, len(req.GetValues()))

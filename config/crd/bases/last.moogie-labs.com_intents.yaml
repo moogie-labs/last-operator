@@ -327,6 +327,14 @@ spec:
                           required:
                           - name
                           type: object
+                        outputs:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            Outputs maps output Secret keys to step references such as
+                            "${steps.s1.json.password}". The gateway writes exactly these values to
+                            outputsSecretRef (spec §15).
+                          type: object
                         outputsSecretRef:
                           description: LocalRef names an object in the same namespace
                             (or a cluster-scoped object).

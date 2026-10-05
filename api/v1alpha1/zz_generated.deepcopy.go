@@ -994,6 +994,13 @@ func (in *ManagedResourceSpec) DeepCopyInto(out *ManagedResourceSpec) {
 		*out = new(LocalRef)
 		**out = **in
 	}
+	if in.Outputs != nil {
+		in, out := &in.Outputs, &out.Outputs
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Teardown != nil {
 		in, out := &in.Teardown, &out.Teardown
 		*out = make([]Command, len(*in))
