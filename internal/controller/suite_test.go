@@ -81,7 +81,7 @@ var _ = BeforeSuite(func() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme.Scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
 	Expect(err).NotTo(HaveOccurred())
-	Expect((&IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw,
+	Expect((&IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw, Reader: mgr.GetAPIReader(),
 		Planner: &agent.Planner{LLM: gw}, Recorder: mgr.GetEventRecorder("last-operator"),
 		RetryDelay: 10 * time.Millisecond}).SetupWithManager(mgr)).To(Succeed())
 	go func() {

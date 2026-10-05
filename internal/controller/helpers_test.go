@@ -77,8 +77,6 @@ func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject 
 }
 
 // answer is a model answer holding a plan.
-//
-//nolint:unparam // later tests pass resources
 func answer(steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) string {
 	b, err := json.Marshal(map[string]any{"summary": "test plan", "steps": steps, "resources": resources})
 	Expect(err).NotTo(HaveOccurred())
@@ -107,3 +105,49 @@ func requestText(req *gatewayv1.CallLLMRequest) string {
 }
 
 func zeroHash() string { return "sha256:" + strings.Repeat("0", 64) }
+
+// setStatus rewrites an Intent's status, as an earlier operator process might
+// have left it.
+func setStatus(key types.NamespacedName, change func(*lastv1alpha1.Intent)) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var in lastv1alpha1.Intent
+		if err := k8sClient.Get(ctx, key, &in); err != nil {
+			return err
+		}
+		change(&in)
+		return k8sClient.Status().Update(ctx, &in)
+	})).To(Succeed())
+}
+
+// executedReason returns the Intent's execution checkpoint.
+func executedReason(key types.NamespacedName) func() string {
+	return func() string {
+		if c := meta.FindStatusCondition(getIntent(key).Status.Conditions, CondExecuted); c != nil {
+			return c.Reason
+		}
+		return ""
+	}
+}
+
+// executingAt sets an Intent at phase Executing with the given checkpoint.
+func executingAt(key types.NamespacedName, reason string) {
+	setStatus(key, func(in *lastv1alpha1.Intent) {
+		in.Status.Phase = lastv1alpha1.PhaseExecuting
+		setCondition(&in.Status.Conditions, in.Generation, CondExecuted, metav1.ConditionUnknown, reason, "set by the test")
+	})
+}
+
+func getMR(ns, name string) *lastv1alpha1.ManagedResource {
+	var mr lastv1alpha1.ManagedResource
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &mr)).To(Succeed())
+	return &mr
+}
+
+// approve files a decision on the Intent's current plan.
+//
+//nolint:unparam // later tests deny
+func approve(key types.NamespacedName, decision lastv1alpha1.Decision) {
+	p := getIntent(key).Status.Plan
+	Expect(p).NotTo(BeNil())
+	createApproval(key, lastv1alpha1.StageCreate, p.Hash, decision)
+}

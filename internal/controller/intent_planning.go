@@ -21,8 +21,6 @@ const planTimeout = 10 * time.Minute
 
 // startPlanning discards the current plan and asks for a new one for the
 // current spec. feedback, when set, is a failure the new plan must address.
-//
-//nolint:unparam // the verification-failure replan passes feedback
 func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		in.Status.Stage = lastv1alpha1.StageCreate

@@ -16,8 +16,14 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
-// callLLM is the call log entry for a CallLLM RPC.
-const callLLM = "CallLLM"
+// Call log entries.
+const (
+	callLLM      = "CallLLM"
+	beginPhase   = "BeginPhase"
+	endSucceeded = "EndPhase:succeeded"
+	endFailed    = "EndPhase:failed"
+	runS1        = "RunCommand:s1"
+)
 
 // llmFunc answers one CallLLM request.
 type llmFunc func(*gatewayv1.CallLLMRequest) (string, error)
@@ -261,4 +267,42 @@ func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequ
 		s.onProbe()
 	}
 	return resp, nil
+}
+
+// setOpen makes the gateway hold an open phase for subject, as if an earlier
+// operator process had opened it.
+func (f *fakeGateway) setOpen(key types.NamespacedName, subject string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open[key] = subject
+}
+
+// setExecuted makes the gateway's last executed plan for the Intent subject.
+func (f *fakeGateway) setExecuted(key types.NamespacedName, subject string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.executed[key] = subject
+}
+
+func (f *fakeGateway) argvOf(key types.NamespacedName, step string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.argv[key][step])
+}
+
+func (f *fakeGateway) outputsOf(key types.NamespacedName) map[string]map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.outputs[key]
+}
+
+// lastRequest returns the last CallLLM request for an Intent.
+func (f *fakeGateway) lastRequest(key types.NamespacedName) *gatewayv1.CallLLMRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	reqs := f.llmReqs[key]
+	if len(reqs) == 0 {
+		return nil
+	}
+	return reqs[len(reqs)-1]
 }
