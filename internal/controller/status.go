@@ -102,9 +102,13 @@ func (r *IntentReconciler) update(ctx context.Context, in *lastv1alpha1.Intent, 
 		change(in)
 		err := r.Status().Update(ctx, in)
 		if apierrors.IsConflict(err) {
-			if gerr := r.Get(ctx, key, in); gerr != nil {
+			// Decode into a fresh object: decoding into in would merge, and
+			// a stale field would survive.
+			var fresh lastv1alpha1.Intent
+			if gerr := r.Reader.Get(ctx, key, &fresh); gerr != nil {
 				return gerr
 			}
+			*in = fresh
 		}
 		return err
 	})

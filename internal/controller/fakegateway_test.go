@@ -23,6 +23,8 @@ const (
 	endSucceeded = "EndPhase:succeeded"
 	endFailed    = "EndPhase:failed"
 	runS1        = "RunCommand:s1"
+	runProbes    = "RunProbes"
+	trueCmd      = "true"
 )
 
 // llmFunc answers one CallLLM request.
@@ -237,7 +239,7 @@ func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest,
 func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequest, _ ...grpc.CallOption) (*gatewayv1.RunProbesResponse, error) {
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
-	f.record(key, "RunProbes")
+	f.record(key, runProbes)
 	executed := f.executed[key]
 	s := f.scriptFor(key)
 	f.mu.Unlock()

@@ -151,3 +151,12 @@ func approve(key types.NamespacedName, decision lastv1alpha1.Decision) {
 	Expect(p).NotTo(BeNil())
 	createApproval(key, lastv1alpha1.StageCreate, p.Hash, decision)
 }
+
+// setInSync sets a ManagedResource's InSync condition, as a probe run would.
+func setInSync(ns, name string, s metav1.ConditionStatus) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		mr := getMR(ns, name)
+		setCondition(&mr.Status.Conditions, mr.Generation, CondInSync, s, ReasonProbesFailed, "set by the test")
+		return k8sClient.Status().Update(ctx, mr)
+	})).To(Succeed())
+}

@@ -27,8 +27,8 @@ type IntentReconciler struct {
 	Gateway  gatewayv1.GatewayServiceClient
 	Planner  *agent.Planner
 	Recorder events.EventRecorder
-	// Reader reads uncached. Executing decides from the checkpoint, which the
-	// informer cache may not yet show after the previous reconcile's writes.
+	// Reader reads uncached. Every phase decides from the Intent's status,
+	// which the informer cache may not yet show after the previous reconcile's writes.
 	Reader client.Reader
 	// RetryDelay is the pause between retries of a gateway call within one reconcile.
 	RetryDelay time.Duration
@@ -45,25 +45,14 @@ type IntentReconciler struct {
 // Reconcile advances the Intent by one phase. Every status write triggers the
 // next reconcile, so each phase handler does its work and records the result.
 func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Read uncached: a stale read could re-plan, reopen a phase, or apply a
+	// phase change over a newer status.
 	var in lastv1alpha1.Intent
-	if err := r.Get(ctx, req.NamespacedName, &in); err != nil {
+	if err := r.Reader.Get(ctx, req.NamespacedName, &in); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !in.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil // teardown arrives with the Delete stage
-	}
-	if p := in.Status.Phase; p == lastv1alpha1.PhasePlanning || p == lastv1alpha1.PhaseExecuting {
-		// These phases call the gateway before they write, so the cache must
-		// not lag the previous reconcile's writes: a stale Planning would ask
-		// the model twice, and a stale checkpoint could open a second phase and
-		// run steps twice, or overwrite a later outcome. A reconcile that sees
-		// the Intent has moved on does nothing; that write triggers the next one.
-		if err := r.Reader.Get(ctx, req.NamespacedName, &in); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
-		}
-		if !in.DeletionTimestamp.IsZero() {
-			return ctrl.Result{}, nil
-		}
 	}
 	switch in.Status.Phase {
 	case "", lastv1alpha1.PhasePending:
@@ -74,6 +63,10 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.awaitApproval(ctx, &in)
 	case lastv1alpha1.PhaseExecuting:
 		return r.execute(ctx, &in)
+	case lastv1alpha1.PhaseVerifying:
+		return r.verify(ctx, &in)
+	case lastv1alpha1.PhaseReady, lastv1alpha1.PhaseDrifted:
+		return r.followProbes(ctx, &in)
 	case lastv1alpha1.PhaseFailed:
 		if in.Generation != in.Status.ObservedGeneration {
 			return r.startPlanning(ctx, &in, "") // a spec edit retries a failed Intent

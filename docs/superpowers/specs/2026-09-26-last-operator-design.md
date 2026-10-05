@@ -509,10 +509,32 @@ Pending → Clarifying ⇄ (user answers)
 - **Delete.** A finalizer holds the Intent until teardown completes.
   The teardown plan is built from each ManagedResource's `teardown`
   commands and handed to the agent to review for ordering.
+- **Failures (M2).** A step that exits non-zero sends the Intent back to
+  Planning with the failure as context. Any other failure moves it to
+  `Failed`, with the reason in its `Ready` condition:
+  - `PlanningFailed`
+  - `ApprovalDenied`
+  - `ExecutionFailed`
+  - `ExecutionInterrupted`
+  - `VerificationFailed`
+
+  A spec edit retries a failed Intent. Automatic retry with backoff
+  arrives with Auto modes (M5). Until then every replan needs a fresh
+  approval.
+- **Operator restarts during Executing.** Step results live only in the
+  operator's memory and the gateway's record, so the operator never
+  resumes a phase. An `Executed` condition checkpoints the phase:
+  - **Phase open:** the operator ends it as failed and marks the Intent
+    `ExecutionInterrupted`.
+  - **Steps succeeded but the end is unrecorded:** the operator retries
+    `EndPhase`. If the gateway has already closed the phase, the operator
+    accepts the execution only when `RunProbes` reports the plan's hash as
+    the last executed plan.
 
 **Operator restarts during Planning:** the operator reloads the
 conversation from `QueryAudit` (`llm.*` and `command.*` entries for the
-current phase) and continues.
+current phase) and continues. Until `QueryAudit` arrives (M3), a restart during
+Planning starts the conversation over.
 
 ## 8. Commands, plans, and enforcement
 

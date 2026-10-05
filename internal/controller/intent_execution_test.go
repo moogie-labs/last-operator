@@ -21,7 +21,7 @@ var _ = Describe("Intent execution", func() {
 	s1 := argvStep("s1", "kubectl", "get", "namespace", "x", "-o", "json")
 	s2 := argvStep("s2", "echo", "${steps.s1.json.metadata.name}")
 	resource := lastv1alpha1.ManagedResourceSpec{Description: "the namespace",
-		Probes:           []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}, Assert: "true"}},
+		Probes:           []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}, Assert: trueCmd}},
 		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
 		Outputs:          map[string]string{"name": "${steps.s1.json.metadata.name}"}}
 	stdout := map[string]string{"s1": `{"metadata":{"name":"x"}}`, "s2": "x\n"}
@@ -57,7 +57,7 @@ var _ = Describe("Intent execution", func() {
 
 	It("plans again with the failure when a step fails", func() {
 		failing := []lastv1alpha1.Command{argvStep("s1", "false")}
-		fixed := []lastv1alpha1.Command{argvStep("s2", "true")}
+		fixed := []lastv1alpha1.Command{argvStep("s2", trueCmd)}
 		awaitingApproval(&script{exit: map[string]int32{"s1": 1}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
 			if strings.Contains(requestText(req), "boom") {
 				return answer(fixed), nil
@@ -121,7 +121,7 @@ var _ = Describe("Intent execution", func() {
 		executingAt(key, ReasonStepsSucceeded)
 
 		Eventually(executedReason(key)).Should(Equal(ReasonPhaseEnded))
-		Expect(gw.calls(key)[:3]).To(Equal([]string{callLLM, endSucceeded, "RunProbes"}))
+		Expect(gw.calls(key)[:3]).To(Equal([]string{callLLM, endSucceeded, runProbes}))
 	})
 
 	It("fails when the gateway does not know the phase it was finishing", func() {
@@ -130,6 +130,6 @@ var _ = Describe("Intent execution", func() {
 
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonInterrupted))
-		Expect(gw.calls(key)).To(Equal([]string{callLLM, endSucceeded, "RunProbes"}))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, endSucceeded, runProbes}))
 	})
 })
