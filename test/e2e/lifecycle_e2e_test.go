@@ -39,7 +39,7 @@ func TestGatewayLifecycle(t *testing.T) {
 	kubectl(t, "rollout", "status", "-n", "last-gateway", "deploy/last-gateway", "--timeout=5m")
 	ctx := context.Background()
 	// A unique suffix keeps this run's objects, and so its audit entries, distinct from any earlier run.
-	suffix := fmt.Sprintf("%x", time.Now().UnixNano())[:8]
+	suffix := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
 	lifecycleNS := "e2e-lifecycle-" + suffix
 	lifecycleSA := "e2e-lc-" + suffix
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -61,6 +61,33 @@ func TestGatewayLifecycle(t *testing.T) {
 			t.Fatalf("create %T: %v", o, err)
 		}
 	}
+
+	// Registered before anything is created; it tolerates objects that were never created.
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, o := range []client.Object{
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}},
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA, Namespace: "last-gateway"}},
+			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+			&lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
+		} {
+			if err := crc.Delete(bg, o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("cleanup %T: %v", o, err)
+			}
+		}
+		for range 5 {
+			var cur lastv1alpha1.OperatorConfig
+			if err := crc.Get(bg, client.ObjectKey{Name: "default"}, &cur); err != nil || cur.Spec.Defaults == nil {
+				return
+			}
+			cur.Spec.Defaults.Providers = slices.DeleteFunc(cur.Spec.Defaults.Providers, func(n string) bool { return n == lifecycleSA })
+			if err := crc.Update(bg, &cur); err == nil {
+				return
+			}
+		}
+		t.Errorf("cleanup: could not remove %s from OperatorConfig defaults", lifecycleSA)
+	})
 
 	// A namespace, a Provider that can only read that namespace, and a policy allowing the Provider.
 	create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}})
@@ -91,31 +118,6 @@ func TestGatewayLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		for _, o := range []client.Object{
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: lifecycleNS}},
-			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA, Namespace: "last-gateway"}},
-			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
-			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
-			&lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSA}},
-		} {
-			if err := crc.Delete(bg, o); err != nil && !apierrors.IsNotFound(err) {
-				t.Errorf("cleanup %T: %v", o, err)
-			}
-		}
-		for range 5 {
-			var cur lastv1alpha1.OperatorConfig
-			if err := crc.Get(bg, client.ObjectKey{Name: "default"}, &cur); err != nil || cur.Spec.Defaults == nil {
-				return
-			}
-			cur.Spec.Defaults.Providers = slices.DeleteFunc(cur.Spec.Defaults.Providers, func(n string) bool { return n == lifecycleSA })
-			if err := crc.Update(bg, &cur); err == nil {
-				return
-			}
-		}
-		t.Errorf("cleanup: could not remove %s from OperatorConfig defaults", lifecycleSA)
-	})
 
 	// The Intent and its plan. The plan is written as an admin would; the operator arrives in M2c.
 	getNS := lastv1alpha1.Command{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", "namespace", lifecycleNS, "-o", "json"}},
