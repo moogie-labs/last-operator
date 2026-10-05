@@ -1,0 +1,157 @@
+package gateway
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"regexp"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
+)
+
+var secretKeyPattern = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+const maxSecretKeyLen = 253
+
+func validSecretKey(k string) bool {
+	return len(k) <= maxSecretKeyLen && k != "." && k != ".." && secretKeyPattern.MatchString(k)
+}
+
+// outputWritten is the output.written payload; values are recorded only as hashes (spec §14.2).
+type outputWritten struct {
+	ManagedResource string            `json:"managedResource"`
+	Secret          string            `json:"secret"`
+	Values          map[string]string `json:"values"`
+}
+
+func ownedByIntent(mr *lastv1alpha1.ManagedResource, intent *lastv1alpha1.Intent) bool {
+	if mr.Spec.IntentRef == nil || mr.Spec.IntentRef.Name != intent.Name {
+		return false
+	}
+	for _, o := range mr.OwnerReferences {
+		if o.UID == intent.UID && o.Kind == "Intent" && o.Controller != nil && *o.Controller {
+			return true
+		}
+	}
+	return false
+}
+
+func isOutputSecretOf(s *corev1.Secret, mr *lastv1alpha1.ManagedResource) bool {
+	if s.Labels[sandbox.LabelManagedBy] != sandbox.ManagedByValue {
+		return false
+	}
+	for _, o := range s.OwnerReferences {
+		if o.UID == mr.UID && o.Kind == "ManagedResource" {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOutputSecretRequest) (*gatewayv1.WriteOutputSecretResponse, error) {
+	w, release, err := g.beginRPC()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	ns, name, key, err := intentKey(req.GetIntent())
+	if err != nil {
+		return nil, err
+	}
+	subject := req.GetSubjectHash()
+	if !subjectPattern.MatchString(subject) {
+		return nil, status.Error(codes.InvalidArgument, "subject_hash must be sha256:<64 lowercase hex digits>")
+	}
+	actor := CallerFrom(ctx)
+	d := denial{ctx: ctx, w: w, actor: actor, intent: key, subject: subject, rpc: "WriteOutputSecret"}
+	p := g.phases.get(key)
+	if p == nil || p.subject != subject {
+		return nil, d.deny(codes.FailedPrecondition, "no open phase for this plan")
+	}
+	d.stage = string(p.stage)
+	if !p.mu.TryLock() {
+		return nil, status.Error(codes.Aborted, "a step of this phase is already running")
+	}
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, d.deny(codes.FailedPrecondition, "phase is closed")
+	}
+	if req.GetManagedResource() == "" || len(req.GetValues()) == 0 {
+		return nil, d.deny(codes.InvalidArgument, "managed_resource and values are required")
+	}
+
+	var intent lastv1alpha1.Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
+		return nil, notFoundOr(err, "intent")
+	}
+	var mr lastv1alpha1.ManagedResource
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: req.GetManagedResource()}, &mr); err != nil {
+		return nil, notFoundOr(err, "managed resource")
+	}
+	if !ownedByIntent(&mr, &intent) {
+		return nil, d.deny(codes.PermissionDenied, "managed resource %s is not owned by intent %s", mr.Name, key)
+	}
+	if mr.Spec.OutputsSecretRef == nil {
+		return nil, d.deny(codes.InvalidArgument, "managed resource %s has no outputsSecretRef", mr.Name)
+	}
+	secretName := mr.Spec.OutputsSecretRef.Name
+
+	data := make(map[string][]byte, len(req.GetValues()))
+	hashes := make(map[string]string, len(req.GetValues()))
+	for k, expr := range req.GetValues() {
+		if !validSecretKey(k) {
+			return nil, d.deny(codes.InvalidArgument, "%q is not a valid Secret key", truncateReason(k))
+		}
+		v, err := p.results.Value(expr)
+		if err != nil {
+			// The reason never repeats the expression or the error: a mistaken literal could be a credential.
+			return nil, d.deny(codes.FailedPrecondition, "value for key %q is not a resolvable step reference", k)
+		}
+		sum := sha256.Sum256([]byte(v))
+		data[k], hashes[k] = []byte(v), "sha256:"+hex.EncodeToString(sum[:])
+	}
+
+	secrets := g.kube.CoreV1().Secrets(ns)
+	existing, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		existing = nil
+	case err != nil:
+		return nil, status.Errorf(codes.Unavailable, "read secret: %v", err)
+	case !isOutputSecretOf(existing, &mr):
+		return nil, d.deny(codes.PermissionDenied, "secret %s/%s exists and is not %s's output secret", ns, secretName, mr.Name)
+	}
+	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeOutputWritten, Actor: actor, Intent: key, Stage: string(p.stage),
+		SubjectHash: p.subject, AuthorizedBy: p.auth,
+		Payload: outputWritten{ManagedResource: mr.Name, Secret: secretName, Values: hashes}}); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "record output.written: %v", err)
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns,
+			Labels: map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: "ManagedResource",
+				Name: mr.Name, UID: mr.UID}}},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}
+	if existing == nil {
+		_, err = secrets.Create(ctx, desired, metav1.CreateOptions{})
+	} else {
+		desired.ResourceVersion = existing.ResourceVersion
+		_, err = secrets.Update(ctx, desired, metav1.UpdateOptions{})
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "write output secret: %v", err)
+	}
+	return &gatewayv1.WriteOutputSecretResponse{SecretName: secretName}, nil
+}
