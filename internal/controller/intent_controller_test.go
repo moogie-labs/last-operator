@@ -43,14 +43,25 @@ var _ = Describe("Intent planning", func() {
 
 	It("fails when the plan is denied, even next to an approval", func() {
 		gw.setScript(key, &script{llm: turns(answer(steps))})
+		// Both decisions exist before the Intent does, so one reconcile sees both.
+		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionApprove)
+		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionDeny)
 		createIntent(key, "list namespaces")
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 
-		approve(key, lastv1alpha1.DecisionDeny)
-		approve(key, lastv1alpha1.DecisionApprove)
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
 		Consistently(func() []string { return gw.calls(key) }).ShouldNot(ContainElement("BeginPhase"))
+	})
+
+	It("fails when the API server rejects the plan", func() {
+		bad := lastv1alpha1.ManagedResourceSpec{Description: "db", OutputsSecretRef: &lastv1alpha1.LocalRef{Name: ""}}
+		gw.setScript(key, &script{llm: turns(answer(steps, bad))})
+		createIntent(key, "bad plan")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("rejected the plan"))
+		Expect(getIntent(key).Status.Plan).To(BeNil())
 	})
 
 	It("plans again when the spec changes before approval", func() {

@@ -76,13 +76,6 @@ func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject 
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }
 
-// approve files a decision on the Intent's current plan.
-func approve(key types.NamespacedName, decision lastv1alpha1.Decision) {
-	p := getIntent(key).Status.Plan
-	Expect(p).NotTo(BeNil())
-	createApproval(key, lastv1alpha1.StageCreate, p.Hash, decision)
-}
-
 // answer is a model answer holding a plan.
 //
 //nolint:unparam // later tests pass resources

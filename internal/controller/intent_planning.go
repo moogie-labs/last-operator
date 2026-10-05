@@ -68,6 +68,10 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 			"Waiting for an IntentApproval of plan "+p.Hash+" for stage Create")
 	})
 	if apierrors.IsInvalid(err) {
+		// update left the rejected plan on in; start the Failed write from the stored status
+		if gerr := r.Get(ctx, client.ObjectKeyFromObject(in), in); gerr != nil {
+			return ctrl.Result{}, gerr
+		}
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, "The API server rejected the plan: "+err.Error())
 	}
 	return ctrl.Result{}, err
