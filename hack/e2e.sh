@@ -16,6 +16,9 @@ for c in gateway audit-init sandbox-base; do
 done
 
 make helm-crds
+# Helm installs crds/ only on first install and never upgrades them; apply them
+# so a reused cluster runs the current schemas.
+kubectl apply --server-side --force-conflicts -f charts/last-operator/crds/
 helm upgrade --install last charts/last-operator -n last-system --create-namespace \
   --set image.tag="$TAG" --set image.registry="$REGISTRY" --set image.pullPolicy=Never \
   --set audit.bundled.size=1Gi \
