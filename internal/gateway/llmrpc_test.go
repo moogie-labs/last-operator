@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -80,8 +83,8 @@ func TestCallLLMAuditsRequestAndResponse(t *testing.T) {
 
 func TestCallLLMRefusals(t *testing.T) {
 	user := &gatewayv1.Message{Role: roleUser, Content: "x"}
-	if _, err := newLLMEnv(t, lastv1alpha1.LLMAnthropic).callLLM(user); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("anthropic = %v, want Unimplemented", err)
+	if _, err := newLLMEnv(t, lastv1alpha1.LLMAnthropic).callLLM(user); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("anthropic without its key Secret = %v, want FailedPrecondition", err)
 	}
 	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
 	if _, err := env.callLLM(&gatewayv1.Message{Role: "tool", Content: "x"}); status.Code(err) != codes.InvalidArgument {
@@ -170,5 +173,65 @@ func TestCallLLMCountsCallsAndTokens(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(env.g.metrics.llmCalls.WithLabelValues("fixture", "m", "ok")); got != 1 {
 		t.Fatalf("llm calls = %v, want 1", got)
+	}
+}
+
+// anthropicEnv is an env whose LLMProvider is anthropic at a fake API that checks
+// the key and answers with text.
+func anthropicEnv(t *testing.T, storedKey string) *testEnv {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if r.Header.Get("X-Api-Key") != "sk-test" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"+
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"+
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"real answer\"}}\n\n"+
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"+
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"stop_details\":null},\"usage\":{\"output_tokens\":2}}\n\n"+
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	op, lp := llmConfig(lastv1alpha1.LLMAnthropic)
+	lp.Spec.Endpoint = srv.URL
+	env := newTestEnv(t, intentWithPlan(t, twoSteps()), op, lp)
+	if storedKey != "" {
+		if _, err := env.kube.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "key", Namespace: ns},
+			Data:       map[string][]byte{llmAPIKeyField: []byte(storedKey)},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return env
+}
+
+func TestCallLLMAnthropicUsesTheKeyFromTheSecretTrimmed(t *testing.T) {
+	env := anthropicEnv(t, "  sk-test\n")
+	resp, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
+	if err != nil || resp.GetContent() != "real answer" {
+		t.Fatalf("CallLLM = %v, %v", resp, err)
+	}
+}
+
+func TestCallLLMAnthropicKeyProblemsAreFailedPreconditionWithoutTheKey(t *testing.T) {
+	missing := anthropicEnv(t, "")
+	_, err := missing.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("missing Secret = %v", err)
+	}
+	wrong := anthropicEnv(t, "sk-wrong-value")
+	_, err = wrong.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
+	if status.Code(err) != codes.FailedPrecondition || strings.Contains(err.Error(), "sk-wrong-value") {
+		t.Fatalf("rejected key = %v; want FailedPrecondition that never repeats the key", err)
+	}
+	for _, e := range wrong.entries() {
+		if strings.Contains(string(e.Payload), "sk-wrong-value") {
+			t.Fatalf("entry %s carries the API key", e.Type)
+		}
 	}
 }

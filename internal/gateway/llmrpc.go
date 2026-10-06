@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -43,15 +45,45 @@ const maxSchemaBytes = 64 << 10
 
 var llmRoles = map[string]bool{"system": true, "user": true, "assistant": true}
 
-func (g *Gateway) llmProvider(lp *lastv1alpha1.LLMProvider) (llm.Provider, error) {
+// llmAPIKeyField is the Secret key holding an LLMProvider's API key.
+const llmAPIKeyField = "apiKey"
+
+// llmAPIKey reads an LLMProvider's API key from its Secret in the gateway
+// namespace. Errors name the Secret, never the value.
+func (g *Gateway) llmAPIKey(ctx context.Context, lp *lastv1alpha1.LLMProvider) (string, error) {
+	if lp.Spec.SecretRef == nil {
+		return "", status.Errorf(codes.FailedPrecondition, "LLMProvider %s has no secretRef", lp.Name)
+	}
+	s, err := g.kube.CoreV1().Secrets(g.cfg.Namespace).Get(ctx, lp.Spec.SecretRef.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", status.Errorf(codes.FailedPrecondition, "LLMProvider %s: Secret %s not found", lp.Name, lp.Spec.SecretRef.Name)
+	}
+	if err != nil {
+		return "", status.Errorf(codes.Unavailable, "read LLMProvider %s key Secret: %v", lp.Name, err)
+	}
+	key := strings.TrimSpace(string(s.Data[llmAPIKeyField]))
+	if key == "" {
+		return "", status.Errorf(codes.FailedPrecondition, "LLMProvider %s: Secret %s has no %q key", lp.Name, lp.Spec.SecretRef.Name, llmAPIKeyField)
+	}
+	return key, nil
+}
+
+func (g *Gateway) llmProvider(ctx context.Context, lp *lastv1alpha1.LLMProvider) (llm.Provider, error) {
 	switch lp.Spec.Type {
 	case lastv1alpha1.LLMScripted:
 		if lp.Spec.Scripted == nil {
 			return nil, status.Errorf(codes.FailedPrecondition, "LLMProvider %s has no scripted config", lp.Name)
 		}
 		return llm.NewScripted(g.kube, g.cfg.Namespace, lp.Spec.Scripted.ConfigMapRef.Name), nil
+	case lastv1alpha1.LLMAnthropic:
+		key, err := g.llmAPIKey(ctx, lp)
+		if err != nil {
+			return nil, err
+		}
+		return llm.NewAnthropic(llm.AnthropicConfig{APIKey: key, Model: lp.Spec.Model, Effort: string(lp.Spec.Effort),
+			BaseURL: lp.Spec.Endpoint}), nil
 	default:
-		return nil, status.Errorf(codes.Unimplemented, "LLM provider type %q arrives with the real adapters (M3)", lp.Spec.Type)
+		return nil, status.Errorf(codes.Unimplemented, "LLM provider type %q is not supported yet", lp.Spec.Type)
 	}
 }
 
@@ -100,7 +132,7 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 		}
 		return nil, status.Errorf(codes.Unavailable, "read LLMProvider: %v", err)
 	}
-	provider, err := g.llmProvider(&lp)
+	provider, err := g.llmProvider(ctx, &lp)
 	if err != nil {
 		return nil, err
 	}
