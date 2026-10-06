@@ -48,7 +48,10 @@ func NewAnthropic(cfg AnthropicConfig) *Anthropic {
 	if cfg.DisableRetries {
 		retries = 0
 	}
-	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey), option.WithMaxRetries(retries)}
+	// WithoutEnvironmentDefaults first: the SDK would otherwise read ANTHROPIC_* credentials,
+	// base URL and profiles from the environment, and the key must come only from the Secret.
+	opts := []option.RequestOption{option.WithoutEnvironmentDefaults(), option.WithAPIKey(cfg.APIKey),
+		option.WithMaxRetries(retries)}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
@@ -132,6 +135,10 @@ func classifyAnthropic(err error) error {
 	var apiErr *anthropic.Error
 	if !errors.As(err, &apiErr) {
 		return fmt.Errorf("%w: %v", ErrTransient, err)
+	}
+	if apiErr.StatusCode < http.StatusBadRequest {
+		// An error event inside a 200 stream (for example overloaded_error).
+		return fmt.Errorf("%w: the stream reported an error", ErrTransient)
 	}
 	return classifyHTTP(apiErr.StatusCode, apiErr.Error())
 }

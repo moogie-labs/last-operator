@@ -35,6 +35,8 @@ func textStream(text, stopReason, stopDetails string) string {
 	)
 }
 
+const testKey = "secret-key"
+
 type captured struct {
 	mu     sync.Mutex
 	path   string
@@ -65,7 +67,7 @@ func fakeAnthropic(t *testing.T, statusCode int, body string) (*httptest.Server,
 }
 
 func anthropicFor(srv *httptest.Server, effort string) *Anthropic {
-	return NewAnthropic(AnthropicConfig{APIKey: "secret-key", Model: "claude-opus-5-5", Effort: effort,
+	return NewAnthropic(AnthropicConfig{APIKey: testKey, Model: "claude-opus-5-5", Effort: effort,
 		BaseURL: srv.URL, DisableRetries: true})
 }
 
@@ -85,7 +87,7 @@ func TestAnthropicSendsTheRequestTheSpecRequires(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.path != "/v1/messages" || c.header.Get("X-Api-Key") != "secret-key" ||
+	if c.path != "/v1/messages" || c.header.Get("X-Api-Key") != testKey ||
 		!strings.Contains(c.header.Get("Anthropic-Beta"), "server-side-fallback-2026-07-01") {
 		t.Fatalf("path %s, headers %v", c.path, c.header)
 	}
@@ -153,8 +155,34 @@ func TestAnthropicMapsHTTPErrors(t *testing.T) {
 		if !errors.Is(err, want) {
 			t.Errorf("HTTP %d: %v, want %v", code, err, want)
 		}
-		if err != nil && strings.Contains(err.Error(), "secret-key") {
+		if err != nil && strings.Contains(err.Error(), testKey) {
 			t.Errorf("HTTP %d: the API key leaked into the error", code)
 		}
+	}
+}
+
+func TestAnthropicTreatsAMidStreamErrorEventAsTransient(t *testing.T) {
+	body := sse(
+		"message_start", `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		"error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+	)
+	srv, _ := fakeAnthropic(t, http.StatusOK, body)
+	_, err := anthropicFor(srv, "").Complete(context.Background(), conversation)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("Complete = %v, want ErrTransient", err)
+	}
+}
+
+func TestAnthropicIgnoresAmbientCredentials(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "ambient-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+	srv, c := fakeAnthropic(t, http.StatusOK, textStream("hi", "end_turn", "null"))
+	if _, err := anthropicFor(srv, "").Complete(context.Background(), conversation); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path == "" || c.header.Get("Authorization") != "" || c.header.Get("X-Api-Key") != testKey {
+		t.Fatalf("path %q, headers %v", c.path, c.header)
 	}
 }
