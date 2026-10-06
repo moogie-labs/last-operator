@@ -79,7 +79,15 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if storedPlanChanged(in, p.Hash) {
+	// Hash the plan as stored, read uncached into a fresh object: the write's
+	// response was decoded into in, and a decode merges, so a field the API server
+	// pruned would still be there.
+	var stored lastv1alpha1.Intent
+	if err := r.Reader.Get(ctx, client.ObjectKeyFromObject(in), &stored); err != nil {
+		return ctrl.Result{}, err
+	}
+	if storedPlanChanged(&stored, p.Hash) {
+		*in = stored
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, msgPlanChanged)
 	}
 	return ctrl.Result{}, nil
@@ -88,15 +96,15 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 // msgPlanChanged explains a plan the API server did not store as written.
 const msgPlanChanged = "The API server changed the plan when storing it; are the CRDs current?"
 
-// storedPlanChanged reports whether in holds the plan hashed as hash, but the
-// stored plan no longer hashes to it. An API server with a stale CRD prunes
-// unknown fields silently, and the gateway would later refuse the plan with a
-// hash mismatch.
-func storedPlanChanged(in *lastv1alpha1.Intent, hash string) bool {
-	if in.Status.Plan == nil || in.Status.Plan.Hash != hash {
+// storedPlanChanged reports whether stored, as read back from the API server,
+// holds the plan hashed as hash but no longer hashes to it. An API server with
+// a stale CRD prunes unknown fields silently, and the gateway would later
+// refuse the plan with a hash mismatch.
+func storedPlanChanged(stored *lastv1alpha1.Intent, hash string) bool {
+	if stored.Status.Plan == nil || stored.Status.Plan.Hash != hash {
 		return false // the write was skipped; the spec changed while planning
 	}
-	got, err := plan.Hash(plan.FromStatus(in.Status.Plan))
+	got, err := plan.Hash(plan.FromStatus(stored.Status.Plan))
 	return err != nil || got != hash
 }
 

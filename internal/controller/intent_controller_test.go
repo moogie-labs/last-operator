@@ -153,17 +153,27 @@ var _ = Describe("Intent planning", func() {
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		gw.setScript(key, &script{llm: turns(answer(steps, resource))})
 
-		// An API server with a stale CRD prunes the fields it does not know, such as outputs.
+		// An API server with a stale CRD prunes the fields it does not know, such as
+		// outputs. The client decodes the response into the object it sent, and a
+		// decode merges: the pruned field survives in memory. Model that by storing a
+		// pruned copy and handing back only the new resourceVersion.
 		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
 		Expect(err).NotTo(HaveOccurred())
 		pruning := interceptor.NewClient(base, interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				if in, ok := obj.(*lastv1alpha1.Intent); ok && in.Status.Plan != nil {
-					for i := range in.Status.Plan.Resources {
-						in.Status.Plan.Resources[i].Outputs = nil
-					}
+				in, ok := obj.(*lastv1alpha1.Intent)
+				if !ok || in.Status.Plan == nil {
+					return c.SubResource(sub).Update(ctx, obj, opts...)
 				}
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				pruned := in.DeepCopy()
+				for i := range pruned.Status.Plan.Resources {
+					pruned.Status.Plan.Resources[i].Outputs = nil
+				}
+				if err := c.SubResource(sub).Update(ctx, pruned, opts...); err != nil {
+					return err
+				}
+				in.SetResourceVersion(pruned.GetResourceVersion())
+				return nil
 			}})
 		in := getIntent(key)
 		in.Status.Phase = lastv1alpha1.PhasePlanning
