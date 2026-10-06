@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"maps"
-	"regexp"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,13 +20,9 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
-var secretKeyPattern = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
-
-const maxSecretKeyLen = 253
-
-func validSecretKey(k string) bool {
-	return len(k) <= maxSecretKeyLen && k != "." && k != ".." && secretKeyPattern.MatchString(k)
-}
+// validSecretKey is plan.ValidSecretKey: Validate applies the same rule
+// before approval, so a valid plan never fails here for a key's shape.
+func validSecretKey(k string) bool { return plan.ValidSecretKey(k) }
 
 // outputWritten is the output.written payload; values are recorded only as hashes (spec §14.2).
 type outputWritten struct {

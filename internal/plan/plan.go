@@ -7,9 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -50,8 +54,10 @@ func Hash(b Body) (string, error) {
 }
 
 // Validate checks what the gateway relies on: step IDs name the steps that
-// ${steps…} references and RunCommand use, probe IDs name probe outcomes, and
-// each declared output is a single reference to a step of the plan.
+// ${steps…} references and RunCommand use, probe IDs name probe outcomes, each
+// output Secret name is a DNS-1123 subdomain, and each declared output has a
+// valid Secret key and is a single reference to a step of the plan. A plan
+// that passes cannot fail at WriteOutputSecret for its shape alone.
 func Validate(b Body) error {
 	if len(b.Steps) == 0 {
 		return errors.New("plan: a plan needs at least one step")
@@ -76,6 +82,10 @@ func Validate(b Body) error {
 			probes[p.ID] = true
 		}
 		if r.OutputsSecretRef != nil {
+			if errs := validation.IsDNS1123Subdomain(r.OutputsSecretRef.Name); len(errs) > 0 {
+				return fmt.Errorf("plan: resource %d output secret %q is not a valid Secret name: %s",
+					i, r.OutputsSecretRef.Name, strings.Join(errs, "; "))
+			}
 			if secrets[r.OutputsSecretRef.Name] {
 				return fmt.Errorf("plan: duplicate output secret %q", r.OutputsSecretRef.Name)
 			}
@@ -84,8 +94,12 @@ func Validate(b Body) error {
 		if len(r.Outputs) > 0 && r.OutputsSecretRef == nil {
 			return fmt.Errorf("plan: resource %d has outputs but no outputsSecretRef", i)
 		}
-		for k, expr := range r.Outputs {
+		for _, k := range slices.Sorted(maps.Keys(r.Outputs)) {
 			// Errors never repeat expr: a mistaken literal could be a credential.
+			expr := r.Outputs[k]
+			if !ValidSecretKey(k) {
+				return fmt.Errorf("plan: resource %d output %q is not a valid Secret key", i, k)
+			}
 			m := refPattern.FindStringSubmatch(expr)
 			if m == nil || m[0] != expr {
 				return fmt.Errorf("plan: resource %d output %q is not a single step reference", i, k)
@@ -96,6 +110,17 @@ func Validate(b Body) error {
 		}
 	}
 	return nil
+}
+
+// maxSecretKeyLen is the longest Secret data key the API server accepts.
+const maxSecretKeyLen = 253
+
+var secretKeyPattern = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// ValidSecretKey reports whether k is a valid Secret data key. Plan validation
+// and the gateway's output write share this one definition.
+func ValidSecretKey(k string) bool {
+	return len(k) <= maxSecretKeyLen && k != "." && k != ".." && secretKeyPattern.MatchString(k)
 }
 
 // ErrReference reports a ${steps…} reference that cannot be resolved.

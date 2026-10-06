@@ -54,7 +54,8 @@ var _ = Describe("Intent planning", func() {
 	})
 
 	It("fails when the API server rejects the plan", func() {
-		bad := lastv1alpha1.ManagedResourceSpec{Description: "db", OutputsSecretRef: &lastv1alpha1.LocalRef{Name: ""}}
+		// plan.Validate and Parse pass a teardown command without argv or script; the CRD refuses it.
+		bad := lastv1alpha1.ManagedResourceSpec{Description: "db", Teardown: []lastv1alpha1.Command{{ID: "t1"}}}
 		gw.setScript(key, &script{llm: turns(answer(steps, bad))})
 		createIntent(key, "bad plan")
 

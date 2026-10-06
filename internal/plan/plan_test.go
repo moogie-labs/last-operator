@@ -18,6 +18,11 @@ const outSecret = "out"
 
 const echoStdoutRef = "${steps.echo.stdout}"
 
+const (
+	s1StdoutRef = "${steps.s1.stdout}"
+	literal     = "hunter2" // a mistaken literal output value; errors must never repeat it
+)
+
 func step(id string, argv ...string) lastv1alpha1.Command {
 	return lastv1alpha1.Command{ID: id, Run: lastv1alpha1.CommandRun{Argv: argv}}
 }
@@ -87,20 +92,30 @@ func TestValidate(t *testing.T) {
 		{"duplicate probe", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Probes: []lastv1alpha1.Probe{probe("p")}}, {Probes: []lastv1alpha1.Probe{probe("p")}}}}, `duplicate probe id "p"`},
 		{"outputs without secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
-			{Outputs: map[string]string{"k": "${steps.s1.stdout}"}}}}, "has outputs but no outputsSecretRef"},
+			{Outputs: map[string]string{"k": s1StdoutRef}}}}, "has outputs but no outputsSecretRef"},
 		{"literal output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
-			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "hunter2"}}}}, `output "k" is not a single step reference`},
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": literal}}}}, `output "k" is not a single step reference`},
 		{"unknown step output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "${steps.nope.stdout}"}}}}, `names unknown step "nope"`},
 		{"duplicate output secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}}, {OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}}}}, `duplicate output secret "out"`},
+		{"output key with a space", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"db password": literal}}}}, `output "db password" is not a valid Secret key`},
+		{"output key dot-dot", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"..": s1StdoutRef}}}}, `output ".." is not a valid Secret key`},
+		{"output key too long", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{strings.Repeat("k", 254): s1StdoutRef}}}}, "is not a valid Secret key"},
+		{"secret name with uppercase", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "Web_Outputs"}, Outputs: map[string]string{"k": literal}}}}, `output secret "Web_Outputs" is not a valid Secret name`},
+		{"secret name empty", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: ""}}}}, `output secret "" is not a valid Secret name`},
 	}
 	for _, tc := range cases {
 		err := plan.Validate(tc.body)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: Validate = %v, want %q", tc.name, err, tc.want)
 		}
-		if err != nil && strings.Contains(err.Error(), "hunter2") {
+		if err != nil && strings.Contains(err.Error(), literal) {
 			t.Errorf("%s: the error repeats an output value: %v", tc.name, err)
 		}
 	}
@@ -109,9 +124,25 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("Validate(ok) = %v", err)
 	}
 	withOutputs := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
-		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "${steps.s1.json.a.b}", "s": "${steps.s1.stdout}"}}}}
+		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": "${steps.s1.json.a.b}", "s": s1StdoutRef}}}}
 	if err := plan.Validate(withOutputs); err != nil {
 		t.Fatalf("Validate(withOutputs) = %v", err)
+	}
+	dotted := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web.outputs-1"}, Outputs: map[string]string{"tls.crt": s1StdoutRef, "DB_URL": s1StdoutRef}}}}
+	if err := plan.Validate(dotted); err != nil {
+		t.Fatalf("Validate(dotted) = %v", err)
+	}
+}
+
+func TestValidSecretKey(t *testing.T) {
+	for k, want := range map[string]bool{
+		"a": true, "tls.crt": true, "DB_URL": true, "-x": true, "a.b-c_d": true, strings.Repeat("k", 253): true,
+		"": false, ".": false, "..": false, "db password": false, "a/b": false, "ü": false, strings.Repeat("k", 254): false,
+	} {
+		if got := plan.ValidSecretKey(k); got != want {
+			t.Errorf("ValidSecretKey(%q) = %v, want %v", k, got, want)
+		}
 	}
 }
 

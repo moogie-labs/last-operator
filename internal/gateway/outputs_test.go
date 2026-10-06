@@ -162,7 +162,6 @@ func TestWriteOutputSecretRefusals(t *testing.T) {
 			code    codes.Code
 		}{
 			"missing json key": {map[string]string{"p": "${steps.s1.json.nope}"}, codes.FailedPrecondition},
-			"bad key":          {map[string]string{"pass word": passwordRef}, codes.InvalidArgument},
 		}
 		for name, tc := range cases {
 			env, h := newOutputEnvWith(t, envIntentUID, tc.outputs)
@@ -171,6 +170,21 @@ func TestWriteOutputSecretRefusals(t *testing.T) {
 				t.Errorf("%s: %v (last %s), want %v with policy.denied", name, err, env.last().Type, tc.code)
 			}
 		}
+	})
+	t.Run("a planned output with an invalid Secret key never opens a phase", func(t *testing.T) {
+		env, in := newRunEnv(t, twoSteps(), lastv1alpha1.ManagedResourceSpec{
+			OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outputSecret}, Outputs: map[string]string{"pass word": passwordRef}})
+		_, err := env.begin(in.Status.Plan.Hash)
+		env.wantDenied(err, codes.InvalidArgument)
+	})
+	t.Run("the output write re-checks Secret keys", func(t *testing.T) {
+		// plan.Validate refuses such a plan at BeginPhase; the write keeps its
+		// own check in case an approved body ever bypasses validation.
+		env, h := newOutputEnv(t, envIntentUID)
+		bad := map[string]string{"pass word": passwordRef}
+		env.g.phases.get(envKey).body.Resources[0].Outputs = bad
+		_, err := env.writeOutputs(h, outputMR, bad)
+		env.wantDenied(err, codes.InvalidArgument)
 	})
 }
 
