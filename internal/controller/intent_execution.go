@@ -23,6 +23,9 @@ import (
 const (
 	// stepTimeout bounds one RunCommand call, including the wait for a sandbox slot.
 	stepTimeout = 30 * time.Minute
+	// phaseCallTimeout bounds one BeginPhase, EndPhase or WriteOutputSecret
+	// call, so a stuck gateway never holds a worker.
+	phaseCallTimeout = time.Minute
 	// retries bounds the attempts of one gateway call within a reconcile.
 	retries = 5
 )
@@ -54,8 +57,10 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 	case ReasonPhaseOpen:
 		return r.abandonPhase(ctx, in, "The operator lost track of the running phase")
 	}
-	_, err := r.Gateway.BeginPhase(ctx, &gatewayv1.BeginPhaseRequest{Intent: intentRef(in),
+	bctx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+	_, err := r.Gateway.BeginPhase(bctx, &gatewayv1.BeginPhaseRequest{Intent: intentRef(in),
 		Stage: string(lastv1alpha1.StageCreate), SubjectHash: in.Status.Plan.Hash})
+	cancel()
 	switch {
 	case status.Code(err) == codes.AlreadyExists:
 		return r.abandonPhase(ctx, in, "A phase from an earlier attempt was still open")
@@ -157,7 +162,9 @@ func (r *IntentReconciler) writeOutputs(ctx context.Context, in *lastv1alpha1.In
 		req := &gatewayv1.WriteOutputSecretRequest{Intent: intentRef(in), SubjectHash: in.Status.Plan.Hash,
 			ManagedResource: name, Values: res.Outputs}
 		for attempt := 1; ; attempt++ {
-			_, err := r.Gateway.WriteOutputSecret(ctx, req)
+			wctx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+			_, err := r.Gateway.WriteOutputSecret(wctx, req)
+			cancel()
 			if err == nil {
 				break
 			}
@@ -177,7 +184,9 @@ func (r *IntentReconciler) writeOutputs(ctx context.Context, in *lastv1alpha1.In
 func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent, succeeded bool, reason string) error {
 	req := &gatewayv1.EndPhaseRequest{Intent: intentRef(in), SubjectHash: in.Status.Plan.Hash, Succeeded: succeeded, Reason: reason}
 	for attempt := 1; ; attempt++ {
-		_, err := r.Gateway.EndPhase(ctx, req)
+		ectx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+		_, err := r.Gateway.EndPhase(ectx, req)
+		cancel()
 		if status.Code(err) != codes.Unavailable || attempt == retries {
 			return err
 		}
@@ -209,10 +218,12 @@ func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.In
 	return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")
 }
 
-// finishPhase closes a phase whose steps all succeeded. If the gateway no
-// longer has the phase open, an earlier EndPhase may have succeeded before its
-// result was recorded here, or a gateway restart interrupted the phase:
-// RunProbes reports which plan the gateway last executed.
+// finishPhase closes a phase whose steps all succeeded. If the gateway refuses
+// (FailedPrecondition), an earlier EndPhase may have succeeded before its
+// result was recorded here, a gateway restart may have interrupted the phase,
+// or the gateway may hold the phase open but refuse to let it succeed:
+// RunProbes reports which plan the gateway last executed. Unless it is this
+// plan, the phase is ended as failed, in case it is still open.
 func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	err := r.endPhase(ctx, in, true, "")
 	if status.Code(err) == codes.FailedPrecondition {
@@ -221,8 +232,11 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 			return ctrl.Result{}, perr
 		}
 		if executed != in.Status.Plan.Hash {
-			return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted,
-				"The phase ended before it succeeded ("+describe(err)+"); edit the Intent's spec to plan again")
+			why := "The phase ended before it succeeded (" + describe(err) + ")"
+			if eerr := r.endPhase(ctx, in, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
+				return ctrl.Result{}, eerr // still StepsSucceeded: the next attempt asks again
+			}
+			return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")
 		}
 		err = nil
 	}
@@ -239,7 +253,9 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 // executedPlan returns the hash of the plan the gateway last executed for the
 // Intent, or "" when it has none.
 func (r *IntentReconciler) executedPlan(ctx context.Context, in *lastv1alpha1.Intent) (string, error) {
-	resp, err := r.Gateway.RunProbes(ctx, &gatewayv1.RunProbesRequest{Intent: intentRef(in)})
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	resp, err := r.Gateway.RunProbes(pctx, &gatewayv1.RunProbesRequest{Intent: intentRef(in)})
 	switch {
 	case err == nil:
 		return resp.GetPlanHash(), nil

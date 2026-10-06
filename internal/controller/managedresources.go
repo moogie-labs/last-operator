@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
@@ -22,7 +24,8 @@ func managedResourceName(intent string, i int) string { return fmt.Sprintf("%s-%
 
 // ensureManagedResources creates or updates one ManagedResource per plan
 // resource. Each is controlled by the Intent and names it in spec.intentRef:
-// the gateway requires both before it writes outputs (spec §15).
+// the gateway requires both before it writes outputs (spec §15). A new plan
+// voids what earlier probe runs observed, so each one's probe status is cleared.
 func (r *IntentReconciler) ensureManagedResources(ctx context.Context, in *lastv1alpha1.Intent) error {
 	for i, res := range in.Status.Plan.Resources {
 		mr := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: managedResourceName(in.Name, i), Namespace: in.Namespace}}
@@ -36,23 +39,55 @@ func (r *IntentReconciler) ensureManagedResources(ctx context.Context, in *lastv
 		}); err != nil {
 			return err
 		}
+		if err := r.clearProbeStatus(ctx, client.ObjectKeyFromObject(mr)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// ownedManagedResources lists the ManagedResources the Intent controls.
-func ownedManagedResources(ctx context.Context, c client.Reader, in *lastv1alpha1.Intent) ([]lastv1alpha1.ManagedResource, error) {
-	var list lastv1alpha1.ManagedResourceList
-	if err := c.List(ctx, &list, client.InNamespace(in.Namespace)); err != nil {
-		return nil, err
+// clearProbeStatus removes an earlier plan's probe outcomes from a
+// ManagedResource through the status subresource. It decides from an uncached
+// read: CreateOrUpdate may have returned the informer cache's copy.
+func (r *IntentReconciler) clearProbeStatus(ctx context.Context, key client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		var mr lastv1alpha1.ManagedResource
+		if err := r.Reader.Get(ctx, key, &mr); err != nil {
+			return err
+		}
+		if mr.Status.Observed == nil && mr.Status.LastProbeTime == nil &&
+			meta.FindStatusCondition(mr.Status.Conditions, CondInSync) == nil {
+			return nil
+		}
+		mr.Status.Observed = nil
+		mr.Status.LastProbeTime = nil
+		meta.RemoveStatusCondition(&mr.Status.Conditions, CondInSync)
+		return r.Status().Update(ctx, &mr)
+	})
+}
+
+// planManagedResources returns the ManagedResources of the Intent's current
+// plan that the Intent controls, read through c. A ManagedResource that an
+// earlier plan left behind is not among them: its status says nothing about
+// this plan. One that does not exist yet is skipped.
+func planManagedResources(ctx context.Context, c client.Reader, in *lastv1alpha1.Intent) ([]lastv1alpha1.ManagedResource, error) {
+	if in.Status.Plan == nil {
+		return nil, nil
 	}
-	var owned []lastv1alpha1.ManagedResource
-	for i := range list.Items {
-		if metav1.IsControlledBy(&list.Items[i], in) {
-			owned = append(owned, list.Items[i])
+	var mrs []lastv1alpha1.ManagedResource
+	for i := range in.Status.Plan.Resources {
+		var mr lastv1alpha1.ManagedResource
+		err := c.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: managedResourceName(in.Name, i)}, &mr)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return nil, err
+		case metav1.IsControlledBy(&mr, in):
+			mrs = append(mrs, mr)
 		}
 	}
-	return owned, nil
+	return mrs, nil
 }
 
 // observedProbe is one probe's outcome in ManagedResource.status.observed.
@@ -63,15 +98,17 @@ type observedProbe struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// applyProbeOutcomes records a probe run on the Intent's ManagedResources.
-// Each gets the outcomes of its own probes, matched by probe ID, and an InSync
-// condition. A ManagedResource with no probe in the run is left alone.
-func applyProbeOutcomes(ctx context.Context, c client.Client, in *lastv1alpha1.Intent, outcomes []*gatewayv1.ProbeOutcome, at time.Time) error {
+// applyProbeOutcomes records a probe run on the ManagedResources of the
+// Intent's plan, read uncached through rd and written through c. Each gets the
+// outcomes of its own probes, matched by probe ID, and an InSync condition. A
+// ManagedResource with no probe in the run is left alone.
+func applyProbeOutcomes(ctx context.Context, c client.Client, rd client.Reader, in *lastv1alpha1.Intent,
+	outcomes []*gatewayv1.ProbeOutcome, at time.Time) error {
 	byID := make(map[string]*gatewayv1.ProbeOutcome, len(outcomes))
 	for _, o := range outcomes {
 		byID[o.GetId()] = o
 	}
-	mrs, err := ownedManagedResources(ctx, c, in)
+	mrs, err := planManagedResources(ctx, rd, in)
 	if err != nil {
 		return err
 	}
@@ -98,7 +135,7 @@ func applyProbeOutcomes(ctx context.Context, c client.Client, in *lastv1alpha1.I
 		key := client.ObjectKeyFromObject(&mrs[i])
 		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			var mr lastv1alpha1.ManagedResource
-			if err := c.Get(ctx, key, &mr); err != nil {
+			if err := rd.Get(ctx, key, &mr); err != nil {
 				return err
 			}
 			mr.Status.Observed = &runtime.RawExtension{Raw: raw}

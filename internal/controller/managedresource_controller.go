@@ -32,6 +32,9 @@ type ManagedResourceReconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
 	Gateway gatewayv1.GatewayServiceClient
+	// Reader reads ManagedResources uncached, so a probe run is never recorded
+	// on, or scheduled from, a stale or missing copy.
+	Reader client.Reader
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 
@@ -97,7 +100,7 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			result = "failed"
 		}
 		probeRuns.WithLabelValues(in.Namespace, in.Name, result).Inc()
-		if err := applyProbeOutcomes(ctx, r.Client, &in, resp.GetOutcomes(), now); err != nil {
+		if err := applyProbeOutcomes(ctx, r.Client, r.Reader, &in, resp.GetOutcomes(), now); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -151,10 +154,11 @@ func (r *ManagedResourceReconciler) interval(ctx context.Context, ns string) (ti
 	return policy.ProbeInterval(op, policies.Items), nil
 }
 
-// lastProbe returns the newest probe time among the Intent's ManagedResources,
-// or the zero time when none was probed. After a restart, the schedule resumes from it.
+// lastProbe returns the newest probe time among the ManagedResources of the
+// Intent's plan, or the zero time when none was probed. After a restart, the
+// schedule resumes from it.
 func (r *ManagedResourceReconciler) lastProbe(ctx context.Context, in *lastv1alpha1.Intent) (time.Time, error) {
-	mrs, err := ownedManagedResources(ctx, r.Client, in)
+	mrs, err := planManagedResources(ctx, r.Reader, in)
 	if err != nil {
 		return time.Time{}, err
 	}

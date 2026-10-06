@@ -30,7 +30,8 @@ var _ = Describe("ManagedResource probe schedule", func() {
 
 	BeforeEach(func() {
 		key = types.NamespacedName{Namespace: newNamespace(), Name: intentName}
-		r = &ManagedResourceReconciler{Client: k8sClient, Scheme: scheme.Scheme, Gateway: gw, Now: func() time.Time { return now }}
+		r = &ManagedResourceReconciler{Client: k8sClient, Reader: k8sClient, Scheme: scheme.Scheme, Gateway: gw,
+			Now: func() time.Time { return now }}
 		resource := lastv1alpha1.ManagedResourceSpec{Probes: []lastv1alpha1.Probe{{ID: "p1",
 			Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}, Assert: "true"}}}
 		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{argvStep("s1", "true")}, resource))})

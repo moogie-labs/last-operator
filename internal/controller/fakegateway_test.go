@@ -279,6 +279,13 @@ func (f *fakeGateway) setOpen(key types.NamespacedName, subject string) {
 	f.open[key] = subject
 }
 
+// openPhase returns the subject of the Intent's open phase, or "" when none is open.
+func (f *fakeGateway) openPhase(key types.NamespacedName) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open[key]
+}
+
 // setExecuted makes the gateway's last executed plan for the Intent subject.
 func (f *fakeGateway) setExecuted(key types.NamespacedName, subject string) {
 	f.mu.Lock()

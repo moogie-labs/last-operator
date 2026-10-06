@@ -194,6 +194,7 @@ func main() {
 	}
 	if err := (&controller.ManagedResourceReconciler{
 		Client:  mgr.GetClient(),
+		Reader:  mgr.GetAPIReader(),
 		Scheme:  mgr.GetScheme(),
 		Gateway: gw,
 	}).SetupWithManager(mgr); err != nil {

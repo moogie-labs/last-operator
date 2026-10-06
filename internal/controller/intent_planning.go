@@ -14,6 +14,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // planTimeout bounds one planning conversation.
@@ -66,13 +67,37 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 			"Waiting for an IntentApproval of plan "+p.Hash+" for stage Create")
 	})
 	if apierrors.IsInvalid(err) {
-		// update left the rejected plan on in; start the Failed write from the stored status
-		if gerr := r.Get(ctx, client.ObjectKeyFromObject(in), in); gerr != nil {
+		// update left the rejected plan on in; start the Failed write from the
+		// stored status, read uncached into a fresh object so nothing stale survives
+		var fresh lastv1alpha1.Intent
+		if gerr := r.Reader.Get(ctx, client.ObjectKeyFromObject(in), &fresh); gerr != nil {
 			return ctrl.Result{}, gerr
 		}
+		*in = fresh
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, "The API server rejected the plan: "+err.Error())
 	}
-	return ctrl.Result{}, err
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if storedPlanChanged(in, p.Hash) {
+		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, msgPlanChanged)
+	}
+	return ctrl.Result{}, nil
+}
+
+// msgPlanChanged explains a plan the API server did not store as written.
+const msgPlanChanged = "The API server changed the plan when storing it; are the CRDs current?"
+
+// storedPlanChanged reports whether in holds the plan hashed as hash, but the
+// stored plan no longer hashes to it. An API server with a stale CRD prunes
+// unknown fields silently, and the gateway would later refuse the plan with a
+// hash mismatch.
+func storedPlanChanged(in *lastv1alpha1.Intent, hash string) bool {
+	if in.Status.Plan == nil || in.Status.Plan.Hash != hash {
+		return false // the write was skipped; the spec changed while planning
+	}
+	got, err := plan.Hash(plan.FromStatus(in.Status.Plan))
+	return err != nil || got != hash
 }
 
 // awaitApproval waits for an IntentApproval of the current plan. The gateway
@@ -100,7 +125,13 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 	if !approved {
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}
+	gen, subject := in.Generation, in.Status.Plan.Hash
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		// A conflict retry re-reads the Intent: run only the plan that was approved.
+		if in.Generation != gen || in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval ||
+			in.Status.Plan == nil || in.Status.Plan.Hash != subject {
+			return
+		}
 		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+in.Status.Plan.Hash)
 	})
 }

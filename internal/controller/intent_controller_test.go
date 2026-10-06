@@ -1,16 +1,31 @@
 package controller
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
+
+// directReconciler shares the suite's gateway and reads uncached, but writes
+// through c. Specs call its phase handlers with an object of their choosing,
+// as a reconcile racing the suite's controller would.
+func directReconciler(c client.Client) *IntentReconciler {
+	return &IntentReconciler{Client: c, Scheme: scheme.Scheme, Gateway: gw, Reader: k8sClient,
+		Planner: &agent.Planner{LLM: gw}, Recorder: events.NewFakeRecorder(100), RetryDelay: 10 * time.Millisecond}
+}
 
 var _ = Describe("Intent planning", func() {
 	var key types.NamespacedName
@@ -100,6 +115,64 @@ var _ = Describe("Intent planning", func() {
 		editRequest(key, "fixed")
 		Eventually(planHash(key)).Should(Equal(hashOf(steps)))
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+	})
+
+	It("does not run an approval granted before a spec edit", func() {
+		other := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "pods")}
+		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+			if strings.Contains(requestText(req), "v2") {
+				return answer(other), nil
+			}
+			return answer(steps), nil
+		}})
+		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		stale := getIntent(key)
+
+		editRequest(key, "list namespaces v2")
+		Eventually(planHash(key)).Should(Equal(hashOf(other)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+
+		// A reconcile that read the Intent before the edit sees an approval of
+		// its plan; its status write conflicts and is retried on the new spec.
+		approve := stale.Status.Plan.Hash
+		createApproval(key, lastv1alpha1.StageCreate, approve, lastv1alpha1.DecisionApprove)
+		_, err := directReconciler(k8sClient).awaitApproval(ctx, stale)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(planHash(key)()).To(Equal(hashOf(other)))
+		Expect(gw.calls(key)).NotTo(ContainElement(beginPhase))
+	})
+
+	It("fails when the API server changes the plan it stores", func() {
+		resource := lastv1alpha1.ManagedResourceSpec{Description: "namespaces", OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
+			Outputs: map[string]string{"name": "${steps.s1.stdout}"}}
+		createIntent(key, "list namespaces") // no script yet: the suite's controller fails it and leaves it alone
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		gw.setScript(key, &script{llm: turns(answer(steps, resource))})
+
+		// An API server with a stale CRD prunes the fields it does not know, such as outputs.
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+		Expect(err).NotTo(HaveOccurred())
+		pruning := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if in, ok := obj.(*lastv1alpha1.Intent); ok && in.Status.Plan != nil {
+					for i := range in.Status.Plan.Resources {
+						in.Status.Plan.Resources[i].Outputs = nil
+					}
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}})
+		in := getIntent(key)
+		in.Status.Phase = lastv1alpha1.PhasePlanning
+		_, err = directReconciler(pruning).plan(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(Equal("The API server changed the plan when storing it; are the CRDs current?"))
 	})
 
 	It("fails when the gateway has no LLM answer for the Intent", func() {

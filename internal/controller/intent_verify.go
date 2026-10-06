@@ -22,7 +22,9 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "The Intent has no plan to verify")
 	}
 	start := time.Now()
-	resp, err := r.Gateway.RunProbes(ctx, &gatewayv1.RunProbesRequest{Intent: intentRef(in)})
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	resp, err := r.Gateway.RunProbes(pctx, &gatewayv1.RunProbesRequest{Intent: intentRef(in)})
+	cancel()
 	switch {
 	case status.Code(err) == codes.Aborted:
 		return ctrl.Result{RequeueAfter: r.RetryDelay}, nil // a probe run is in flight; never overlap
@@ -34,7 +36,7 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed,
 			fmt.Sprintf("The gateway probed plan %s, not %s", resp.GetPlanHash(), in.Status.Plan.Hash))
 	}
-	if err := applyProbeOutcomes(ctx, r.Client, in, resp.GetOutcomes(), start); err != nil {
+	if err := applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), start); err != nil {
 		return ctrl.Result{}, err
 	}
 	if failed := failedProbes(resp.GetOutcomes()); len(failed) > 0 {
@@ -45,10 +47,11 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 	})
 }
 
-// followProbes moves a Ready Intent to Drifted when any of its ManagedResources
-// is out of sync, and back when all are in sync again. Remediation arrives in M5.
+// followProbes moves a Ready Intent to Drifted when any ManagedResource of its
+// plan is out of sync, and back when all are in sync again. ManagedResources an
+// earlier plan left behind do not count. Remediation arrives in M5.
 func (r *IntentReconciler) followProbes(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
-	mrs, err := ownedManagedResources(ctx, r.Client, in)
+	mrs, err := planManagedResources(ctx, r.Reader, in)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

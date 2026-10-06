@@ -124,12 +124,26 @@ var _ = Describe("Intent execution", func() {
 		Expect(gw.calls(key)[:3]).To(Equal([]string{callLLM, endSucceeded, runProbes}))
 	})
 
+	It("ends the phase as failed when the gateway refuses to let it succeed", func() {
+		refused := status.Error(codes.FailedPrecondition, "the phase cannot succeed")
+		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1})), stdout: stdout, endErrs: []error{refused}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonInterrupted))
+		Expect(readyCondition(key).Message).To(ContainSubstring("the phase cannot succeed"))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, endSucceeded, runProbes, endFailed}))
+		Expect(gw.openPhase(key)).To(BeEmpty())
+	})
+
 	It("fails when the gateway does not know the phase it was finishing", func() {
 		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1}))})
 		executingAt(key, ReasonStepsSucceeded)
 
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonInterrupted))
-		Expect(gw.calls(key)).To(Equal([]string{callLLM, endSucceeded, runProbes}))
+		// The EndPhase as failed is refused (no open phase) and changes nothing.
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, endSucceeded, runProbes, endFailed}))
+		Expect(gw.openPhase(key)).To(BeEmpty())
 	})
 })
