@@ -82,6 +82,13 @@ func (g *Gateway) llmProvider(ctx context.Context, lp *lastv1alpha1.LLMProvider)
 		}
 		return llm.NewAnthropic(llm.AnthropicConfig{APIKey: key, Model: lp.Spec.Model, Effort: string(lp.Spec.Effort),
 			BaseURL: lp.Spec.Endpoint}), nil
+	case lastv1alpha1.LLMOpenAI, lastv1alpha1.LLMOpenAICompatible:
+		key, err := g.llmAPIKey(ctx, lp)
+		if err != nil {
+			return nil, err
+		}
+		return llm.NewOpenAI(llm.OpenAIConfig{APIKey: key, Model: lp.Spec.Model, Endpoint: lp.Spec.Endpoint,
+			Compatible: lp.Spec.Type == lastv1alpha1.LLMOpenAICompatible}), nil
 	default:
 		return nil, status.Errorf(codes.Unimplemented, "LLM provider type %q is not supported yet", lp.Spec.Type)
 	}

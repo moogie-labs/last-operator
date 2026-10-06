@@ -25,7 +25,10 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
-const roleUser = "user"
+const (
+	roleUser  = "user"
+	keySecret = "key"
+)
 
 func llmConfig(providerType lastv1alpha1.LLMProviderType) (*lastv1alpha1.OperatorConfig, *lastv1alpha1.LLMProvider) {
 	op := allowAll()
@@ -34,7 +37,7 @@ func llmConfig(providerType lastv1alpha1.LLMProviderType) (*lastv1alpha1.Operato
 	if providerType == lastv1alpha1.LLMScripted {
 		lp.Spec.Scripted = &lastv1alpha1.ScriptedLLM{ConfigMapRef: lastv1alpha1.LocalRef{Name: "llm-script"}}
 	} else {
-		lp.Spec.SecretRef = &lastv1alpha1.LocalRef{Name: "key"}
+		lp.Spec.SecretRef = &lastv1alpha1.LocalRef{Name: keySecret}
 	}
 	return op, lp
 }
@@ -201,7 +204,7 @@ func anthropicEnv(t *testing.T, storedKey string) *testEnv {
 	env := newTestEnv(t, intentWithPlan(t, twoSteps()), op, lp)
 	if storedKey != "" {
 		if _, err := env.kube.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "key", Namespace: ns},
+			ObjectMeta: metav1.ObjectMeta{Name: keySecret, Namespace: ns},
 			Data:       map[string][]byte{llmAPIKeyField: []byte(storedKey)},
 		}, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -233,5 +236,27 @@ func TestCallLLMAnthropicKeyProblemsAreFailedPreconditionWithoutTheKey(t *testin
 		if strings.Contains(string(e.Payload), "sk-wrong-value") {
 			t.Fatalf("entry %s carries the API key", e.Type)
 		}
+	}
+}
+func TestCallLLMOpenAICompatibleUsesItsEndpointAndKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-local" || r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"local answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	t.Cleanup(srv.Close)
+	op, lp := llmConfig(lastv1alpha1.LLMOpenAICompatible)
+	lp.Spec.Endpoint = srv.URL + "/v1"
+	env := newTestEnv(t, intentWithPlan(t, twoSteps()), op, lp)
+	if _, err := env.kube.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: keySecret, Namespace: ns}, Data: map[string][]byte{llmAPIKeyField: []byte("sk-local")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
+	if err != nil || resp.GetContent() != "local answer" {
+		t.Fatalf("CallLLM = %v, %v", resp, err)
 	}
 }
