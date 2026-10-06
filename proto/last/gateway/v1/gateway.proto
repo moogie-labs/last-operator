@@ -149,6 +149,9 @@ message CallLLMRequest {
   IntentRef intent = 1;
   repeated Message messages = 2;
   int32 max_tokens = 3;
+  // JSON Schema the answer must match. Adapters that support structured output
+  // enforce it; the caller validates the answer either way. Optional.
+  bytes response_schema = 4;
 }
 
 // CallLLMResponse is the model's reply.
@@ -156,4 +159,6 @@ message CallLLMResponse {
   string content = 1;
   int32 input_tokens = 2;
   int32 output_tokens = 3;
+  // Sequence number of this call's llm.request audit entry.
+  uint64 request_seq = 4;
 }

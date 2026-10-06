@@ -2,9 +2,15 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -12,6 +18,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gateway/llm"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
@@ -90,5 +97,78 @@ func TestCallLLMRefusals(t *testing.T) {
 	noLLM := newTestEnv(t, intentWithPlan(t, twoSteps()), allowAll())
 	if _, err := noLLM.callLLM(user); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("no provider configured = %v", err)
+	}
+}
+
+const answerSchema = `{"type":"object","properties":{"kind":{"type":"string"}},"required":["kind"],"additionalProperties":false}`
+
+func TestCallLLMAuditsTheSchemaDigestAndReturnsTheRequestSeq(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	resp, err := env.g.callLLM(env.ctx, &gatewayv1.CallLLMRequest{Intent: ref(), MaxTokens: 1024, ResponseSchema: []byte(answerSchema),
+		Messages: []*gatewayv1.Message{{Role: roleUser, Content: "run nginx"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := env.entries()
+	req := es[len(es)-2]
+	if req.Type != audit.TypeLLMRequest || resp.GetRequestSeq() != req.Seq {
+		t.Fatalf("request_seq = %d, want the llm.request seq %d", resp.GetRequestSeq(), req.Seq)
+	}
+	var p llmRequestPayload
+	if err := json.Unmarshal(req.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(answerSchema))
+	if p.SchemaSHA256 != hex.EncodeToString(sum[:]) || p.SchemaBytes != len(answerSchema) {
+		t.Fatalf("llm.request schema digest = %q (%d bytes)", p.SchemaSHA256, p.SchemaBytes)
+	}
+	if strings.Contains(string(req.Payload), `"additionalProperties"`) {
+		t.Fatal("the full schema was written to the audit log")
+	}
+}
+
+func TestCallLLMRefusesABadSchemaBeforeAuditing(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	before := len(env.entries())
+	for name, schema := range map[string][]byte{
+		"not json": []byte("{"),
+		"too big":  []byte(`"` + strings.Repeat("x", maxSchemaBytes) + `"`),
+	} {
+		_, err := env.g.callLLM(env.ctx, &gatewayv1.CallLLMRequest{Intent: ref(), ResponseSchema: schema,
+			Messages: []*gatewayv1.Message{{Role: roleUser, Content: "x"}}})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: %v, want InvalidArgument", name, err)
+		}
+	}
+	if len(env.entries()) != before {
+		t.Fatal("a refused request was audited")
+	}
+}
+
+func TestLLMStatusMapsAdapterErrors(t *testing.T) {
+	cases := map[error]codes.Code{
+		fmt.Errorf("%w (HTTP 401)", llm.ErrAuth):          codes.FailedPrecondition,
+		fmt.Errorf("%w (HTTP 404)", llm.ErrModel):         codes.FailedPrecondition,
+		fmt.Errorf("%w (category cyber)", llm.ErrRefused): codes.FailedPrecondition,
+		llm.ErrNoScript:        codes.FailedPrecondition,
+		llm.ErrScriptExhausted: codes.FailedPrecondition,
+		fmt.Errorf("%w: bad schema", llm.ErrBadRequest): codes.InvalidArgument,
+		fmt.Errorf("%w (HTTP 529)", llm.ErrTransient):   codes.Unavailable,
+		errors.New("connection reset"):                  codes.Unavailable,
+	}
+	for err, want := range cases {
+		if got := status.Code(llmStatus(err)); got != want {
+			t.Errorf("llmStatus(%v) = %v, want %v", err, got, want)
+		}
+	}
+}
+
+func TestCallLLMCountsCallsAndTokens(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	if _, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(env.g.metrics.llmCalls.WithLabelValues("fixture", "m", "ok")); got != 1 {
+		t.Fatalf("llm calls = %v, want 1", got)
 	}
 }

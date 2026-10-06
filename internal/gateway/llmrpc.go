@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	"google.golang.org/grpc/codes"
@@ -20,15 +23,23 @@ type llmRequestPayload struct {
 	Model     string        `json:"model"`
 	Messages  []llm.Message `json:"messages"`
 	MaxTokens int           `json:"maxTokens,omitempty"`
+	// The response schema is the same on every turn; the log keeps its digest only.
+	SchemaSHA256 string `json:"schemaSha256,omitempty"`
+	SchemaBytes  int    `json:"schemaBytes,omitempty"`
 }
 
 type llmResponsePayload struct {
-	RequestSeq   uint64 `json:"requestSeq"`
-	Content      string `json:"content"`
-	InputTokens  int    `json:"inputTokens"`
-	OutputTokens int    `json:"outputTokens"`
-	Error        string `json:"error,omitempty"`
+	RequestSeq          uint64 `json:"requestSeq"`
+	Content             string `json:"content"`
+	InputTokens         int    `json:"inputTokens"`
+	OutputTokens        int    `json:"outputTokens"`
+	CacheReadTokens     int    `json:"cacheReadTokens,omitempty"`
+	CacheCreationTokens int    `json:"cacheCreationTokens,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
+
+// maxSchemaBytes bounds CallLLMRequest.response_schema.
+const maxSchemaBytes = 64 << 10
 
 var llmRoles = map[string]bool{"system": true, "user": true, "assistant": true}
 
@@ -64,6 +75,13 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 		}
 		msgs = append(msgs, llm.Message{Role: m.GetRole(), Content: m.GetContent()})
 	}
+	schema := req.GetResponseSchema()
+	if len(schema) > maxSchemaBytes {
+		return nil, status.Errorf(codes.InvalidArgument, "response_schema is %d bytes; the limit is %d", len(schema), maxSchemaBytes)
+	}
+	if len(schema) > 0 && !json.Valid(schema) {
+		return nil, status.Error(codes.InvalidArgument, "response_schema is not JSON")
+	}
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
 		return nil, notFoundOr(err, "intent")
@@ -87,31 +105,55 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 		return nil, err
 	}
 	actor := CallerFrom(ctx)
-	lreq := llm.Request{Intent: key, Messages: msgs, MaxTokens: int(req.GetMaxTokens())}
+	lreq := llm.Request{Intent: key, Messages: msgs, MaxTokens: int(req.GetMaxTokens()), Schema: schema}
+	reqPayload := llmRequestPayload{Provider: lp.Name, Model: lp.Spec.Model, Messages: msgs, MaxTokens: lreq.MaxTokens}
+	if len(schema) > 0 {
+		sum := sha256.Sum256(schema)
+		reqPayload.SchemaSHA256, reqPayload.SchemaBytes = hex.EncodeToString(sum[:]), len(schema)
+	}
 	var resp llm.Response
+	var requestSeq uint64
 	err = w.Do(ctx,
-		audit.Draft{Type: audit.TypeLLMRequest, Actor: actor, Intent: key,
-			Payload: llmRequestPayload{Provider: lp.Name, Model: lp.Spec.Model, Messages: msgs, MaxTokens: lreq.MaxTokens}},
+		audit.Draft{Type: audit.TypeLLMRequest, Actor: actor, Intent: key, Payload: reqPayload},
 		func(ctx context.Context) (any, error) {
 			r, err := provider.Complete(ctx, lreq)
 			resp = r
 			return r, err
 		},
 		func(before audit.Entry, _ any, actionErr error) audit.Draft {
-			p := llmResponsePayload{RequestSeq: before.Seq, Content: resp.Content, InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
+			requestSeq = before.Seq
+			p := llmResponsePayload{RequestSeq: before.Seq, Content: resp.Content, InputTokens: resp.InputTokens,
+				OutputTokens: resp.OutputTokens, CacheReadTokens: resp.CacheReadTokens, CacheCreationTokens: resp.CacheCreationTokens}
 			if actionErr != nil {
 				p.Error = actionErr.Error()
 			}
 			return audit.Draft{Type: audit.TypeLLMResponse, Actor: actor, Intent: key, Payload: p}
 		})
+	if !errors.Is(err, audit.ErrAuditUnavailable) {
+		g.metrics.ObserveLLM(lp.Name, lp.Spec.Model, resp, err)
+	}
 	switch {
 	case err == nil:
-		return &gatewayv1.CallLLMResponse{Content: resp.Content, InputTokens: int32(resp.InputTokens), OutputTokens: int32(resp.OutputTokens)}, nil //nolint:gosec // token counts fit
+		return &gatewayv1.CallLLMResponse{Content: resp.Content, InputTokens: int32(resp.InputTokens), //nolint:gosec // token counts fit
+			OutputTokens: int32(resp.OutputTokens), RequestSeq: requestSeq}, nil //nolint:gosec // token counts fit
 	case errors.Is(err, audit.ErrAuditUnavailable):
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
-	case errors.Is(err, llm.ErrNoScript), errors.Is(err, llm.ErrScriptExhausted):
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
 	default:
-		return nil, status.Errorf(codes.Unavailable, "LLM call failed: %v", err)
+		return nil, llmStatus(err)
+	}
+}
+
+// llmStatus maps an adapter error to a gRPC status the operator classifies:
+// errors retrying cannot fix are FailedPrecondition or InvalidArgument;
+// everything else is Unavailable and retried with backoff.
+func llmStatus(err error) error {
+	switch {
+	case errors.Is(err, llm.ErrNoScript), errors.Is(err, llm.ErrScriptExhausted),
+		errors.Is(err, llm.ErrAuth), errors.Is(err, llm.ErrModel), errors.Is(err, llm.ErrRefused):
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	case errors.Is(err, llm.ErrBadRequest):
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	default:
+		return status.Errorf(codes.Unavailable, "LLM call failed: %v", err)
 	}
 }

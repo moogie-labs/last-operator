@@ -967,12 +967,15 @@ func (x *Message) GetContent() string {
 
 // CallLLMRequest is a provider-neutral LLM request.
 type CallLLMRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Intent        *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
-	Messages      []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
-	MaxTokens     int32                  `protobuf:"varint,3,opt,name=max_tokens,json=maxTokens,proto3" json:"max_tokens,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Intent    *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	Messages  []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	MaxTokens int32                  `protobuf:"varint,3,opt,name=max_tokens,json=maxTokens,proto3" json:"max_tokens,omitempty"`
+	// JSON Schema the answer must match. Adapters that support structured output
+	// enforce it; the caller validates the answer either way. Optional.
+	ResponseSchema []byte `protobuf:"bytes,4,opt,name=response_schema,json=responseSchema,proto3" json:"response_schema,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CallLLMRequest) Reset() {
@@ -1026,12 +1029,21 @@ func (x *CallLLMRequest) GetMaxTokens() int32 {
 	return 0
 }
 
+func (x *CallLLMRequest) GetResponseSchema() []byte {
+	if x != nil {
+		return x.ResponseSchema
+	}
+	return nil
+}
+
 // CallLLMResponse is the model's reply.
 type CallLLMResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Content       string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
-	InputTokens   int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens  int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Content      string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	InputTokens  int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Sequence number of this call's llm.request audit entry.
+	RequestSeq    uint64 `protobuf:"varint,4,opt,name=request_seq,json=requestSeq,proto3" json:"request_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1083,6 +1095,13 @@ func (x *CallLLMResponse) GetInputTokens() int32 {
 func (x *CallLLMResponse) GetOutputTokens() int32 {
 	if x != nil {
 		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *CallLLMResponse) GetRequestSeq() uint64 {
+	if x != nil {
+		return x.RequestSeq
 	}
 	return 0
 }
@@ -1154,16 +1173,19 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"secretName\"7\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent\"\x99\x01\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\"\xc2\x01\n" +
 	"\x0eCallLLMRequest\x122\n" +
 	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x124\n" +
 	"\bmessages\x18\x02 \x03(\v2\x18.last.gateway.v1.MessageR\bmessages\x12\x1d\n" +
 	"\n" +
-	"max_tokens\x18\x03 \x01(\x05R\tmaxTokens\"s\n" +
+	"max_tokens\x18\x03 \x01(\x05R\tmaxTokens\x12'\n" +
+	"\x0fresponse_schema\x18\x04 \x01(\fR\x0eresponseSchema\"\x94\x01\n" +
 	"\x0fCallLLMResponse\x12\x18\n" +
 	"\acontent\x18\x01 \x01(\tR\acontent\x12!\n" +
 	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens2\xe2\x04\n" +
+	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens\x12\x1f\n" +
+	"\vrequest_seq\x18\x04 \x01(\x04R\n" +
+	"requestSeq2\xe2\x04\n" +
 	"\x0eGatewayService\x12C\n" +
 	"\x04Ping\x12\x1c.last.gateway.v1.PingRequest\x1a\x1d.last.gateway.v1.PingResponse\x12U\n" +
 	"\n" +

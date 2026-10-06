@@ -1007,12 +1007,16 @@ an `imagePullSecret`.
 
 ## 12. LLM providers
 
-`CallLLM` takes a provider-neutral request (messages, the plan and
-command schemas, max tokens). Adapters in the gateway translate it for
-each provider: `anthropic`, `openai`, and `openai-compatible` (for
-local and self-hosted models). Every request and response is audited
-(`llm.request` / `llm.response`), so the audit log also serves as the
-complete transcript store.
+`CallLLM` takes a provider-neutral request: messages, max tokens, and an
+optional `response_schema` (a JSON Schema the answer must match). Adapters
+in the gateway translate it for each provider: `anthropic`, `openai`, and
+`openai-compatible` (for local and self-hosted models). Adapters that
+support structured output enforce the schema; the operator validates every
+answer either way. Every request and response is audited
+(`llm.request` / `llm.response`; the schema is recorded as a SHA-256 digest
+and size), so the audit log also serves as the complete transcript store.
+`CallLLM` returns the `llm.request` entry's sequence number, which anchors
+conversation reload (§7).
 
 ## 13. Credentials
 
