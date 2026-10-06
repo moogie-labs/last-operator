@@ -28,3 +28,33 @@ Rulings and deferred items from `docs/superpowers/plans/2026-10-05-m2c-operator-
 - **Resources without probes.** A plan with resources but no probes reaches Ready unverified. Consider requiring at least one probe per resource, as a correction turn (M3).
 - **Step stderr in status.** Failed steps' stderr tails (512 B) reach Intent status, Events and logs. Sandbox redaction covers only Provider credentials, on a best-effort basis. Revisit before real secrets flow through steps.
 - **Probe metric cardinality.** The ManagedResource controller's probe metric label series (namespace, Intent) are never deleted when an Intent goes away. Fix before the first release.
+
+## From the M2c per-task and final reviews
+
+Findings the reviews deferred. None affects the trust boundary: no step runs twice, success needs the gateway's confirmation, and outputs are written exactly as approved.
+
+- **Probe scheduler.**
+  - A run's due time and metric are committed before its outcomes are written. A failed status write drops that run's result until the next interval.
+  - The grid is anchored at each run's actual start, so requeue latency drifts it slightly. Late runs are not counted as skipped.
+  - A 15m probe timeout with 4 workers can delay other Intents' probes without counting a skip. Revisit with real sandbox load.
+- **Gateway calls.**
+  - The 1m BeginPhase deadline makes "the gateway opened the phase but the client timed out" (then AlreadyExists, then ExecutionInterrupted) easier to reach with a slow audit backend.
+  - `finishPhase`'s extra `EndPhase(false)` may add one `policy.denied` audit entry per no-open-phase recovery.
+  - `writeOutputs` treats Unavailable and DeadlineExceeded as a non-replan phase failure. The binding table says "reconcile error", but the phase cannot be resumed after its steps ran.
+  - The `RunProbes` fallback that confirms an executed plan maps every refusal to "not executed". It can falsely fail a confirmed run, but never falsely succeed.
+- **Plan checks.**
+  - `agent.Parse` and `plan.Validate` do not check `teardown` commands for the argv-xor-script rule; only the CRD does. The "API server rejects the plan" spec relies on that gap. Close it in M5, when teardown runs.
+  - `agent.Parse` reports one problem per correction turn, within a 3-turn budget.
+- **RBAC and chart.**
+  - The leader-election Role grants `delete` on Leases, which is not needed without `ReleaseOnCancel`.
+  - The helm-lint greps are line-shape dependent. `TestOperatorRBAC` is the authoritative check.
+- **Tests.** Coverage the reviews asked for:
+  - Aborted retries on RunCommand and WriteOutputSecret.
+  - A terminal BeginPhase refusal.
+  - EndPhase exhausting its retries.
+  - A ManagedResource owned by another object.
+  - A transient CallLLM error.
+  - Event emission.
+  - The scheduler's hasProbes, error-counter and plan-mismatch branches.
+  - The e2e asserting the ManagedResource's `intentRef` and the output Secret's ownership.
+  - The e2e is not covered by `make lint`, which skips the `e2e` build tag.
