@@ -45,6 +45,7 @@ type Gateway struct {
 	state   *StateStore
 	phases  phaseTable
 	probing sync.Map // intent key -> in-flight probe run
+	index   auditIndex
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -216,7 +217,7 @@ func (g *Gateway) lead(parent context.Context) error {
 	if seq, _, ok := w.Head(); ok {
 		g.metrics.ObserveWrite(audit.Entry{Seq: seq, Type: audit.TypeGatewayStart})
 	}
-	w.SetOnWrite(g.metrics.ObserveWrite)
+	g.observeWrites(w)
 	// The hook runs under the writer's mutex: only record the metric and cancel here.
 	w.SetOnFailure(func(err error) {
 		g.metrics.ObserveFailure(err)
@@ -234,6 +235,8 @@ func (g *Gateway) lead(parent context.Context) error {
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
+	flush := time.NewTicker(indexFlushInterval)
+	defer flush.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -241,6 +244,8 @@ func (g *Gateway) lead(parent context.Context) error {
 				return nil // stepping down or shutting down
 			}
 			return context.Cause(ctx)
+		case <-flush.C:
+			g.flushIndexes(ctx)
 		case <-ticker.C:
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)

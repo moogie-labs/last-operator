@@ -15,6 +15,7 @@ type Metrics struct {
 
 	llmCalls  *prometheus.CounterVec
 	llmTokens *prometheus.CounterVec
+	queries   prometheus.Counter
 }
 
 func NewMetrics() *Metrics {
@@ -35,8 +36,11 @@ func NewMetrics() *Metrics {
 		llmTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "last_llm_tokens_total", Help: "LLM tokens by provider, model and kind (input, output, cache_read, cache_creation).",
 		}, []string{"provider", "model", "kind"}),
+		queries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "last_audit_queries_total", Help: "QueryAudit calls.",
+		}),
 	}
-	m.registry.MustRegister(m.writes, m.failures, m.seq, m.llmCalls, m.llmTokens)
+	m.registry.MustRegister(m.writes, m.failures, m.seq, m.llmCalls, m.llmTokens, m.queries)
 	return m
 }
 
@@ -46,6 +50,9 @@ func (m *Metrics) ObserveWrite(e audit.Entry) {
 }
 
 func (m *Metrics) ObserveFailure(error) { m.failures.Inc() }
+
+// ObserveQuery counts one QueryAudit call.
+func (m *Metrics) ObserveQuery() { m.queries.Inc() }
 
 // ObserveLLM counts one provider call and the tokens it used (spec §16).
 func (m *Metrics) ObserveLLM(provider, model string, r llm.Response, err error) {

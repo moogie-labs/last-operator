@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -129,5 +130,22 @@ func TestWasUsedSeesBothLists(t *testing.T) {
 	r.MarkUsed(lastv1alpha1.StageDiscovery, "sha256:q")
 	if !r.WasUsed("sha256:p") || !r.WasUsed("sha256:q") || r.WasUsed("sha256:r") {
 		t.Fatalf("record = %+v", r)
+	}
+}
+
+func TestRecordIndexKeepsTheNewestEntriesAndRecordsTheFloor(t *testing.T) {
+	var r IntentRecord
+	var es []IndexEntry
+	for seq := uint64(1); seq <= maxIndexEntries+5; seq++ {
+		es = append(es, IndexEntry{Seq: seq, Type: audit.TypeLLMRequest})
+	}
+	r.AddIndex(es)
+	r.AddIndex([]IndexEntry{{Seq: 100, Type: audit.TypeLLMRequest}}) // a duplicate is ignored
+	if len(r.Index) != maxIndexEntries || r.Index[0].Seq != 6 || r.IndexFloor != 5 {
+		t.Fatalf("index has %d entries from seq %d, floor %d", len(r.Index), r.Index[0].Seq, r.IndexFloor)
+	}
+	r.DropIndex(10)
+	if len(r.Index) != maxIndexEntries-10 || r.IndexFloor != 15 {
+		t.Fatalf("after DropIndex: %d entries, floor %d", len(r.Index), r.IndexFloor)
 	}
 }

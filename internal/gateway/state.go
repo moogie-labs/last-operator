@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -28,6 +30,18 @@ const (
 	maxUsedDiscoverySubjects = 200
 )
 
+// maxIndexEntries bounds an Intent's QueryAudit index (M3 spec §3.5).
+const maxIndexEntries = 200
+
+// IndexEntry is one audit entry QueryAudit can serve for the Intent.
+type IndexEntry struct {
+	Seq  uint64 `json:"seq"`
+	Type string `json:"type"`
+}
+
+// errRecordTooLarge means a record would not fit its ConfigMap.
+var errRecordTooLarge = errors.New("gateway: intent record too large")
+
 // MaxRecordBytes bounds an encoded IntentRecord; a ConfigMap holds at most 1 MiB.
 const MaxRecordBytes = 900 << 10
 
@@ -42,6 +56,11 @@ type IntentRecord struct {
 	Used     []string      `json:"used,omitempty"`
 	// UsedDiscovery holds Discovery subjects, kept apart from Used.
 	UsedDiscovery []string `json:"usedDiscovery,omitempty"`
+	// Index lists the Intent's recent indexed audit entries, oldest first.
+	Index []IndexEntry `json:"index,omitempty"`
+	// IndexFloor is the highest seq ever dropped from Index; QueryAudit reports
+	// truncation for cursors below it.
+	IndexFloor uint64 `json:"indexFloor,omitempty"`
 }
 
 // OpenPhase is a phase.begin without a phase.end yet.
@@ -95,7 +114,7 @@ func encodeRecord(r IntentRecord) ([]byte, error) {
 	}
 	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	if len(body) > MaxRecordBytes {
-		return nil, fmt.Errorf("gateway: intent record is %d bytes; the limit is %d (too large)", len(body), MaxRecordBytes)
+		return nil, fmt.Errorf("%w: %d bytes; the limit is %d", errRecordTooLarge, len(body), MaxRecordBytes)
 	}
 	return body, nil
 }
@@ -169,4 +188,25 @@ func (s *StateStore) Save(ctx context.Context, r *LoadedRecord) error {
 	}
 	r.cm = updated
 	return nil
+}
+
+// AddIndex merges entries into the index, keeping it sorted, unique by seq,
+// and at most maxIndexEntries long.
+func (r *IntentRecord) AddIndex(es []IndexEntry) {
+	r.Index = append(r.Index, es...)
+	slices.SortFunc(r.Index, func(a, b IndexEntry) int { return cmp.Compare(a.Seq, b.Seq) })
+	r.Index = slices.CompactFunc(r.Index, func(a, b IndexEntry) bool { return a.Seq == b.Seq })
+	if n := len(r.Index) - maxIndexEntries; n > 0 {
+		r.DropIndex(n)
+	}
+}
+
+// DropIndex drops the n oldest index entries and raises IndexFloor past them.
+func (r *IntentRecord) DropIndex(n int) {
+	n = min(n, len(r.Index))
+	if n == 0 {
+		return
+	}
+	r.IndexFloor = max(r.IndexFloor, r.Index[n-1].Seq)
+	r.Index = slices.Clone(r.Index[n:])
 }

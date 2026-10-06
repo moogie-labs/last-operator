@@ -93,6 +93,7 @@ func (e *testEnv) newGateway() *Gateway {
 		e.t.Fatal(err)
 	}
 	g.writer.Store(w)
+	g.observeWrites(w)
 	return g
 }
 

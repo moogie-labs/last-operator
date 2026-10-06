@@ -59,6 +59,10 @@ func (s *rpcServer) WriteOutputSecret(ctx context.Context, req *gatewayv1.WriteO
 	return s.g.writeOutputSecret(ctx, req)
 }
 
+func (s *rpcServer) QueryAudit(ctx context.Context, req *gatewayv1.QueryAuditRequest) (*gatewayv1.QueryAuditResponse, error) {
+	return s.g.queryAudit(ctx, req)
+}
+
 func (s *rpcServer) CallLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*gatewayv1.CallLLMResponse, error) {
 	return s.g.callLLM(ctx, req)
 }

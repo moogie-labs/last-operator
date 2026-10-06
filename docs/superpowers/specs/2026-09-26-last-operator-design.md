@@ -199,7 +199,7 @@ the authenticated caller.
 | `RunCommand` | Run one command (or script) in a sandbox pod within an open phase |
 | `WriteOutputSecret` | Write provisioned outputs to a Secret in the Intent's namespace |
 | `BeginPhase` / `EndPhase` | Open/close a phase context (intent, stage, subject hash) that later calls are checked against |
-| `QueryAudit` | Read-only, filtered queries over the audit log (used for rule suggestions) |
+| `QueryAudit` | Read-only. Returns one Intent's verified audit entries (`llm.*`, `command.*`, `phase.*`), oldest first, from a bounded per-Intent index the gateway keeps in its record. Used for conversation reload (§7) and, later, rule suggestions |
 | `RunProbes` | Run the probes of the Intent's last executed plan (§10), from the gateway's own record |
 
 **Responsibilities:**

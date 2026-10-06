@@ -21,6 +21,9 @@ service GatewayService {
   rpc WriteOutputSecret(WriteOutputSecretRequest) returns (WriteOutputSecretResponse);
   // CallLLM sends a conversation to the configured LLM provider (spec §12).
   rpc CallLLM(CallLLMRequest) returns (CallLLMResponse);
+
+  // QueryAudit returns verified audit entries for one Intent, oldest first (M3 spec §3.5).
+  rpc QueryAudit(QueryAuditRequest) returns (QueryAuditResponse);
 }
 
 // PingRequest has no fields.
@@ -161,4 +164,36 @@ message CallLLMResponse {
   int32 output_tokens = 3;
   // Sequence number of this call's llm.request audit entry.
   uint64 request_seq = 4;
+}
+
+// QueryAuditRequest selects one Intent's indexed audit entries.
+message QueryAuditRequest {
+  IntentRef intent = 1;
+  // Entry types to return, e.g. "llm.request"; empty means every indexed type.
+  repeated string types = 2;
+  // Return only entries with seq > after_seq.
+  uint64 after_seq = 3;
+  // At most this many entries: 1..200; 0 means 50.
+  int32 limit = 4;
+}
+
+// AuditEntry is one verified audit entry.
+message AuditEntry {
+  uint64 seq = 1;
+  string type = 2;
+  // RFC 3339 timestamp.
+  string ts = 3;
+  string stage = 4;
+  string subject_hash = 5;
+  // The entry's payload, canonical JSON.
+  bytes payload = 6;
+}
+
+// QueryAuditResponse lists entries oldest first.
+message QueryAuditResponse {
+  repeated AuditEntry entries = 1;
+  // Older matching entries fell out of the index.
+  bool truncated = 2;
+  // More matching entries follow; ask again with after_seq set to the last seq.
+  bool more = 3;
 }

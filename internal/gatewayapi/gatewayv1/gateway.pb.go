@@ -1106,6 +1106,228 @@ func (x *CallLLMResponse) GetRequestSeq() uint64 {
 	return 0
 }
 
+// QueryAuditRequest selects one Intent's indexed audit entries.
+type QueryAuditRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Intent *IntentRef             `protobuf:"bytes,1,opt,name=intent,proto3" json:"intent,omitempty"`
+	// Entry types to return, e.g. "llm.request"; empty means every indexed type.
+	Types []string `protobuf:"bytes,2,rep,name=types,proto3" json:"types,omitempty"`
+	// Return only entries with seq > after_seq.
+	AfterSeq uint64 `protobuf:"varint,3,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
+	// At most this many entries: 1..200; 0 means 50.
+	Limit         int32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryAuditRequest) Reset() {
+	*x = QueryAuditRequest{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryAuditRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryAuditRequest) ProtoMessage() {}
+
+func (x *QueryAuditRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryAuditRequest.ProtoReflect.Descriptor instead.
+func (*QueryAuditRequest) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *QueryAuditRequest) GetIntent() *IntentRef {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
+func (x *QueryAuditRequest) GetTypes() []string {
+	if x != nil {
+		return x.Types
+	}
+	return nil
+}
+
+func (x *QueryAuditRequest) GetAfterSeq() uint64 {
+	if x != nil {
+		return x.AfterSeq
+	}
+	return 0
+}
+
+func (x *QueryAuditRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// AuditEntry is one verified audit entry.
+type AuditEntry struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Seq   uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Type  string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	// RFC 3339 timestamp.
+	Ts          string `protobuf:"bytes,3,opt,name=ts,proto3" json:"ts,omitempty"`
+	Stage       string `protobuf:"bytes,4,opt,name=stage,proto3" json:"stage,omitempty"`
+	SubjectHash string `protobuf:"bytes,5,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
+	// The entry's payload, canonical JSON.
+	Payload       []byte `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEntry) Reset() {
+	*x = AuditEntry{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEntry) ProtoMessage() {}
+
+func (x *AuditEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
+func (*AuditEntry) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *AuditEntry) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *AuditEntry) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetTs() string {
+	if x != nil {
+		return x.Ts
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetStage() string {
+	if x != nil {
+		return x.Stage
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetSubjectHash() string {
+	if x != nil {
+		return x.SubjectHash
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+// QueryAuditResponse lists entries oldest first.
+type QueryAuditResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Entries []*AuditEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// Older matching entries fell out of the index.
+	Truncated bool `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	// More matching entries follow; ask again with after_seq set to the last seq.
+	More          bool `protobuf:"varint,3,opt,name=more,proto3" json:"more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryAuditResponse) Reset() {
+	*x = QueryAuditResponse{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryAuditResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryAuditResponse) ProtoMessage() {}
+
+func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryAuditResponse.ProtoReflect.Descriptor instead.
+func (*QueryAuditResponse) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *QueryAuditResponse) GetEntries() []*AuditEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *QueryAuditResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *QueryAuditResponse) GetMore() bool {
+	if x != nil {
+		return x.More
+	}
+	return false
+}
+
 var File_last_gateway_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_last_gateway_v1_gateway_proto_rawDesc = "" +
@@ -1185,7 +1407,24 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens\x12\x1f\n" +
 	"\vrequest_seq\x18\x04 \x01(\x04R\n" +
-	"requestSeq2\xe2\x04\n" +
+	"requestSeq\"\x90\x01\n" +
+	"\x11QueryAuditRequest\x122\n" +
+	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12\x14\n" +
+	"\x05types\x18\x02 \x03(\tR\x05types\x12\x1b\n" +
+	"\tafter_seq\x18\x03 \x01(\x04R\bafterSeq\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\x95\x01\n" +
+	"\n" +
+	"AuditEntry\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x0e\n" +
+	"\x02ts\x18\x03 \x01(\tR\x02ts\x12\x14\n" +
+	"\x05stage\x18\x04 \x01(\tR\x05stage\x12!\n" +
+	"\fsubject_hash\x18\x05 \x01(\tR\vsubjectHash\x12\x18\n" +
+	"\apayload\x18\x06 \x01(\fR\apayload\"}\n" +
+	"\x12QueryAuditResponse\x125\n" +
+	"\aentries\x18\x01 \x03(\v2\x1b.last.gateway.v1.AuditEntryR\aentries\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\x12\x12\n" +
+	"\x04more\x18\x03 \x01(\bR\x04more2\xb9\x05\n" +
 	"\x0eGatewayService\x12C\n" +
 	"\x04Ping\x12\x1c.last.gateway.v1.PingRequest\x1a\x1d.last.gateway.v1.PingResponse\x12U\n" +
 	"\n" +
@@ -1195,7 +1434,9 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"RunCommand\x12\".last.gateway.v1.RunCommandRequest\x1a#.last.gateway.v1.RunCommandResponse\x12R\n" +
 	"\tRunProbes\x12!.last.gateway.v1.RunProbesRequest\x1a\".last.gateway.v1.RunProbesResponse\x12j\n" +
 	"\x11WriteOutputSecret\x12).last.gateway.v1.WriteOutputSecretRequest\x1a*.last.gateway.v1.WriteOutputSecretResponse\x12L\n" +
-	"\aCallLLM\x12\x1f.last.gateway.v1.CallLLMRequest\x1a .last.gateway.v1.CallLLMResponseBNZLgithub.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1b\x06proto3"
+	"\aCallLLM\x12\x1f.last.gateway.v1.CallLLMRequest\x1a .last.gateway.v1.CallLLMResponse\x12U\n" +
+	"\n" +
+	"QueryAudit\x12\".last.gateway.v1.QueryAuditRequest\x1a#.last.gateway.v1.QueryAuditResponseBNZLgithub.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1;gatewayv1b\x06proto3"
 
 var (
 	file_last_gateway_v1_gateway_proto_rawDescOnce sync.Once
@@ -1209,7 +1450,7 @@ func file_last_gateway_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_last_gateway_v1_gateway_proto_rawDescData
 }
 
-var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_last_gateway_v1_gateway_proto_goTypes = []any{
 	(*PingRequest)(nil),               // 0: last.gateway.v1.PingRequest
 	(*PingResponse)(nil),              // 1: last.gateway.v1.PingResponse
@@ -1229,7 +1470,10 @@ var file_last_gateway_v1_gateway_proto_goTypes = []any{
 	(*Message)(nil),                   // 15: last.gateway.v1.Message
 	(*CallLLMRequest)(nil),            // 16: last.gateway.v1.CallLLMRequest
 	(*CallLLMResponse)(nil),           // 17: last.gateway.v1.CallLLMResponse
-	nil,                               // 18: last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
+	(*QueryAuditRequest)(nil),         // 18: last.gateway.v1.QueryAuditRequest
+	(*AuditEntry)(nil),                // 19: last.gateway.v1.AuditEntry
+	(*QueryAuditResponse)(nil),        // 20: last.gateway.v1.QueryAuditResponse
+	nil,                               // 21: last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
 }
 var file_last_gateway_v1_gateway_proto_depIdxs = []int32{
 	2,  // 0: last.gateway.v1.BeginPhaseRequest.intent:type_name -> last.gateway.v1.IntentRef
@@ -1240,28 +1484,32 @@ var file_last_gateway_v1_gateway_proto_depIdxs = []int32{
 	8,  // 5: last.gateway.v1.ProbeOutcome.result:type_name -> last.gateway.v1.CommandResult
 	11, // 6: last.gateway.v1.RunProbesResponse.outcomes:type_name -> last.gateway.v1.ProbeOutcome
 	2,  // 7: last.gateway.v1.WriteOutputSecretRequest.intent:type_name -> last.gateway.v1.IntentRef
-	18, // 8: last.gateway.v1.WriteOutputSecretRequest.values:type_name -> last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
+	21, // 8: last.gateway.v1.WriteOutputSecretRequest.values:type_name -> last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
 	2,  // 9: last.gateway.v1.CallLLMRequest.intent:type_name -> last.gateway.v1.IntentRef
 	15, // 10: last.gateway.v1.CallLLMRequest.messages:type_name -> last.gateway.v1.Message
-	0,  // 11: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
-	3,  // 12: last.gateway.v1.GatewayService.BeginPhase:input_type -> last.gateway.v1.BeginPhaseRequest
-	5,  // 13: last.gateway.v1.GatewayService.EndPhase:input_type -> last.gateway.v1.EndPhaseRequest
-	7,  // 14: last.gateway.v1.GatewayService.RunCommand:input_type -> last.gateway.v1.RunCommandRequest
-	10, // 15: last.gateway.v1.GatewayService.RunProbes:input_type -> last.gateway.v1.RunProbesRequest
-	13, // 16: last.gateway.v1.GatewayService.WriteOutputSecret:input_type -> last.gateway.v1.WriteOutputSecretRequest
-	16, // 17: last.gateway.v1.GatewayService.CallLLM:input_type -> last.gateway.v1.CallLLMRequest
-	1,  // 18: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
-	4,  // 19: last.gateway.v1.GatewayService.BeginPhase:output_type -> last.gateway.v1.BeginPhaseResponse
-	6,  // 20: last.gateway.v1.GatewayService.EndPhase:output_type -> last.gateway.v1.EndPhaseResponse
-	9,  // 21: last.gateway.v1.GatewayService.RunCommand:output_type -> last.gateway.v1.RunCommandResponse
-	12, // 22: last.gateway.v1.GatewayService.RunProbes:output_type -> last.gateway.v1.RunProbesResponse
-	14, // 23: last.gateway.v1.GatewayService.WriteOutputSecret:output_type -> last.gateway.v1.WriteOutputSecretResponse
-	17, // 24: last.gateway.v1.GatewayService.CallLLM:output_type -> last.gateway.v1.CallLLMResponse
-	18, // [18:25] is the sub-list for method output_type
-	11, // [11:18] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	2,  // 11: last.gateway.v1.QueryAuditRequest.intent:type_name -> last.gateway.v1.IntentRef
+	19, // 12: last.gateway.v1.QueryAuditResponse.entries:type_name -> last.gateway.v1.AuditEntry
+	0,  // 13: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
+	3,  // 14: last.gateway.v1.GatewayService.BeginPhase:input_type -> last.gateway.v1.BeginPhaseRequest
+	5,  // 15: last.gateway.v1.GatewayService.EndPhase:input_type -> last.gateway.v1.EndPhaseRequest
+	7,  // 16: last.gateway.v1.GatewayService.RunCommand:input_type -> last.gateway.v1.RunCommandRequest
+	10, // 17: last.gateway.v1.GatewayService.RunProbes:input_type -> last.gateway.v1.RunProbesRequest
+	13, // 18: last.gateway.v1.GatewayService.WriteOutputSecret:input_type -> last.gateway.v1.WriteOutputSecretRequest
+	16, // 19: last.gateway.v1.GatewayService.CallLLM:input_type -> last.gateway.v1.CallLLMRequest
+	18, // 20: last.gateway.v1.GatewayService.QueryAudit:input_type -> last.gateway.v1.QueryAuditRequest
+	1,  // 21: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
+	4,  // 22: last.gateway.v1.GatewayService.BeginPhase:output_type -> last.gateway.v1.BeginPhaseResponse
+	6,  // 23: last.gateway.v1.GatewayService.EndPhase:output_type -> last.gateway.v1.EndPhaseResponse
+	9,  // 24: last.gateway.v1.GatewayService.RunCommand:output_type -> last.gateway.v1.RunCommandResponse
+	12, // 25: last.gateway.v1.GatewayService.RunProbes:output_type -> last.gateway.v1.RunProbesResponse
+	14, // 26: last.gateway.v1.GatewayService.WriteOutputSecret:output_type -> last.gateway.v1.WriteOutputSecretResponse
+	17, // 27: last.gateway.v1.GatewayService.CallLLM:output_type -> last.gateway.v1.CallLLMResponse
+	20, // 28: last.gateway.v1.GatewayService.QueryAudit:output_type -> last.gateway.v1.QueryAuditResponse
+	21, // [21:29] is the sub-list for method output_type
+	13, // [13:21] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_last_gateway_v1_gateway_proto_init() }
@@ -1275,7 +1523,7 @@ func file_last_gateway_v1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_last_gateway_v1_gateway_proto_rawDesc), len(file_last_gateway_v1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

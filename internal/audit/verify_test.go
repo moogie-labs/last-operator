@@ -412,3 +412,24 @@ func TestVerifyFromSeqMustBeACheckpoint(t *testing.T) {
 		t.Fatalf("from the checkpoint: %+v", rep)
 	}
 }
+
+func TestDecodeEntryAcceptsOnlyCanonicalVersion1Entries(t *testing.T) {
+	e := audit.Entry{V: audit.EntryVersion, Seq: 3, ChainID: "c", PrevHash: audit.GenesisHash, TS: "2026-10-05T00:00:00.000000000Z", Type: audit.TypeLLMRequest, Actor: "op"}
+	body, err := audit.Canonical(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := audit.DecodeEntry(body)
+	if err != nil || got.Seq != 3 || got.Type != audit.TypeLLMRequest {
+		t.Fatalf("DecodeEntry = %+v, %v", got, err)
+	}
+	for name, bad := range map[string][]byte{
+		"not canonical": append([]byte(" "), body...),
+		"unknown field": []byte(`{"extra":1,` + string(body[1:])),
+		"not json":      []byte("{"),
+	} {
+		if _, err := audit.DecodeEntry(bad); err == nil {
+			t.Errorf("%s: DecodeEntry accepted it", name)
+		}
+	}
+}

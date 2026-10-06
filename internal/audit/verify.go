@@ -182,6 +182,16 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 	return rep, nil
 }
 
+// DecodeEntry strictly decodes a stored entry body: it must be exactly the RFC
+// 8785 canonical JSON of a version-1 entry with no unknown fields.
+func DecodeEntry(body []byte) (Entry, error) {
+	e, problem := decodeEntry(body)
+	if problem != "" {
+		return Entry{}, fmt.Errorf("audit: %s", problem)
+	}
+	return e, nil
+}
+
 // decodeEntry strictly decodes a stored entry body. It returns a non-empty problem
 // unless the body is exactly the RFC 8785 canonical encoding of a version-1 entry
 // with no unknown fields and no trailing data.
