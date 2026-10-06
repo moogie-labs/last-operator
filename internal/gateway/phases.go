@@ -261,6 +261,40 @@ func verifyPlan(d denial, intent *lastv1alpha1.Intent, subject string) (plan.Bod
 	return body, canonical, nil
 }
 
+// verifyDiscovery checks the Intent's pending discovery command against the
+// subject and returns it as a one-step plan. Every refusal is audited through d.
+func verifyDiscovery(d denial, intent *lastv1alpha1.Intent, subject string) (plan.Body, []byte, error) {
+	pc := intent.Status.PendingCommand
+	if pc == nil {
+		return plan.Body{}, nil, d.deny(codes.FailedPrecondition, "intent has no pending discovery command")
+	}
+	if pc.Command.ID != plan.DiscoveryStepID {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "a discovery command's id must be %q", plan.DiscoveryStepID)
+	}
+	if pc.Nonce == "" {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "the pending discovery command has no nonce")
+	}
+	hash, size, err := plan.DiscoveryHash(pc.Command, pc.Nonce)
+	if err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "discovery command cannot be encoded: %v", err)
+	}
+	if size > plan.MaxPendingCommandBytes {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "discovery command is %d bytes; the limit is %d", size, plan.MaxPendingCommandBytes)
+	}
+	if hash != subject || pc.Hash != subject {
+		return plan.Body{}, nil, d.deny(codes.PermissionDenied, "pending command hash %s does not match the subject", hash)
+	}
+	body := plan.Body{Steps: []lastv1alpha1.Command{pc.Command}}
+	if err := plan.Validate(body); err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "%v", err)
+	}
+	canonical, err := plan.Canonical(body)
+	if err != nil {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "discovery command cannot be encoded: %v", err)
+	}
+	return body, canonical, nil
+}
+
 // recordFits checks that the record still fits its ConfigMap once the plan is
 // recorded as Executed, or EndPhase could not save it after the steps ran.
 func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, canonical []byte) error {
@@ -290,18 +324,24 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	defer unlock()
 	actor := CallerFrom(ctx)
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, stage: string(stage), subject: subject, rpc: "BeginPhase"}
-	if stage != lastv1alpha1.StageCreate {
-		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create phases only", stage)
+	if stage != lastv1alpha1.StageCreate && stage != lastv1alpha1.StageDiscovery {
+		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create and Discovery phases only", stage)
 	}
 
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
 		return nil, notFoundOr(err, "intent")
 	}
-	if intent.Status.Plan == nil {
-		return nil, d.deny(codes.FailedPrecondition, "intent has no plan")
+	var body plan.Body
+	var canonical []byte
+	if stage == lastv1alpha1.StageDiscovery {
+		body, canonical, err = verifyDiscovery(d, &intent, subject)
+	} else {
+		if intent.Status.Plan == nil {
+			return nil, d.deny(codes.FailedPrecondition, "intent has no plan")
+		}
+		body, canonical, err = verifyPlan(d, &intent, subject)
 	}
-	body, canonical, err := verifyPlan(d, &intent, subject)
 	if err != nil {
 		return nil, err
 	}
@@ -321,8 +361,10 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if slices.Contains(rec.Used, subject) {
 		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
 	}
-	if err := recordFits(rec, stage, subject, canonical); err != nil {
-		return nil, d.deny(codes.InvalidArgument, "plan too large to record: %v", err)
+	if stage == lastv1alpha1.StageCreate {
+		if err := recordFits(rec, stage, subject, canonical); err != nil {
+			return nil, d.deny(codes.InvalidArgument, "plan too large to record: %v", err)
+		}
 	}
 	eff, err := g.effectivePolicy(ctx, ns)
 	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
@@ -450,7 +492,9 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		p.endSeq, p.outcome, p.closed = end.Seq, want, true
 	}
 	rec.Open = nil
-	if p.outcome == outcomeSucceeded {
+	// A Discovery phase ran one inspection command; probes and later stages keep
+	// following the last executed Create plan.
+	if p.outcome == outcomeSucceeded && p.stage != lastv1alpha1.StageDiscovery {
 		canonical, err := plan.Canonical(p.body)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)

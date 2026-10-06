@@ -618,6 +618,16 @@ each call, the gateway:
 6. Writes the `command.start` audit entry, runs the sandbox (§11), and
    writes `command.result`.
 
+**Discovery commands** are one-step phases (stage `Discovery`). The subject
+is `status.pendingCommand.hash`, the SHA-256 of the canonical JSON of
+`{command, nonce}`. The operator picks a fresh nonce for every request, and
+the gateway records each subject as used, so an approval is good for
+exactly one run, even of an identical command. The gateway checks that the
+hash matches the pending command and its nonce, that the command's step ID
+is `discovery`, and that it is at most 64 KiB. A Discovery phase never
+becomes the executed plan: probes and later stages keep following the last
+executed Create plan.
+
 Any mismatch produces a `policy.denied` audit entry and an error to the
 operator. If a step fails, the Intent returns to **Planning** with the
 failure as context. The new plan has a new hash and must be authorized

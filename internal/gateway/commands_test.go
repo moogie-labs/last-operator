@@ -78,14 +78,13 @@ func kubectlJSON(c runnerapi.Command) runnerapi.Result {
 	return runnerapi.Result{Stdout: "ok\n"}
 }
 
-// newRunEnv is an approved intent plus provider "cluster": an env-secret Provider
-// whose Secret lives in last-gateway (probes in Task 10 use it).
-func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) (*testEnv, *lastv1alpha1.Intent) {
+// newProviderEnv is an env with provider "cluster" (and its credential Secret),
+// a policy allowing it, and objs. Sandboxed commands answer like kubectl.
+func newProviderEnv(t *testing.T, objs ...client.Object) *testEnv {
 	t.Helper()
-	in := intentWithPlan(t, steps, resources...)
 	provider := &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider}, Spec: lastv1alpha1.ProviderSpec{
 		Type: lastv1alpha1.ProviderEnvSecret, SecretRef: &lastv1alpha1.LocalRef{Name: "cluster-creds"}, Env: map[string]string{"CLUSTER_TOKEN": "token"}}}
-	env := newTestEnv(t, in, allowAll(), provider, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
+	env := newTestEnv(t, append([]client.Object{allowAll(), provider}, objs...)...)
 	if _, err := env.kube.CoreV1().Secrets("last-gateway").Create(env.ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "cluster-creds", Namespace: "last-gateway"},
 		Data:       map[string][]byte{"token": []byte("probe-token-value")},
@@ -93,7 +92,13 @@ func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1al
 		t.Fatal(err)
 	}
 	env.result = kubectlJSON
-	return env, in
+	return env
+}
+
+func newRunEnv(t *testing.T, steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) (*testEnv, *lastv1alpha1.Intent) {
+	t.Helper()
+	in := intentWithPlan(t, steps, resources...)
+	return newProviderEnv(t, in, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)), in
 }
 
 func TestRunCommandRunsTheResolvedPlanAndEndsThePhase(t *testing.T) {
