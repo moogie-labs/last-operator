@@ -91,8 +91,9 @@ func verifyAuditChain(t *testing.T) {
 }
 
 // operatorCan asks the API server whether the operator's ServiceAccount may do
-// something. Any answer other than a clean "yes" (exit 0) or "no" (exit 1) fails
-// the test, so a broken kubectl never reads as a denial.
+// something. Any answer other than a clean "yes" (exit 0) or a "no" (exit 1,
+// optionally followed by " - <reason>" from the authorizer) fails the test, so
+// a broken kubectl never reads as a denial.
 func operatorCan(t *testing.T, args ...string) bool {
 	t.Helper()
 	cmdArgs := append([]string{"auth", "can-i", "--as", "system:serviceaccount:last-system:last-operator"}, args...)
@@ -102,7 +103,7 @@ func operatorCan(t *testing.T, args ...string) bool {
 	switch {
 	case err == nil && answer == "yes":
 		return true
-	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && answer == "no":
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && (answer == "no" || strings.HasPrefix(answer, "no - ")):
 		return false
 	default:
 		t.Fatalf("kubectl %s: %v\n%s", strings.Join(cmdArgs, " "), err, out)

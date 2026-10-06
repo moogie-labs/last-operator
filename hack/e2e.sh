@@ -41,7 +41,9 @@ helm upgrade --install last charts/last-operator -n last-system --create-namespa
   --set sandbox.image="$REGISTRY/last-sandbox-base:$TAG" \
   --wait --wait-for-jobs --timeout 10m
 # A rebuilt image under the same tag is only picked up by new pods.
+kubectl rollout restart -n last-gateway deploy/last-gateway
 kubectl rollout restart -n last-system deploy/last-operator
+kubectl rollout status -n last-gateway deploy/last-gateway --timeout 5m
 kubectl rollout status -n last-system deploy/last-operator --timeout 5m
 
 go test -tags e2e ./test/e2e/ -count=1 -v -timeout 30m

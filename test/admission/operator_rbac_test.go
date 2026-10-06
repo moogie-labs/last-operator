@@ -108,6 +108,8 @@ func TestOperatorRBAC(t *testing.T) {
 		attr("", "last-sandbox", "pods", "exec", "create"),
 		attr("", "", "users", "", "impersonate"),
 		attr("", "", "serviceaccounts", "", "impersonate"),
+		attr("", "", "serviceaccounts", "token", "create"),
+		attr("", "team-x", "serviceaccounts", "token", "create"),
 		attr("", "last-gateway", "serviceaccounts", "token", "create"),
 		attr("networking.k8s.io", "last-sandbox", "networkpolicies", "", "create"),
 		attr(last, "", "intents", "", "create"),
