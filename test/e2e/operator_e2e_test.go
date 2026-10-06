@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -89,11 +90,24 @@ func verifyAuditChain(t *testing.T) {
 	}
 }
 
-// operatorCan asks the API server whether the operator's ServiceAccount may do something.
+// operatorCan asks the API server whether the operator's ServiceAccount may do
+// something. Any answer other than a clean "yes" (exit 0) or "no" (exit 1) fails
+// the test, so a broken kubectl never reads as a denial.
 func operatorCan(t *testing.T, args ...string) bool {
 	t.Helper()
-	out, _ := exec.Command("kubectl", append([]string{"auth", "can-i", "--as", "system:serviceaccount:last-system:last-operator"}, args...)...).Output()
-	return strings.TrimSpace(string(out)) == "yes"
+	cmdArgs := append([]string{"auth", "can-i", "--as", "system:serviceaccount:last-system:last-operator"}, args...)
+	out, err := exec.Command("kubectl", cmdArgs...).CombinedOutput()
+	answer := strings.TrimSpace(string(out))
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil && answer == "yes":
+		return true
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && answer == "no":
+		return false
+	default:
+		t.Fatalf("kubectl %s: %v\n%s", strings.Join(cmdArgs, " "), err, out)
+		return false
+	}
 }
 
 // TestOperatorWebServer is M2's done-criterion (spec §20): a scripted-LLM web
@@ -304,6 +318,10 @@ spec:
 	})
 
 	// The operator stayed within its RBAC: it cannot touch Secrets, sandbox pods, or approvals.
+	// The positive control proves the checks below can answer "yes" at all.
+	if !operatorCan(t, "get", "intents.last.moogie-labs.com", "-n", ns) {
+		t.Fatalf("the operator cannot get Intents in %s; the RBAC checks below would be vacuous", ns)
+	}
 	for _, args := range [][]string{
 		{"get", "secrets", "-n", ns},
 		{"list", "pods", "-n", "last-sandbox"},

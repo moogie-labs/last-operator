@@ -20,11 +20,16 @@ done
 docker image inspect "$NGINX_IMAGE" >/dev/null 2>&1 || docker pull "$NGINX_IMAGE"
 # `kind load docker-image` fails for a pulled multi-platform image on Docker's
 # containerd image store: the saved index names platforms that were never
-# pulled. Load an archive of the node's platform only.
+# pulled. Load an archive of the node's platform only. Docker before 28 has no
+# `save --platform` (and no such store by default), so fall back there.
 NGINX_TAR="$(mktemp)"
 trap 'rm -f "$NGINX_TAR"' EXIT
-docker save --platform "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" -o "$NGINX_TAR" "$NGINX_IMAGE"
-kind load image-archive --name "$CLUSTER" "$NGINX_TAR"
+if docker save --platform "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" -o "$NGINX_TAR" "$NGINX_IMAGE"; then
+  kind load image-archive --name "$CLUSTER" "$NGINX_TAR"
+else
+  echo "docker save --platform failed; falling back to kind load docker-image" >&2
+  kind load docker-image --name "$CLUSTER" "$NGINX_IMAGE"
+fi
 
 make helm-crds
 # Helm installs crds/ only on first install and never upgrades them; apply them
