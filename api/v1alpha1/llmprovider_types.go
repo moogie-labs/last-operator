@@ -17,6 +17,10 @@ const (
 	LLMScripted LLMProviderType = "scripted"
 )
 
+// LLMEffort is how much reasoning effort a model spends on each answer.
+// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
+type LLMEffort string
+
 // ScriptedLLM points at a ConfigMap in last-gateway. Each key is an Intent
 // ("<namespace>.<name>") and each value a JSON array of response strings; the
 // n-th response answers a conversation that already holds n assistant messages.
@@ -32,13 +36,18 @@ type LLMProviderSpec struct {
 	Type LLMProviderType `json:"type"`
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
+	// Endpoint is the API base URL: required for openai-compatible; optional for openai and anthropic (a proxy).
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
-	// SecretRef names a Secret in last-gateway holding the API key.
+	// SecretRef names a Secret in last-gateway holding the API key under the key "apiKey".
 	// +optional
 	SecretRef *LocalRef `json:"secretRef,omitempty"`
 	// +optional
 	Scripted *ScriptedLLM `json:"scripted,omitempty"`
+	// Effort is the model's reasoning effort, for adapters that support it
+	// (anthropic). Empty means high: planning is intelligence-sensitive.
+	// +optional
+	Effort LLMEffort `json:"effort,omitempty"`
 }
 
 // +kubebuilder:object:root=true

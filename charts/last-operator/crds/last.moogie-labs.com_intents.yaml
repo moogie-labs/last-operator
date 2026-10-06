@@ -168,6 +168,11 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              observedRequestHash:
+                description: |-
+                  ObservedRequestHash is the SHA-256 of spec.request for the current planning
+                  session; answers to clarifying questions do not start a new session.
+                type: string
               pendingCommand:
                 description: PendingCommand is a discovery command awaiting approval.
                 properties:
@@ -255,6 +260,11 @@ spec:
                     - argv
                     type: object
                   hash:
+                    type: string
+                  nonce:
+                    description: |-
+                      Nonce makes this request its own approval subject: Hash is the SHA-256 of
+                      the canonical JSON of {command, nonce}, so an approval is single-use.
                     type: string
                   reason:
                     type: string
@@ -588,6 +598,12 @@ spec:
                 - hash
                 - steps
                 type: object
+              planningSessionSeq:
+                description: |-
+                  PlanningSessionSeq is the audit sequence number of the current planning
+                  session's first llm.request; conversation reload reads from there.
+                format: int64
+                type: integer
               questions:
                 items:
                   description: Question is a clarifying question from the agent.

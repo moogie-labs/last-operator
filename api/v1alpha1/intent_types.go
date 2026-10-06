@@ -61,6 +61,10 @@ type Generalization struct {
 type PendingCommand struct {
 	Hash    string  `json:"hash"`
 	Command Command `json:"command"`
+	// Nonce makes this request its own approval subject: Hash is the SHA-256 of
+	// the canonical JSON of {command, nonce}, so an approval is single-use.
+	// +optional
+	Nonce string `json:"nonce,omitempty"`
 	// +optional
 	Reason string `json:"reason,omitempty"`
 	// +optional
@@ -89,6 +93,14 @@ type IntentStatus struct {
 	Stage Stage `json:"stage,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// ObservedRequestHash is the SHA-256 of spec.request for the current planning
+	// session; answers to clarifying questions do not start a new session.
+	// +optional
+	ObservedRequestHash string `json:"observedRequestHash,omitempty"`
+	// PlanningSessionSeq is the audit sequence number of the current planning
+	// session's first llm.request; conversation reload reads from there.
+	// +optional
+	PlanningSessionSeq int64 `json:"planningSessionSeq,omitempty"`
 	// +optional
 	Questions []Question `json:"questions,omitempty"`
 	// +optional

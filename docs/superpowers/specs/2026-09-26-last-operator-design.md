@@ -284,13 +284,16 @@ status:
   phase: AwaitingApproval
   stage: Create                  # Discovery | Create | Update | Remediate | Delete
   observedGeneration: 3
+  observedRequestHash: "sha256:…" # spec.request of the current planning session
+  planningSessionSeq: 1042        # audit seq of the session's first llm.request
   questions:
     - id: q1
       text: "Should the server be reachable from outside the cluster?"
       options: ["internal only", "public via Ingress"]
   pendingCommand:                # set while a discovery command awaits approval
-    hash: "sha256:…"
-    command: { … §8.1 command … }
+    hash: "sha256:…"             # sha256 of canonical {command, nonce}: single-use
+    nonce: "…"
+    command: { … §8.1 command, id: discovery … }
     reason: "Find the cluster's default IngressClass"
   plan:
     hash: "sha256:…"
@@ -450,9 +453,10 @@ spec:
 kind: LLMProvider
 spec:
   type: anthropic | openai | openai-compatible | scripted
-  model: "…"
-  endpoint: "…"                 # for openai-compatible
-  secretRef: { name: anthropic-key }
+  model: "claude-opus-5-5"
+  effort: high                  # optional: low | medium | high | xhigh | max (anthropic)
+  endpoint: "…"                 # required for openai-compatible; optional proxy for openai/anthropic
+  secretRef: { name: anthropic-key }   # Secret in last-gateway, key "apiKey"
   scripted: { configMapRef: { name: llm-script } }   # type scripted only: fixed responses for tests and demos
 ```
 
@@ -1396,7 +1400,7 @@ docs/
 | M0 | Scaffolding | kubebuilder project, all CRD types, Helm skeleton, CI (lint, unit, envtest) | `make test` green in CI; CRDs install on kind |
 | M1 | Audit foundation | `internal/audit`; gateway skeleton with fail-closed writes, leader election, startup verification; bundled RustFS with compliance lock; `kubectl last audit verify/log/conformance` | Tamper tests pass; conformance passes against bundled RustFS in CI; gateway refuses to act when the store is down |
 | M2 | Sandbox + lifecycle (fake LLM) | Sandbox pods on the base image only (commands with `image.install` rejected until M4), `kubernetes` and `env-secret` Providers, per-execution egress; concurrency cap + queue; Intent state machine; plans and hashing; `IntentApproval` + admission; plan enforcement; probes with compact audit, fixed interval, and no overlap; ManagedResource; output Secrets | e2e: scripted-LLM web server Intent goes Pending → Ready via `kubectl` in a sandbox, with a verified audit chain |
-| M3 | Real LLMs + web server demo | Anthropic and OpenAI-compatible adapters; Clarifying and Discovery phases; `kubectl last` create/answer/plan/approve/deny | `kubectl last "run an nginx web server serving X"` works end to end against a real model |
+| M3 | Real LLMs + web server demo | Delivered as M3a (gateway), M3b (operator), M3c (CLI and demo); design: `docs/superpowers/specs/2026-10-05-m3-real-llms-design.md`. Anthropic and OpenAI-compatible adapters; Clarifying and Discovery phases; `kubectl last` create/answer/plan/approve/deny | `kubectl last "run an nginx web server serving X"` works end to end against a real model |
 | M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled Distribution + nginx front proxy + node-local pull proxy; external registry mode; audit-backed digest index; single flight; coordinated GC with sidecar. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
 | M5 | Day 2 | Update stage; drift → remediation; teardown with finalizers; Auto modes and layering; adaptive probe intervals + jitter + floor | e2e: edit, drift, and delete flows in Manual and Auto modes |
 | M6 | Allow rules | `CommandRule` / `ClusterCommandRule` + admission; gateway matching (incl. `image.install`); `uncoveredSteps`; `approve --always-allow` with exact/generalized patterns; breadth lint | e2e: a second similar Intent runs without approval because of rules from the first |

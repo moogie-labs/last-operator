@@ -46,7 +46,20 @@ spec:
           spec:
             description: LLMProviderSpec configures one model endpoint.
             properties:
+              effort:
+                description: |-
+                  Effort is the model's reasoning effort, for adapters that support it
+                  (anthropic). Empty means high: planning is intelligence-sensitive.
+                enum:
+                - low
+                - medium
+                - high
+                - xhigh
+                - max
+                type: string
               endpoint:
+                description: 'Endpoint is the API base URL: required for openai-compatible;
+                  optional for openai and anthropic (a proxy).'
                 type: string
               model:
                 minLength: 1
@@ -72,7 +85,7 @@ spec:
                 type: object
               secretRef:
                 description: SecretRef names a Secret in last-gateway holding the
-                  API key.
+                  API key under the key "apiKey".
                 properties:
                   name:
                     minLength: 1
