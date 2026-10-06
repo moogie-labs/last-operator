@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -23,7 +26,7 @@ func TestStateStoreRoundTrip(t *testing.T) {
 		t.Fatalf("missing record = %+v, %v", r, err)
 	}
 	r.Open = &OpenPhase{Stage: testStage, SubjectHash: testHashA, BeginSeq: 7, Epoch: "e1"}
-	r.MarkUsed(testHashA)
+	r.MarkUsed(testStage, testHashA)
 	if err := s.Save(ctx, r); err != nil {
 		t.Fatal(err)
 	}
@@ -66,12 +69,12 @@ func TestStateStoreRejectsForeignAndCorruptRecords(t *testing.T) {
 func TestMarkUsedIsBounded(t *testing.T) {
 	var r IntentRecord
 	for i := range maxUsedSubjects + 5 {
-		r.MarkUsed("sha256:" + strings.Repeat("0", i+1))
+		r.MarkUsed(testStage, "sha256:"+strings.Repeat("0", i+1))
 	}
 	if len(r.Used) != maxUsedSubjects || r.Used[0] != "sha256:"+strings.Repeat("0", 6) {
 		t.Fatalf("used = %d entries, first %q", len(r.Used), r.Used[0])
 	}
-	r.MarkUsed(r.Used[3])
+	r.MarkUsed(testStage, r.Used[3])
 	if len(r.Used) != maxUsedSubjects {
 		t.Fatal("re-marking a subject must not grow the list")
 	}
@@ -95,5 +98,36 @@ func TestStateStoreSaveRefusesAnOversizedRecordAndDoesNotEscapeMarkup(t *testing
 	}
 	if n := len(r.cm.Data[stateKey]); n > 3100 || strings.HasSuffix(r.cm.Data[stateKey], "\n") {
 		t.Fatalf("record is %d bytes (markup escaped, or trailing newline kept)", n)
+	}
+}
+
+func TestDiscoverySubjectsNeverEvictPlanSubjects(t *testing.T) {
+	var r IntentRecord
+	r.MarkUsed(lastv1alpha1.StageCreate, testHashA)
+	for i := range 60 {
+		r.MarkUsed(lastv1alpha1.StageDiscovery, fmt.Sprintf("sha256:d%d", i))
+	}
+	if !slices.Contains(r.Used, testHashA) || !r.WasUsed(testHashA) || len(r.Used) != 1 {
+		t.Fatalf("used = %v, want the Create subject kept", r.Used)
+	}
+}
+
+func TestUsedDiscoveryKeepsTheNewest200(t *testing.T) {
+	var r IntentRecord
+	for i := range maxUsedDiscoverySubjects + 10 {
+		r.MarkUsed(lastv1alpha1.StageDiscovery, fmt.Sprintf("sha256:d%d", i))
+	}
+	if len(r.UsedDiscovery) != maxUsedDiscoverySubjects || r.WasUsed("sha256:d9") || !r.WasUsed("sha256:d10") ||
+		!r.WasUsed(fmt.Sprintf("sha256:d%d", maxUsedDiscoverySubjects+9)) {
+		t.Fatalf("usedDiscovery = %d entries, first %q", len(r.UsedDiscovery), r.UsedDiscovery[0])
+	}
+}
+
+func TestWasUsedSeesBothLists(t *testing.T) {
+	var r IntentRecord
+	r.MarkUsed(lastv1alpha1.StageCreate, "sha256:p")
+	r.MarkUsed(lastv1alpha1.StageDiscovery, "sha256:q")
+	if !r.WasUsed("sha256:p") || !r.WasUsed("sha256:q") || r.WasUsed("sha256:r") {
+		t.Fatalf("record = %+v", r)
 	}
 }

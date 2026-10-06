@@ -621,8 +621,12 @@ each call, the gateway:
 **Discovery commands** are one-step phases (stage `Discovery`). The subject
 is `status.pendingCommand.hash`, the SHA-256 of the canonical JSON of
 `{command, nonce}`. The operator picks a fresh nonce for every request, and
-the gateway records each subject as used, so an approval is good for
-exactly one run, even of an identical command. The gateway checks that the
+the gateway records each subject as used, so an approval runs at most once
+while its subject is remembered: the gateway keeps the last 200 Discovery
+subjects and the last 50 plan subjects per Intent, separately, so discovery
+never evicts a plan subject. Approvals are not yet tied to the Intent's UID
+or a freshness bound (tracked as the approval-replay follow-up, before M5).
+The gateway checks that the
 hash matches the pending command and its nonce, that the command's step ID
 is `discovery`, and that it is at most 64 KiB. A Discovery phase never
 becomes the executed plan: probes and later stages keep following the last

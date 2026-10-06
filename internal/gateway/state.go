@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
@@ -23,6 +24,8 @@ const (
 	labelComponent  = "app.kubernetes.io/component"
 	stateComponent  = "intent-state"
 	maxUsedSubjects = 50
+	// Discovery subjects have their own, larger list so they never evict a plan subject.
+	maxUsedDiscoverySubjects = 200
 )
 
 // MaxRecordBytes bounds an encoded IntentRecord; a ConfigMap holds at most 1 MiB.
@@ -37,6 +40,8 @@ type IntentRecord struct {
 	Open     *OpenPhase    `json:"open,omitempty"`
 	Executed *ExecutedPlan `json:"executed,omitempty"`
 	Used     []string      `json:"used,omitempty"`
+	// UsedDiscovery holds Discovery subjects, kept apart from Used.
+	UsedDiscovery []string `json:"usedDiscovery,omitempty"`
 }
 
 // OpenPhase is a phase.begin without a phase.end yet.
@@ -57,15 +62,25 @@ type ExecutedPlan struct {
 	EndSeq   uint64 `json:"endSeq"`
 }
 
-// MarkUsed records that subject opened a phase; a subject opens at most one.
-func (r *IntentRecord) MarkUsed(subject string) {
-	if slices.Contains(r.Used, subject) {
+// MarkUsed records that subject opened a phase. Discovery subjects go to
+// UsedDiscovery (newest 200), every other stage to Used (newest 50).
+func (r *IntentRecord) MarkUsed(stage lastv1alpha1.Stage, subject string) {
+	list, limit := &r.Used, maxUsedSubjects
+	if stage == lastv1alpha1.StageDiscovery {
+		list, limit = &r.UsedDiscovery, maxUsedDiscoverySubjects
+	}
+	if slices.Contains(*list, subject) {
 		return
 	}
-	r.Used = append(r.Used, subject)
-	if len(r.Used) > maxUsedSubjects {
-		r.Used = r.Used[len(r.Used)-maxUsedSubjects:]
+	*list = append(*list, subject)
+	if len(*list) > limit {
+		*list = (*list)[len(*list)-limit:]
 	}
+}
+
+// WasUsed reports whether subject already opened a phase and is still remembered.
+func (r *IntentRecord) WasUsed(subject string) bool {
+	return slices.Contains(r.Used, subject) || slices.Contains(r.UsedDiscovery, subject)
 }
 
 // encodeRecord returns the record's JSON without HTML escaping (a plan full of

@@ -86,7 +86,7 @@ func TestDiscoveryRunsAnApprovedCommandAsAOneStepPhase(t *testing.T) {
 	env.runDiscovery(c, subject)
 
 	rec, err := env.g.state.Load(env.ctx, envKey)
-	if err != nil || rec.Executed != nil || !slices.Contains(rec.Used, subject) {
+	if err != nil || rec.Executed != nil || !slices.Contains(rec.UsedDiscovery, subject) || len(rec.Used) != 0 {
 		t.Fatalf("record = %+v, %v; want no executed plan and the subject used", rec, err)
 	}
 	var types []string

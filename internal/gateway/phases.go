@@ -358,7 +358,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, err
 		}
 	}
-	if slices.Contains(rec.Used, subject) {
+	if rec.WasUsed(subject) {
 		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
 	}
 	if stage == lastv1alpha1.StageCreate {
@@ -402,7 +402,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, status.Errorf(codes.Unavailable, "record phase.begin: %v", err)
 	}
 	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch, Auth: auth}
-	rec.MarkUsed(subject)
+	rec.MarkUsed(stage, subject)
 	if err := g.state.Save(ctx, rec); err != nil {
 		if _, aerr := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(stage),
 			SubjectHash: subject, AuthorizedBy: auth, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}}); aerr != nil {
