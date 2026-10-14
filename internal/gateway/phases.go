@@ -403,7 +403,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 	rec.Open = &OpenPhase{Stage: string(stage), SubjectHash: subject, BeginSeq: begin.Seq, Epoch: g.epoch, Auth: auth}
 	rec.MarkUsed(stage, subject)
-	if err := g.state.Save(ctx, rec); err != nil {
+	if err := g.saveRecord(ctx, rec); err != nil {
 		if _, aerr := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(stage),
 			SubjectHash: subject, AuthorizedBy: auth, Payload: phaseEnd{BeginSeq: begin.Seq, Outcome: outcomeAborted, Reason: "could not record the open phase"}}); aerr != nil {
 			slog.Warn("Could not record aborted phase", "err", aerr)
@@ -430,7 +430,7 @@ func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key str
 	}
 	g.phases.remove(key)
 	rec.Open = nil
-	if err := g.state.Save(ctx, rec); err != nil {
+	if err := g.saveRecord(ctx, rec); err != nil {
 		return status.Errorf(codes.Unavailable, "%v", err)
 	}
 	return nil
@@ -501,7 +501,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		}
 		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq}
 	}
-	if err := g.state.Save(ctx, rec); err != nil {
+	if err := g.saveRecord(ctx, rec); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	g.phases.remove(key)

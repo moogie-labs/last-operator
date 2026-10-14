@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -218,5 +219,27 @@ func TestFlushIndexDropsOldestEntriesWhenTheRecordIsFull(t *testing.T) {
 	rec, err = env.g.state.Load(env.ctx, envKey)
 	if err != nil || len(rec.Index) == 0 || len(rec.Index) == maxIndexEntries || rec.IndexFloor == 0 || rec.Executed == nil {
 		t.Fatalf("record = %d index entries, floor %d, executed %v; %v", len(rec.Index), rec.IndexFloor, rec.Executed != nil, err)
+	}
+}
+
+func TestSaveRecordDropsIndexEntriesSoPhaseStateAlwaysFits(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	rec, err := env.g.state.Load(env.ctx, envKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq := uint64(1); seq <= maxIndexEntries; seq++ {
+		rec.Index = append(rec.Index, IndexEntry{Seq: seq, Type: audit.TypeLLMRequest})
+	}
+	rec.Executed = &ExecutedPlan{Stage: "Create", PlanHash: "sha256:x", Plan: strings.Repeat("p", MaxRecordBytes-3000)}
+	if err := env.g.state.Save(env.ctx, rec); !errors.Is(err, errRecordTooLarge) {
+		t.Fatalf("setup: Save = %v, want errRecordTooLarge", err)
+	}
+	if err := env.g.saveRecord(env.ctx, rec); err != nil {
+		t.Fatalf("saveRecord = %v", err)
+	}
+	got, err := env.g.state.Load(env.ctx, envKey)
+	if err != nil || got.Executed == nil || len(got.Index) >= maxIndexEntries || got.IndexFloor == 0 {
+		t.Fatalf("record = %d index entries, floor %d, executed %v; %v", len(got.Index), got.IndexFloor, got.Executed != nil, err)
 	}
 }

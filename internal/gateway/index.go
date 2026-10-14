@@ -86,26 +86,35 @@ func (g *Gateway) observeWrites(w *audit.Writer) {
 // flushIndex saves an Intent's collected index entries into its record. When
 // the record would outgrow its ConfigMap, the oldest index entries go first.
 func (g *Gateway) flushIndex(ctx context.Context, intent string) error {
+	// Lock before take: a flush that has taken entries holds the lock until they
+	// are saved, so a concurrent QueryAudit waits and then reads them (read-your-writes).
+	unlock := g.locks.lock(intent)
+	defer unlock()
 	es := g.index.take(intent)
 	if len(es) == 0 {
 		return nil
 	}
-	unlock := g.locks.lock(intent)
-	defer unlock()
 	rec, err := g.state.Load(ctx, intent)
 	if err != nil {
 		g.index.restore(intent, es)
 		return err
 	}
 	rec.AddIndex(es)
+	if err := g.saveRecord(ctx, rec); err != nil {
+		g.index.restore(intent, es)
+		return err
+	}
+	return nil
+}
+
+// saveRecord saves rec. The QueryAudit index is best-effort: when the record would
+// outgrow its ConfigMap, the oldest index entries go first, so phase state always fits.
+func (g *Gateway) saveRecord(ctx context.Context, rec *LoadedRecord) error {
 	for {
 		err := g.state.Save(ctx, rec)
 		if errors.Is(err, errRecordTooLarge) && len(rec.Index) > 0 {
 			rec.DropIndex(indexDropStep)
 			continue
-		}
-		if err != nil {
-			g.index.restore(intent, es)
 		}
 		return err
 	}
