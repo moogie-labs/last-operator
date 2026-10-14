@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -99,6 +100,7 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 	}
 
 	stream := a.client.Beta.Messages.NewStreaming(ctx, params)
+	defer func() { _ = stream.Close() }()
 	var msg anthropic.BetaMessage
 	for stream.Next() {
 		if err := msg.Accumulate(stream.Current()); err != nil {
@@ -126,6 +128,9 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 		CacheReadTokens: int(u.CacheReadInputTokens), CacheCreationTokens: int(u.CacheCreationInputTokens)}, nil
 }
 
+// maxAPIErrorMessageBytes bounds the API error message carried into an error.
+const maxAPIErrorMessageBytes = 1 << 10
+
 // classifyAnthropic wraps an SDK error in the llm error the gateway maps to a
 // gRPC code. The API's error text names the problem, never the key.
 func classifyAnthropic(err error) error {
@@ -140,5 +145,29 @@ func classifyAnthropic(err error) error {
 		// An error event inside a 200 stream (for example overloaded_error).
 		return fmt.Errorf("%w: the stream reported an error", ErrTransient)
 	}
-	return classifyHTTP(apiErr.StatusCode, apiErr.Error())
+	// Never apiErr.Error(): it quotes the request URL, and an endpoint's user-info
+	// (a proxy credential) would reach the error and the audit log.
+	return classifyHTTP(apiErr.StatusCode, apiErrorMessage(apiErr.RawJSON()))
+}
+
+// apiErrorMessage returns error.message from an API error body, bounded, or ""
+// when the body is not the API's error envelope.
+func apiErrorMessage(body string) string {
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &envelope) != nil {
+		return ""
+	}
+	msg := envelope.Error.Message
+	if len(msg) > maxAPIErrorMessageBytes {
+		cut := maxAPIErrorMessageBytes
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
+		}
+		msg = msg[:cut] + "…(truncated)"
+	}
+	return strings.ToValidUTF8(msg, "")
 }

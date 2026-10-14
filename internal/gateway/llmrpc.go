@@ -56,7 +56,8 @@ func (g *Gateway) llmAPIKey(ctx context.Context, lp *lastv1alpha1.LLMProvider) (
 	}
 	s, err := g.kube.CoreV1().Secrets(g.cfg.Namespace).Get(ctx, lp.Spec.SecretRef.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return "", status.Errorf(codes.FailedPrecondition, "LLMProvider %s: Secret %s not found", lp.Name, lp.Spec.SecretRef.Name)
+		return "", status.Errorf(codes.FailedPrecondition, "LLMProvider %s: Secret %s not found; it must hold the API key under %q",
+			lp.Name, lp.Spec.SecretRef.Name, llmAPIKeyField)
 	}
 	if err != nil {
 		return "", status.Errorf(codes.Unavailable, "read LLMProvider %s key Secret: %v", lp.Name, err)

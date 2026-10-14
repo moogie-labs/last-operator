@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	roleUser  = "user"
-	keySecret = "key"
+	roleUser      = "user"
+	roleAssistant = "assistant"
+	keySecret     = "key"
 )
 
 func llmConfig(providerType lastv1alpha1.LLMProviderType) (*lastv1alpha1.OperatorConfig, *lastv1alpha1.LLMProvider) {
@@ -74,7 +75,7 @@ func TestCallLLMAuditsRequestAndResponse(t *testing.T) {
 	if err := json.Unmarshal(res.Payload, &rp); err != nil || rp.RequestSeq != req.Seq || rp.Content != "the plan" {
 		t.Fatalf("llm.response = %s", res.Payload)
 	}
-	if _, err := env.callLLM(&gatewayv1.Message{Role: "assistant"}, &gatewayv1.Message{Role: roleUser}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := env.callLLM(&gatewayv1.Message{Role: roleAssistant}, &gatewayv1.Message{Role: roleUser}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("exhausted script = %v, want FailedPrecondition", err)
 	}
 	var last llmResponsePayload
@@ -224,8 +225,14 @@ func TestCallLLMAnthropicUsesTheKeyFromTheSecretTrimmed(t *testing.T) {
 func TestCallLLMAnthropicKeyProblemsAreFailedPreconditionWithoutTheKey(t *testing.T) {
 	missing := anthropicEnv(t, "")
 	_, err := missing.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
-	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "key") {
-		t.Fatalf("missing Secret = %v", err)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "Secret "+keySecret+" not found") ||
+		!strings.Contains(err.Error(), `"`+llmAPIKeyField+`"`) {
+		t.Fatalf("missing Secret = %v; want FailedPrecondition naming Secret %q and its %q key", err, keySecret, llmAPIKeyField)
+	}
+	blank := anthropicEnv(t, " \n")
+	_, err = blank.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "Secret "+keySecret+` has no "`+llmAPIKeyField+`" key`) {
+		t.Fatalf("blank apiKey = %v; want FailedPrecondition naming Secret %q and its %q key", err, keySecret, llmAPIKeyField)
 	}
 	wrong := anthropicEnv(t, "sk-wrong-value")
 	_, err = wrong.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})

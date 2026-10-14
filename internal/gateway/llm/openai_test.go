@@ -92,7 +92,7 @@ func TestOpenAIReportsARefusalAndAnEmptyAnswer(t *testing.T) {
 }
 
 func TestOpenAIMapsHTTPErrorsWithoutTheKey(t *testing.T) {
-	cases := map[int]error{401: ErrAuth, 404: ErrModel, 400: ErrBadRequest, 429: ErrTransient, 503: ErrTransient}
+	cases := map[int]error{401: ErrAuth, 404: ErrModel, 400: ErrBadRequest, 408: ErrTransient, 429: ErrTransient, 503: ErrTransient}
 	for code, want := range cases {
 		srv, _ := fakeOpenAI(t, code, `{"error":{"message":"Incorrect API key provided: sk-sec***ret"}}`)
 		_, err := NewOpenAI(OpenAIConfig{APIKey: testKey, Model: "m", Endpoint: srv.URL}).Complete(context.Background(), conversation)

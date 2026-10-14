@@ -35,7 +35,10 @@ func textStream(text, stopReason, stopDetails string) string {
 	)
 }
 
-const testKey = "secret-key"
+const (
+	testKey   = "secret-key"
+	testModel = "claude-opus-5-5"
+)
 
 type captured struct {
 	mu     sync.Mutex
@@ -67,7 +70,7 @@ func fakeAnthropic(t *testing.T, statusCode int, body string) (*httptest.Server,
 }
 
 func anthropicFor(srv *httptest.Server, effort string) *Anthropic {
-	return NewAnthropic(AnthropicConfig{APIKey: testKey, Model: "claude-opus-5-5", Effort: effort,
+	return NewAnthropic(AnthropicConfig{APIKey: testKey, Model: testModel, Effort: effort,
 		BaseURL: srv.URL, DisableRetries: true})
 }
 
@@ -148,7 +151,7 @@ func TestAnthropicReportsARefusal(t *testing.T) {
 
 func TestAnthropicMapsHTTPErrors(t *testing.T) {
 	errBody := `{"type":"error","error":{"type":"x","message":"nope"}}`
-	cases := map[int]error{401: ErrAuth, 403: ErrAuth, 404: ErrModel, 400: ErrBadRequest, 429: ErrTransient, 500: ErrTransient, 529: ErrTransient}
+	cases := map[int]error{401: ErrAuth, 403: ErrAuth, 404: ErrModel, 400: ErrBadRequest, 408: ErrTransient, 429: ErrTransient, 500: ErrTransient, 529: ErrTransient}
 	for code, want := range cases {
 		srv, _ := fakeAnthropic(t, code, errBody)
 		_, err := anthropicFor(srv, "").Complete(context.Background(), conversation)
@@ -158,6 +161,20 @@ func TestAnthropicMapsHTTPErrors(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), testKey) {
 			t.Errorf("HTTP %d: the API key leaked into the error", code)
 		}
+	}
+}
+
+func TestAnthropicErrorsNeverCarryTheEndpointsCredentials(t *testing.T) {
+	srv, _ := fakeAnthropic(t, http.StatusBadRequest,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: too large"}}`)
+	proxied := strings.Replace(srv.URL, "http://", "http://user:s3cret@", 1)
+	a := NewAnthropic(AnthropicConfig{APIKey: testKey, Model: testModel, BaseURL: proxied, DisableRetries: true})
+	_, err := a.Complete(context.Background(), conversation)
+	if !errors.Is(err, ErrBadRequest) || !strings.Contains(err.Error(), "max_tokens: too large") {
+		t.Fatalf("Complete = %v, want ErrBadRequest with the API's message", err)
+	}
+	if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "127.0.0.1") {
+		t.Fatalf("Complete = %v; the endpoint leaked into the error", err)
 	}
 }
 
