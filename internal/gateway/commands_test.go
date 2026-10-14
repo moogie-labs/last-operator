@@ -423,3 +423,41 @@ func TestNewForbidsTheConfiguredWriterSecret(t *testing.T) {
 		t.Fatalf("ForbiddenSecrets = %v", g.execCfg.ForbiddenSecrets)
 	}
 }
+
+func TestEndPhaseWhileAStepRunsIsAbortedAndWritesNothing(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	p := env.g.phases.get(envKey)
+	p.mu.Lock() // as RunCommand holds it for a whole sandbox run
+	type result struct {
+		resp *gatewayv1.EndPhaseResponse
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		resp, err := env.end(h, false)
+		got <- result{resp, err}
+	}()
+	var r result
+	select {
+	case r = <-got:
+	case <-time.After(5 * time.Second):
+		p.mu.Unlock()
+		<-got
+		t.Fatal("EndPhase waited for the running step")
+	}
+	p.mu.Unlock()
+	if status.Code(r.err) != codes.Aborted || r.resp != nil {
+		t.Fatalf("EndPhase = %v, %v; want Aborted", r.resp, r.err)
+	}
+	if after := len(env.entries()); after != before {
+		t.Fatalf("EndPhase wrote %d audit entries, want none", after-before)
+	}
+	if _, err := env.end(h, false); err != nil {
+		t.Fatalf("EndPhase once the step finished = %v", err)
+	}
+}

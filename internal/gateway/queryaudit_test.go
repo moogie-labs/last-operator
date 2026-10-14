@@ -2,14 +2,21 @@ package gateway
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -30,7 +37,7 @@ func twoLLMCalls(t *testing.T, env *testEnv) {
 		t.Fatal(err)
 	}
 	// The script has one answer, so this call fails, but it still records request and response.
-	_, _ = env.callLLM(&gatewayv1.Message{Role: "assistant", Content: "a"}, &gatewayv1.Message{Role: roleUser, Content: "second"})
+	_, _ = env.callLLM(&gatewayv1.Message{Role: roleAssistant, Content: "a"}, &gatewayv1.Message{Role: roleUser, Content: "second"})
 }
 
 func TestQueryAuditReturnsTheIntentsEntriesOldestFirst(t *testing.T) {
@@ -241,5 +248,136 @@ func TestSaveRecordDropsIndexEntriesSoPhaseStateAlwaysFits(t *testing.T) {
 	got, err := env.g.state.Load(env.ctx, envKey)
 	if err != nil || got.Executed == nil || len(got.Index) >= maxIndexEntries || got.IndexFloor == 0 {
 		t.Fatalf("record = %d index entries, floor %d, executed %v; %v", len(got.Index), got.IndexFloor, got.Executed != nil, err)
+	}
+}
+
+// failRecordSaves makes the fake cluster refuse to create or update Intent
+// record ConfigMaps while fail is set; other ConfigMaps are unaffected.
+func failRecordSaves(env *testEnv, fail *atomic.Bool) {
+	env.kube.PrependReactor("*", "configmaps", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		write, ok := a.(interface{ GetObject() runtime.Object }) // create and update
+		if !ok || !fail.Load() {
+			return false, nil, nil
+		}
+		if cm, ok := write.GetObject().(*corev1.ConfigMap); ok && strings.HasPrefix(cm.Name, "last-intent-") {
+			return true, nil, errors.New("injected: the API server is unavailable")
+		}
+		return false, nil, nil
+	})
+}
+
+func TestQueryAuditIsUnavailableWhenItCannotSaveTheIndex(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	var fail atomic.Bool
+	failRecordSaves(env, &fail)
+	if _, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No record yet: the pre-read flush would create it.
+	fail.Store(true)
+	if resp, err := env.query(&gatewayv1.QueryAuditRequest{}); status.Code(err) != codes.Unavailable || resp != nil {
+		t.Fatalf("create fails: QueryAudit = %v, %v; want Unavailable", resp, err)
+	}
+	if n := len(env.g.index.pending[envKey]); n != 2 {
+		t.Fatalf("after a failed create: %d pending entries, want 2 restored", n)
+	}
+	fail.Store(false)
+	first, err := env.query(&gatewayv1.QueryAuditRequest{})
+	if err != nil || len(first.GetEntries()) != 2 {
+		t.Fatalf("after recovery: QueryAudit = %v, %v; want 2 entries", first, err)
+	}
+
+	// The record exists now: the pre-read flush would update it.
+	_, _ = env.callLLM(&gatewayv1.Message{Role: roleAssistant, Content: "a"}, &gatewayv1.Message{Role: roleUser, Content: "again"})
+	fail.Store(true)
+	if resp, err := env.query(&gatewayv1.QueryAuditRequest{}); status.Code(err) != codes.Unavailable || resp != nil {
+		t.Fatalf("update fails: QueryAudit = %v, %v; want Unavailable", resp, err)
+	}
+	if n := len(env.g.index.pending[envKey]); n != 2 {
+		t.Fatalf("after a failed update: %d pending entries, want 2 restored", n)
+	}
+	fail.Store(false)
+	all, err := env.query(&gatewayv1.QueryAuditRequest{})
+	if err != nil || len(all.GetEntries()) != 4 || all.GetTruncated() {
+		t.Fatalf("after recovery: QueryAudit = %v, %v; want all 4 entries", all, err)
+	}
+}
+
+func TestPeriodicFlushSkipsABusyIntentAndKeepsItsEntriesPending(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	if _, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	unlock := env.g.locks.lock(envKey) // as EndPhase holds it while a step runs
+	done := make(chan struct{})
+	go func() { env.g.flushIndexes(env.ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		unlock()
+		t.Fatal("the periodic flush blocked on a busy Intent")
+	}
+	rec, err := env.g.state.Load(env.ctx, envKey)
+	if err != nil || len(rec.Index) != 0 {
+		t.Fatalf("busy Intent: record index = %v, %v; want nothing saved", rec.Index, err)
+	}
+	if n := len(env.g.index.pending[envKey]); n != 2 {
+		t.Fatalf("busy Intent: %d pending entries, want 2", n)
+	}
+	unlock()
+	env.g.flushIndexes(env.ctx)
+	rec, err = env.g.state.Load(env.ctx, envKey)
+	if err != nil || len(rec.Index) != 2 || len(env.g.index.pending[envKey]) != 0 {
+		t.Fatalf("idle Intent: record index = %v, %v; want both entries saved", rec.Index, err)
+	}
+}
+
+func TestQueryAuditRefusesATamperedEntry(t *testing.T) {
+	cases := map[string]struct {
+		change func(t *testing.T, e *audit.Entry)
+		want   error
+	}{
+		"body": {func(_ *testing.T, e *audit.Entry) {
+			e.Payload = json.RawMessage(`{"messages":[{"role":"user","content":"forged"}]}`)
+		}, audit.ErrBadHash},
+		"signature": {func(t *testing.T, e *audit.Entry) {
+			_, other, _ := ed25519.GenerateKey(rand.Reader)
+			if err := audit.NewSigner(other).Seal(e); err != nil {
+				t.Fatal(err)
+			}
+		}, audit.ErrBadSignature},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+			twoLLMCalls(t, env)
+			resp, err := env.query(&gatewayv1.QueryAuditRequest{Types: []string{audit.TypeLLMRequest}})
+			if err != nil || len(resp.GetEntries()) != 2 {
+				t.Fatalf("before tampering: QueryAudit = %v, %v", resp, err)
+			}
+			key := audit.EntryKey(testChainID, resp.GetEntries()[1].GetSeq())
+			body, err := env.sink.Get(env.ctx, key, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, err := audit.DecodeEntry(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, &e)
+			forged, err := audit.Canonical(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := audit.DecodeEntry(forged); err != nil {
+				t.Fatalf("setup: the forged entry must still decode strictly: %v", err)
+			}
+			env.sink.TamperReplace(key, forged)
+			_, err = env.query(&gatewayv1.QueryAuditRequest{})
+			if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), tc.want.Error()) {
+				t.Fatalf("QueryAudit = %v, want Internal for %v", err, tc.want)
+			}
+		})
 	}
 }

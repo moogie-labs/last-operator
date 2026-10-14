@@ -86,7 +86,7 @@ One adapter serves both `openai` (fixed endpoint `https://api.openai.com/v1`) an
 - **What the operator does next.** `RunCommand` then runs step `"discovery"`, and `EndPhase` closes the phase. A discovery command that exits non-zero is still a completed phase: the operator ends it with `succeeded=false` and feeds the result to the model.
 - **What the gateway records.**
   - Discovery phases never set the record's `Executed` plan, so probes are unaffected.
-  - Discovery phases do enter `Used`: the bounded last-50 list now holds plan and discovery subjects.
+  - Discovery phases enter their own bounded list of used subjects (the last 200), separate from plan subjects (the last 50), so discovery never evicts a plan subject. `phase.begin` records the nonce, so an auditor can recompute the subject.
 - **Sandbox priority.** `PriorityDiscovery`, which already exists in the scheduler.
 - **Size.** The `pendingCommand` canonical JSON is bounded at 64 KiB. Larger commands are refused with `InvalidArgument`.
 

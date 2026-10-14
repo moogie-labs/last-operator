@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -45,8 +44,11 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 	case limit < 0 || limit > maxIndexEntries:
 		return nil, status.Errorf(codes.InvalidArgument, "limit must be between 1 and %d", maxIndexEntries)
 	}
+	// Read-your-writes: entries the writer collected must be saved before the
+	// read, or the caller would see a stale index that does not report the gap.
+	// flushIndex restores the entries it took, so a later query serves them.
 	if err := g.flushIndex(ctx, key); err != nil {
-		slog.Warn("Could not save the audit index", "intent", key, "err", err)
+		return nil, status.Errorf(codes.Unavailable, "could not save the audit index: %v", err)
 	}
 	rec, err := g.state.Load(ctx, key)
 	if err != nil {

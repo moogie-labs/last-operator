@@ -228,9 +228,14 @@ func (g *Gateway) lead(parent context.Context) error {
 	}
 	g.writer.Store(w)
 	defer g.writer.Store(nil)
-	// Deferred later, so it runs first: in-flight RPCs finish and record their
-	// outcomes before the writer is withdrawn.
-	defer g.drain(g.cfg.DrainTimeout)
+	// Deferred later, so it runs first. drain refuses new RPCs and lets in-flight
+	// ones finish and record their outcomes. Then the index entries those writes
+	// produced are saved: the writer is still stored, but nothing new can use it.
+	// Only then is the writer withdrawn.
+	defer func() {
+		g.drain(g.cfg.DrainTimeout)
+		g.flushIndexesOnStepDown(ctx)
+	}()
 	slog.Info("audit writer ready", "chain", g.cfg.ChainID, "pod", g.cfg.PodName)
 
 	ticker := time.NewTicker(time.Minute)

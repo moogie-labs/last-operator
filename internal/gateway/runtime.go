@@ -217,8 +217,9 @@ type keyedMutex struct {
 	m  map[string]*sync.Mutex
 }
 
-func (k *keyedMutex) lock(key string) func() {
+func (k *keyedMutex) get(key string) *sync.Mutex {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	if k.m == nil {
 		k.m = map[string]*sync.Mutex{}
 	}
@@ -227,7 +228,21 @@ func (k *keyedMutex) lock(key string) func() {
 		l = &sync.Mutex{}
 		k.m[key] = l
 	}
-	k.mu.Unlock()
+	return l
+}
+
+// lock waits for key's lock and returns its unlock.
+func (k *keyedMutex) lock(key string) func() {
+	l := k.get(key)
 	l.Lock()
 	return l.Unlock
+}
+
+// tryLock takes key's lock only if it is free; ok is false when it is held.
+func (k *keyedMutex) tryLock(key string) (unlock func(), ok bool) {
+	l := k.get(key)
+	if !l.TryLock() {
+		return nil, false
+	}
+	return l.Unlock, true
 }

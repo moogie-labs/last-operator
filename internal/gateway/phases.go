@@ -86,6 +86,9 @@ func (t *phaseTable) remove(key string) {
 type phaseBegin struct {
 	Plan  string `json:"plan"` // canonical JSON, kept as text so any number survives the audit writer
 	Steps int    `json:"steps"`
+	// Nonce is a Discovery phase's pending-command nonce, so an auditor can
+	// recompute the subject, sha256(canonical {command, nonce}), from this entry alone.
+	Nonce string `json:"nonce,omitempty"`
 }
 
 type phaseEnd struct {
@@ -295,6 +298,24 @@ func verifyDiscovery(d denial, intent *lastv1alpha1.Intent, subject string) (pla
 	return body, canonical, nil
 }
 
+// verifySubject checks the subject against the Intent for the stage and returns
+// the phase body, its canonical JSON and, for Discovery, the pending command's
+// nonce (recorded in phase.begin so an auditor can recompute the subject).
+func verifySubject(d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (plan.Body, []byte, string, error) {
+	if stage == lastv1alpha1.StageDiscovery {
+		body, canonical, err := verifyDiscovery(d, intent, subject)
+		if err != nil {
+			return plan.Body{}, nil, "", err
+		}
+		return body, canonical, intent.Status.PendingCommand.Nonce, nil
+	}
+	if intent.Status.Plan == nil {
+		return plan.Body{}, nil, "", d.deny(codes.FailedPrecondition, "intent has no plan")
+	}
+	body, canonical, err := verifyPlan(d, intent, subject)
+	return body, canonical, "", err
+}
+
 // recordFits checks that the record still fits its ConfigMap once the plan is
 // recorded as Executed, or EndPhase could not save it after the steps ran.
 func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, canonical []byte) error {
@@ -332,16 +353,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
 		return nil, notFoundOr(err, "intent")
 	}
-	var body plan.Body
-	var canonical []byte
-	if stage == lastv1alpha1.StageDiscovery {
-		body, canonical, err = verifyDiscovery(d, &intent, subject)
-	} else {
-		if intent.Status.Plan == nil {
-			return nil, d.deny(codes.FailedPrecondition, "intent has no plan")
-		}
-		body, canonical, err = verifyPlan(d, &intent, subject)
-	}
+	body, canonical, nonce, err := verifySubject(d, &intent, stage, subject)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +409,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
 	}
 	begin, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseBegin, Actor: actor, Intent: key, Stage: string(stage),
-		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps)}})
+		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps), Nonce: nonce}})
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "record phase.begin: %v", err)
 	}
@@ -459,7 +471,12 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		return nil, d.deny(codes.FailedPrecondition, "no open phase for this plan")
 	}
 	d.stage = string(p.stage)
-	p.mu.Lock()
+	// Never wait for a running step while holding the Intent's lock: the step can
+	// run for minutes, and the lock would stall the leader's index flush and every
+	// other RPC for the Intent. Refuse before writing anything, as RunCommand does.
+	if !p.mu.TryLock() {
+		return nil, status.Error(codes.Aborted, "a step of this phase is still running; retry")
+	}
 	defer p.mu.Unlock()
 	if p.closed && p.endSeq == 0 { // an interrupted phase; a closed phase with endSeq set is a save retry
 		return nil, d.deny(codes.FailedPrecondition, "this phase is already closed")

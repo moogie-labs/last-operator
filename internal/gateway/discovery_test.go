@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -95,8 +96,11 @@ func TestDiscoveryRunsAnApprovedCommandAsAOneStepPhase(t *testing.T) {
 			continue
 		}
 		types = append(types, e.Type)
-		if e.Type == audit.TypePhaseBegin && e.Stage != string(lastv1alpha1.StageDiscovery) {
-			t.Fatalf("phase.begin stage = %q", e.Stage)
+		if e.Type == audit.TypePhaseBegin {
+			if e.Stage != string(lastv1alpha1.StageDiscovery) {
+				t.Fatalf("phase.begin stage = %q", e.Stage)
+			}
+			wantSubjectFromPhaseBegin(t, e, "n1")
 		}
 	}
 	want := []string{audit.TypeApprovalObserved, audit.TypePhaseBegin, audit.TypeCommandStart, audit.TypeCredentialIssued, audit.TypeCommandResult, audit.TypePhaseEnd}
@@ -199,4 +203,25 @@ func TestBeginPhaseStillRefusesOtherStages(t *testing.T) {
 	env, in := newRunEnv(t, twoSteps())
 	_, err := env.beginStage(lastv1alpha1.StageUpdate, in.Status.Plan.Hash)
 	env.wantDenied(err, codes.FailedPrecondition)
+}
+
+// wantSubjectFromPhaseBegin checks that a Discovery phase.begin alone lets an
+// auditor recompute its subject: sha256(canonical {command, nonce}).
+func wantSubjectFromPhaseBegin(t *testing.T, e audit.Entry, nonce string) {
+	t.Helper()
+	var p phaseBegin
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatalf("phase.begin payload %s: %v", e.Payload, err)
+	}
+	if p.Nonce != nonce {
+		t.Fatalf("phase.begin nonce = %q, want %q", p.Nonce, nonce)
+	}
+	var body plan.Body
+	if err := json.Unmarshal([]byte(p.Plan), &body); err != nil || len(body.Steps) != 1 {
+		t.Fatalf("phase.begin plan = %s, %v; want one step", p.Plan, err)
+	}
+	h, _, err := plan.DiscoveryHash(body.Steps[0], p.Nonce)
+	if err != nil || h != e.SubjectHash {
+		t.Fatalf("recomputed subject = %s, %v; want %s", h, err, e.SubjectHash)
+	}
 }

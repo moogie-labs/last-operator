@@ -113,6 +113,31 @@ func TestLeadOpensChainAndReportsReady(t *testing.T) {
 	}
 }
 
+func TestLeadSavesCollectedIndexEntriesWhenSteppingDown(t *testing.T) {
+	g := testGateway(t, audittest.NewMemSink())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.lead(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for g.writer.Load() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("gateway never became ready")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Collected well before the first periodic flush (indexFlushInterval), so only
+	// the step-down flush can save it.
+	g.index.observe(audit.Entry{Seq: 7, Type: audit.TypeLLMRequest, Intent: "team-x/web"})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("lead returned %v after cancel", err)
+	}
+	rec, err := g.state.Load(context.Background(), "team-x/web")
+	if err != nil || len(rec.Index) != 1 || rec.Index[0].Seq != 7 {
+		t.Fatalf("record index after stepping down = %v, %v; want the collected entry", rec.Index, err)
+	}
+}
+
 // TestShouldReportLeadError exercises the guard in OnStartedLeading (server.go) that
 // stops a lead error from beating OnStoppedLeading's own cancel(errLostLeadership) when
 // leadership is lost: once lctx is canceled, a lead error must not be reported even if
