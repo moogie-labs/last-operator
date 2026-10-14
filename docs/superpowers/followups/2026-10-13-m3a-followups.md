@@ -29,3 +29,8 @@ Deferred items from the final review of `docs/superpowers/plans/2026-10-05-m3a-g
   - The Anthropic network and cancel paths.
   - The 3 MiB `more` cutoff.
   - The LLM token metrics.
+
+## From the final fix-wave re-review
+
+- **Proxy username in network errors.** For both adapters, Go's HTTP client redacts a proxy password in an endpoint URL to `user:***`, but the username can still reach the `llm.response` audit entry. Admins set endpoints, and usernames are not credentials under the constraints, so this is accepted for now.
+- **OpenAI proxy password on a malformed endpoint.** If `LLMProviderSpec.endpoint` is malformed (for example a bad port), `http.NewRequestWithContext` fails with a `url.Parse` error that quotes the raw URL, password included. The OpenAI adapter wraps that error into `ErrBadRequest`, so the text can reach the WORM `llm.response` entry. Use a fixed message for this error, and validate `endpoint` at admission (a URL with no user-info). Also check how the Anthropic SDK handles a malformed base URL. Fix before the first release.
