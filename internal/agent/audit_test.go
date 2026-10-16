@@ -124,7 +124,7 @@ func sessionEntries() []*gatewayv1.AuditEntry {
 
 func TestReloadRebuildsTheSessionFromItsLatestValidAnswer(t *testing.T) {
 	a := &fakeAuditor{pageSize: 2, entries: sessionEntries()}
-	conv, err := Reload(context.Background(), a, ref, 5)
+	conv, err := Reload(context.Background(), a, ref, 5, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestReloadRefusesASessionTheIndexNoLongerHolds(t *testing.T) {
 		"first request lost": {entries: sessionEntries()[4:]},
 		"no valid answer":    {entries: unanswered},
 	} {
-		if _, err := Reload(context.Background(), a, ref, 5); !errors.Is(err, ErrNoReload) {
+		if _, err := Reload(context.Background(), a, ref, 5, nil); !errors.Is(err, ErrNoReload) {
 			t.Errorf("%s: Reload = %v, want ErrNoReload", name, err)
 		}
 	}
@@ -153,7 +153,23 @@ func TestReloadRefusesASessionTheIndexNoLongerHolds(t *testing.T) {
 
 func TestReloadReturnsGatewayErrorsUnchanged(t *testing.T) {
 	a := &fakeAuditor{err: status.Error(codes.Unavailable, "the index could not be saved")}
-	if _, err := Reload(context.Background(), a, ref, 5); status.Code(err) != codes.Unavailable || errors.Is(err, ErrNoReload) {
+	if _, err := Reload(context.Background(), a, ref, 5, nil); status.Code(err) != codes.Unavailable || errors.Is(err, ErrNoReload) {
 		t.Fatalf("Reload = %v", err)
+	}
+}
+
+func TestReloadSkipsAnswersTheIntentDoesNotRecord(t *testing.T) {
+	a := &fakeAuditor{entries: sessionEntries()}
+	// 8's and 5's answers are valid; only the earlier one is recorded.
+	conv, err := Reload(context.Background(), a, ref, 5, func(turn Turn) bool { return turn.Kind == KindQuestions })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roles(conv) != "system,user,assistant" || conv[2].GetContent() != questionsAnswer {
+		t.Fatalf("conversation = %v", conv)
+	}
+	_, err = Reload(context.Background(), a, ref, 5, func(Turn) bool { return false })
+	if !errors.Is(err, ErrNoReload) {
+		t.Fatalf("Reload = %v, want ErrNoReload", err)
 	}
 }

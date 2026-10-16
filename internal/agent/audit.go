@@ -102,10 +102,13 @@ type llmResponse struct {
 
 // Reload rebuilds a planning session from the audit log (M3 spec §4.3): the
 // messages of the session's latest llm.request whose llm.response holds a valid
-// turn, followed by that turn. session is the sequence number of the session's
-// first llm.request. Gateway errors are returned unchanged; a session the
+// turn that accept admits (nil admits every turn), followed by that turn. accept
+// ties the rebuilt conversation to the Intent's recorded state, so that an
+// answer the operator never recorded, lost to a crash or rejected by a check,
+// is skipped. session is the sequence number of the session's first
+// llm.request. Gateway errors are returned unchanged; a session the
 // audit index no longer wholly holds gives an error wrapping ErrNoReload.
-func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session uint64) (Conversation, error) {
+func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session uint64, accept func(Turn) bool) (Conversation, error) {
 	if session == 0 {
 		return nil, fmt.Errorf("%w: the Intent has no planning session", ErrNoReload)
 	}
@@ -117,7 +120,8 @@ func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session ui
 		return nil, err
 	}
 	// The index can also lose entries in a gateway crash, which truncated does
-	// not report: the session's first request must be there.
+	// not report. The first request must be there, which catches the loss of
+	// the session's start; accept catches a lost tail.
 	if truncated || len(requests) == 0 || requests[0].GetSeq() != session {
 		return nil, fmt.Errorf("%w: the audit index no longer holds llm.request %d", ErrNoReload, session)
 	}
@@ -140,7 +144,8 @@ func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session ui
 		if !ok {
 			continue
 		}
-		if _, err := ParseTurn(content); err != nil {
+		turn, err := ParseTurn(content)
+		if err != nil || (accept != nil && !accept(turn)) {
 			continue
 		}
 		var p llmRequest
@@ -156,5 +161,5 @@ func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session ui
 		}
 		return append(conv, &gatewayv1.Message{Role: roleAssistant, Content: content}), nil
 	}
-	return nil, fmt.Errorf("%w: no valid answer since llm.request %d", ErrNoReload, session)
+	return nil, fmt.Errorf("%w: no answer since llm.request %d matches the Intent's state", ErrNoReload, session)
 }

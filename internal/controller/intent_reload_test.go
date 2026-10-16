@@ -6,6 +6,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -15,6 +17,7 @@ import (
 
 var _ = Describe("Intent planning after an operator restart", func() {
 	var key types.NamespacedName
+	const web = "web"
 	q1 := lastv1alpha1.Question{ID: "q1", Text: "Which namespace?"}
 	look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", "namespaces"}}}
 	steps := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "namespaces")}
@@ -25,7 +28,17 @@ var _ = Describe("Intent planning after an operator restart", func() {
 
 	// restart drops the suite controller's conversation, as an operator restart
 	// or a leader change would.
-	restart := func() { intentReconciler.sessions.drop(key) }
+	// It first waits for the controller to have stored the session, which it
+	// does after writing the status.
+	restart := func() {
+		Eventually(func() bool {
+			intentReconciler.sessions.mu.Lock()
+			defer intentReconciler.sessions.mu.Unlock()
+			_, ok := intentReconciler.sessions.m[key]
+			return ok
+		}).Should(BeTrue())
+		intentReconciler.sessions.drop(key)
+	}
 
 	It("reloads the conversation from the audit log", func() {
 		gw.setScript(key, &script{llm: turns(questionsTurn(q1), answer(steps))})
@@ -35,7 +48,7 @@ var _ = Describe("Intent planning after an operator restart", func() {
 		first := gw.lastRequest(key).GetMessages()
 
 		restart()
-		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: "web"})
+		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: web})
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 		Expect(gw.calls(key)).To(Equal([]string{callLLM, queryAudit, queryAudit, callLLM}))
 		msgs := gw.lastRequest(key).GetMessages()
@@ -60,6 +73,7 @@ var _ = Describe("Intent planning after an operator restart", func() {
 			queryAudit, queryAudit, queryAudit, callLLM}))
 		msgs := gw.lastRequest(key).GetMessages()
 		Expect(roles(msgs)).To(Equal([]string{roleSystem, roleUser, roleAssistant, roleUser}))
+		Expect(msgs[2].GetContent()).To(Equal(commandTurn(look)))
 		Expect(msgs[3].GetContent()).To(Equal("The command exited 0.\nstdout:\ndefault\nstderr: empty\n"))
 	})
 
@@ -75,7 +89,7 @@ var _ = Describe("Intent planning after an operator restart", func() {
 		session := getIntent(key).Status.PlanningSessionSeq
 
 		restart()
-		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: "web"})
+		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: web})
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 		Expect(gw.calls(key)).To(Equal([]string{callLLM, queryAudit, callLLM}))
 		msgs := gw.lastRequest(key).GetMessages()
@@ -85,5 +99,25 @@ var _ = Describe("Intent planning after an operator restart", func() {
 		in := getIntent(key)
 		Expect(in.Status.PlanningSessionSeq).NotTo(Equal(session))
 		Expect(in.Status.PlanningSessionSeq).To(Equal(int64(gw.auditOf(key, "llm.request")[1].GetSeq())))
+	})
+
+	It("starts a new session, saying why, when the gateway refuses the audit query", func() {
+		gw.setScript(key, &script{queryErr: status.Error(codes.Unimplemented, "unknown method QueryAudit"),
+			llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+				if strings.Contains(requestText(req), "could not reload") {
+					return answer(steps), nil
+				}
+				return questionsTurn(q1), nil
+			}})
+		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseClarifying))
+
+		restart()
+		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: web})
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, queryAudit, callLLM}))
+		msgs := gw.lastRequest(key).GetMessages()
+		Expect(roles(msgs)).To(Equal([]string{roleSystem, roleUser}))
+		Expect(msgs[1].GetContent()).To(HavePrefix("Note: " + noteRestarted))
 	})
 })

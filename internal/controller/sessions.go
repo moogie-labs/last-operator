@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -12,6 +13,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // noteRestarted tells the model why its session started over.
@@ -67,7 +69,7 @@ func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.In
 	if conv, ok := r.sessions.get(in); ok {
 		return conv, false, nil
 	}
-	conv, err = agent.Reload(ctx, r.Gateway, intentRef(in), uint64(in.Status.PlanningSessionSeq))
+	conv, err = agent.Reload(ctx, r.Gateway, intentRef(in), uint64(in.Status.PlanningSessionSeq), recordedTurn(in))
 	switch {
 	case err == nil:
 		logf.FromContext(ctx).Info("Reloaded planning conversation", "session", in.Status.PlanningSessionSeq, "messages", len(conv))
@@ -109,4 +111,26 @@ func (r *IntentReconciler) pendingTurn(ctx context.Context, in *lastv1alpha1.Int
 		return c.Message, nil
 	}
 	return "", nil
+}
+
+// recordedTurn admits only the model turn the Intent's status records: the
+// questions in status.questions, or the command whose hash is the pending
+// command's. A reloaded conversation must end with that turn, because
+// pendingTurn answers it. With neither recorded nothing is admitted.
+func recordedTurn(in *lastv1alpha1.Intent) func(agent.Turn) bool {
+	if len(in.Status.Questions) > 0 {
+		return func(t agent.Turn) bool {
+			return t.Kind == agent.KindQuestions && reflect.DeepEqual(t.Questions, in.Status.Questions)
+		}
+	}
+	if pc := in.Status.PendingCommand; pc != nil {
+		return func(t agent.Turn) bool {
+			if t.Kind != agent.KindCommand || t.Command == nil {
+				return false
+			}
+			hash, _, err := plan.DiscoveryHash(*t.Command, pc.Nonce)
+			return err == nil && hash == pc.Hash
+		}
+	}
+	return func(agent.Turn) bool { return false }
 }
