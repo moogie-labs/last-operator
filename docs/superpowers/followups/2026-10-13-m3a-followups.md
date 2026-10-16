@@ -15,7 +15,7 @@ Deferred items from the final review of `docs/superpowers/plans/2026-10-05-m3a-g
 ## Deferred
 
 - **Fallback text joining.** The Anthropic adapter joins the text blocks on either side of a mid-stream fallback. We believe this is correct, because the fallback continues from the partial text, but no test pins it. Confirm it in the M3c real-model demo and add a pinning test.
-- **Discovery refusal wording.** Discovery refusals reuse the Create wording ("this plan already opened a phase", "approval … denies this plan"). Tune the wording before M3c shows it to users.
+- **Discovery refusal wording.** Done in M3c: BeginPhase and RunCommand name "this discovery command" for stage Discovery, and a replayed discovery subject says it already ran.
 - **Token budget.** Done in M3b. The operator sends `max_tokens` 64000, and M3 spec §3.2 is amended. Still open: OpenAI-compatible models with a smaller output limit reject 64000 with a 400 (`InvalidArgument`), which fails planning. A per-provider limit (`LLMProvider.spec.maxTokens`, or clamping in the adapter) belongs with the first OpenAI-compatible user.
 - **Pending index cap.** During API outages the per-Intent pending index entries grow without bound. Cap them at `maxIndexEntries`.
 - **ObserveQuery placement.** `QueryAudit` counts only successful calls. Count every call.

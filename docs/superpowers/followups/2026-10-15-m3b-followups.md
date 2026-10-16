@@ -20,7 +20,7 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
     - end the phase when *any* Approve exists for the subject, whatever the Deny says, in both branches;
     - tolerate `FailedPrecondition`;
     - add one spec.
-- **A RunCommand refusal is missing from the M3 spec §6 table.** The phase opens, then ends failed, and the model is told "The command did not run: …". Add a row.
+- **A RunCommand refusal is missing from the M3 spec §6 table.** Done in M3c.
 - **`Internal` from `QueryAudit` retries forever.** It means a verification failure or a missing indexed entry. The Intent stays in Planning and only the logs say why. Consider failing it with `PlanningFailed`.
 - **A repeated identical command can confuse a reload.** If the model asks for the same command twice and the operator crashes before recording the second, the reload predicate matches both turns. It then appends the first run's result after the second turn. The impact is low, because the output is for the same command.
 - **A new session after a failed reload shows answers without their questions.** The first message lists `- q1: web` without the question text, although `status.questions` still holds it.

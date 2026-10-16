@@ -4,8 +4,11 @@ An AI-driven Kubernetes operator that turns natural-language requests into
 reviewed, audited, continuously reconciled infrastructure.
 Design: [`docs/superpowers/specs/2026-09-26-last-operator-design.md`](docs/superpowers/specs/2026-09-26-last-operator-design.md).
 
-**Status:** foundation (M0–M1). The CRDs and the write-once audit log are in
-place; the agent, sandboxes, and approvals arrive in later milestones.
+**Status:** M3 (real LLMs). The operator plans with Anthropic Claude or an
+OpenAI-compatible model, asks clarifying questions, runs approved discovery
+commands, and executes approved plans in sandbox pods. Every action goes
+through the gateway, which records it in a write-once audit log. Image builds,
+day-2 changes, allow rules and rule suggestions arrive in M4–M7.
 
 ## What works today
 
@@ -14,6 +17,9 @@ place; the agent, sandboxes, and approvals arrive in later milestones.
   Ed25519-signed audit log to S3 Object Lock storage in compliance mode, and
   refuses to start if the store is unreachable or not locked correctly.
 - A bundled single-node **RustFS** audit store, provisioned with least-privilege users.
+- `kubectl last "<request>"`, which creates an Intent and follows it: it asks you
+  the model's questions, shows each discovery command and the plan, and asks for
+  your approval. Also `kubectl last answer | plan | approve | deny NAME`.
 - `kubectl last audit verify | log | conformance`.
 
 ## Building the CLI
@@ -24,6 +30,45 @@ go build -o bin/kubectl-last ./cmd/kubectl-last
 
 Put `bin/kubectl-last` on your `PATH` (keeping the name `kubectl-last`) to use it
 as `kubectl last`.
+
+## Using `kubectl last`
+
+```bash
+kubectl last "run an nginx web server serving a hello page" -n team-x
+```
+
+The plugin creates an Intent and follows it, every two seconds:
+
+- **Questions.** Each clarifying question is shown as a numbered menu or a
+  free-text prompt.
+- **Discovery commands and the plan.** Each is shown with its commands, files
+  (by path and size), Providers and egress, then the plugin asks
+  `Approve? [y/N/d]`:
+  - `y` approves;
+  - `d` denies, after asking for a reason, which the model reads;
+  - `N` or Enter leaves it pending.
+- **Ready.** At Ready it lists the ManagedResources and output Secrets.
+
+Ctrl-C stops following; the Intent carries on. Pick it up again with:
+
+```bash
+kubectl last plan NAME                  # what the Intent is waiting for (read-only)
+kubectl last answer NAME                # answer its open questions
+kubectl last approve NAME [--hash H]    # approve exactly what plan shows
+kubectl last deny NAME --reason R
+```
+
+Every decision is an `IntentApproval` that you create under your own identity,
+for the hash you were shown.
+
+## Demo against Claude (opt-in)
+
+```bash
+export ANTHROPIC_API_KEY=...            # spends API credit
+make demo                               # kind + chart + an anthropic LLMProvider, then kubectl last
+```
+
+The key goes only into a Secret in `last-gateway`. The demo never runs in CI.
 
 ## Quick start (kind)
 

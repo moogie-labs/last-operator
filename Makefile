@@ -67,6 +67,10 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 test-e2e: manifests generate fmt vet ## Run the e2e tests against a kind cluster (see hack/e2e.sh).
 	./hack/e2e.sh
 
+.PHONY: demo
+demo: ## Run M3's done-criterion on kind against Claude (needs ANTHROPIC_API_KEY; never run in CI; spends API credit).
+	./hack/demo.sh
+
 .PHONY: test-integration
 test-integration: setup-envtest ## Run integration tests (requires Docker).
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags integration ./... -run Integration -count=1 -v -timeout 20m

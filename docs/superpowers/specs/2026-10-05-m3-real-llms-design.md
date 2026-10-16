@@ -213,14 +213,17 @@ Every command acts as the user, with their kubeconfig identity. The CLI never ta
 
 - **`kubectl last "<request>" [-n NS] [--name NAME] [--no-follow]`**
   - Creates an Intent. The default name is a DNS-safe slug of the first words of the request plus a 4-character random suffix.
-  - Then follows it with a watch:
+  - Then follows it, reading the Intent every 2 seconds:
     - **Clarifying:** prints each question; a numbered menu when it has `options`, otherwise a free-text line. Then patches `spec.answers`.
-    - **AwaitingDiscoveryApproval:** prints the command (argv or script, files listed by path with their size, Providers, egress, the model's reason) and asks `Approve? [y/N/d]`. `y` approves, `d` denies after asking for a reason, and `N` or Enter leaves it pending and keeps following.
+    - **AwaitingDiscoveryApproval:** prints the command (argv or script, files listed by path with their size, Providers, egress, the model's reason) and asks `Approve? [y/N/d]`. `y` approves, `d` denies after asking for a reason, and `N` or Enter leaves it pending and keeps following. Each command and plan is put to the user once; one left pending is decided later with `approve` or `deny`.
     - **AwaitingApproval:** prints the plan summary, each step (reason, argv or script, files by path, Providers, egress) and each resource with its probes and outputs, then asks the same prompt.
     - **Executing and Verifying:** prints phase changes.
     - **Ready:** prints the ManagedResources and output Secret names, then exits 0.
     - **Failed:** prints the reason and message, then exits 1.
   - Ctrl-C stops following; it never cancels the Intent. `--no-follow` prints the Intent's name and exits.
+  - A request with no space in it is refused as a mistyped command, so `kubectl last aprove web` never creates an Intent.
+  - If input ends at a prompt, the CLI stops and names the commands to continue with.
+  - Model-written text (summaries, reasons, commands, file paths, questions) is shown with control characters and bidirectional overrides escaped, so nothing can hide or reorder what an approver reads.
 - **`kubectl last answer NAME`** prompts for the open questions.
 - **`kubectl last plan NAME`** prints the pending command or the plan, read-only.
 - **`kubectl last approve NAME`** and **`kubectl last deny NAME --reason R`** approve or deny exactly what `plan` shows.
@@ -229,6 +232,7 @@ Every command acts as the user, with their kubeconfig identity. The CLI never ta
 - `approvedBy` is the user's name from a `SelfSubjectReview`.
 - If the subject changed after it was displayed, the approval matches nothing and the CLI says so.
 - They print the hash they acted on.
+- `approve` and `deny` take `--hash H` and decide only if the Intent still asks about H, for scripts that showed the subject earlier.
 
 **Output** is plain text, with no TUI library. The prompts read lines from stdin, so the scripted e2e can drive them.
 
@@ -243,6 +247,7 @@ Every command acts as the user, with their kubeconfig identity. The CLI never ta
 | Malformed turn | A correction turn: at most 3 answers per turn (2 corrections). |
 | Discovery command exits non-zero | The phase ends `succeeded=false`. The result is fed to the model, and the Intent stays in Planning. |
 | Discovery phase refused (policy, approval withdrawn) | No phase is opened. The refusal is reported to the model as "The command did not run: …". |
+| Discovery command refused while it runs (approval withdrawn, policy narrowed) | The gateway ends the phase as failed, and the model is told "The command did not run: …". |
 | Turn or command cap reached | The Intent fails with `PlanningFailed`. |
 | `QueryAudit` reload incomplete | A new session starts, noted in the transcript. |
 
