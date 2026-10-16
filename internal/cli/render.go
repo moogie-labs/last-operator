@@ -138,8 +138,6 @@ func renderCommand(w io.Writer, indent string, c lastv1alpha1.Command) {
 }
 
 // renderSubject writes what the Intent asks its user to decide in stage.
-//
-//nolint:unused // used by the approve and deny commands (Task 3)
 func renderSubject(w io.Writer, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) {
 	if stage == lastv1alpha1.StageDiscovery {
 		renderPending(w, in.Status.PendingCommand)

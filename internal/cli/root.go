@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 )
 
@@ -72,6 +73,7 @@ func NewRootCommand(d Deps) *cobra.Command {
 	root.SetOut(d.Out)
 	root.SetErr(d.Err)
 	kf.addTo(root)
-	root.AddCommand(newAuditCommand(d), newPlanCommand(d, kf))
+	root.AddCommand(newAuditCommand(d), newPlanCommand(d, kf),
+		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny))
 	return root
 }

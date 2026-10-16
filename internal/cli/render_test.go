@@ -104,7 +104,7 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 
 func TestRenderPendingShowsTheCommandAndItsReason(t *testing.T) {
 	var b strings.Builder
-	renderPending(&b, &lastv1alpha1.PendingCommand{Hash: h1, Reason: "see what exists", Command: argvCommand(wordKubectl, "get", "ns")})
+	renderPending(&b, &lastv1alpha1.PendingCommand{Hash: h1, Reason: seeWhatExists, Command: argvCommand(wordKubectl, "get", "ns")})
 	want := "Discovery command " + h1 + " (stage Discovery)\nReason: see what exists\n  run:       kubectl get ns\n"
 	if b.String() != want {
 		t.Fatalf("pending command =\n%s\nwant\n%s", b.String(), want)

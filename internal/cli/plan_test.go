@@ -12,7 +12,7 @@ import (
 func TestPlanShowsThePendingCommandOrThePlan(t *testing.T) {
 	look := testIntent("look", func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingDiscoveryApproval
-		in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Reason: "see what exists", Command: argvCommand("kubectl", "get", "ns")}
+		in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Reason: seeWhatExists, Command: argvCommand("kubectl", "get", "ns")}
 		setReady(in, "AwaitingDiscoveryApproval", "Waiting for an IntentApproval of discovery command "+h1)
 	})
 	web := testIntent("web", func(in *lastv1alpha1.Intent) {
