@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 
 	"google.golang.org/grpc"
 
@@ -76,4 +79,82 @@ func DiscoveryResult(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, s
 		return ResultLostTurn(why), nil
 	}
 	return resultTurn(*found), nil
+}
+
+// ErrNoReload means the audit log no longer holds the whole planning session,
+// so it cannot be rebuilt.
+var ErrNoReload = errors.New("agent: the conversation cannot be reloaded")
+
+// llmRequest and llmResponse are the payloads of llm.request and llm.response
+// audit entries, as the gateway writes them.
+type llmRequest struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+}
+
+type llmResponse struct {
+	RequestSeq uint64 `json:"requestSeq"`
+	Content    string `json:"content"`
+	Error      string `json:"error,omitempty"`
+}
+
+// Reload rebuilds a planning session from the audit log (M3 spec §4.3): the
+// messages of the session's latest llm.request whose llm.response holds a valid
+// turn, followed by that turn. session is the sequence number of the session's
+// first llm.request. Gateway errors are returned unchanged; a session the
+// audit index no longer wholly holds gives an error wrapping ErrNoReload.
+func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session uint64) (Conversation, error) {
+	if session == 0 {
+		return nil, fmt.Errorf("%w: the Intent has no planning session", ErrNoReload)
+	}
+	var requests []*gatewayv1.AuditEntry
+	truncated, err := scan(ctx, a, ref, audit.TypeLLMRequest, session-1, func(e *gatewayv1.AuditEntry) {
+		requests = append(requests, e)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The index can also lose entries in a gateway crash, which truncated does
+	// not report: the session's first request must be there.
+	if truncated || len(requests) == 0 || requests[0].GetSeq() != session {
+		return nil, fmt.Errorf("%w: the audit index no longer holds llm.request %d", ErrNoReload, session)
+	}
+	answers := map[uint64]string{}
+	truncated, err = scan(ctx, a, ref, audit.TypeLLMResponse, session-1, func(e *gatewayv1.AuditEntry) {
+		var p llmResponse
+		if json.Unmarshal(e.GetPayload(), &p) == nil && p.Error == "" {
+			answers[p.RequestSeq] = p.Content
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: the audit index dropped part of the session", ErrNoReload)
+	}
+	for _, request := range slices.Backward(requests) {
+		seq := request.GetSeq()
+		content, ok := answers[seq]
+		if !ok {
+			continue
+		}
+		if _, err := ParseTurn(content); err != nil {
+			continue
+		}
+		var p llmRequest
+		if err := json.Unmarshal(request.GetPayload(), &p); err != nil {
+			return nil, fmt.Errorf("%w: llm.request %d: %v", ErrNoReload, seq, err)
+		}
+		conv := make(Conversation, 0, len(p.Messages)+1)
+		for _, m := range p.Messages {
+			conv = append(conv, &gatewayv1.Message{Role: m.Role, Content: m.Content})
+		}
+		if len(conv) == 0 || conv[0].GetRole() != roleSystem {
+			return nil, fmt.Errorf("%w: llm.request %d does not start with a system prompt", ErrNoReload, seq)
+		}
+		return append(conv, &gatewayv1.Message{Role: roleAssistant, Content: content}), nil
+	}
+	return nil, fmt.Errorf("%w: no valid answer since llm.request %d", ErrNoReload, session)
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -93,5 +94,66 @@ func TestResultTurnClipsEachStream(t *testing.T) {
 	if !strings.HasPrefix(got, "The command could not finish: timed out\nstdout (truncated):\n") ||
 		!strings.HasSuffix(got, "\nstderr: empty\n") || !utf8.ValidString(got) || len(got) > maxResultBytes+100 {
 		t.Fatalf("resultTurn = %d bytes: %.120q", len(got), got)
+	}
+}
+
+// sessionEntries is the audit index of an Intent whose current planning
+// session started at llm.request 5, after an earlier session at 2.
+func sessionEntries() []*gatewayv1.AuditEntry {
+	msg := func(role, content string) map[string]string {
+		return map[string]string{"role": role, "content": content}
+	}
+	sys, user := msg("system", "sys"), msg("user", "run nginx")
+	asked, answers := msg("assistant", questionsAnswer), msg("user", "Answers:\n- q1: default\n")
+	asks, result := msg("assistant", commandAnswer), msg("user", "The command exited 0.")
+	garbage, correction := msg("assistant", "garbage"), msg("user", "That answer is not a valid turn")
+	req := func(seq uint64, msgs ...map[string]string) *gatewayv1.AuditEntry {
+		return entry(seq, audit.TypeLLMRequest, "", "", map[string]any{"messages": msgs})
+	}
+	resp := func(seq, request uint64, content, errText string) *gatewayv1.AuditEntry {
+		return entry(seq, audit.TypeLLMResponse, "", "", llmResponse{RequestSeq: request, Content: content, Error: errText})
+	}
+	return []*gatewayv1.AuditEntry{
+		req(2, sys, user), resp(3, 2, commandAnswer, ""),
+		req(5, sys, user), resp(6, 5, questionsAnswer, ""),
+		req(8, sys, user, asked, answers), resp(9, 8, commandAnswer, ""),
+		req(10, sys, user, asked, answers, asks, result), resp(11, 10, "garbage", ""),
+		req(12, sys, user, asked, answers, asks, result, garbage, correction), resp(13, 12, "", "llm: unavailable"),
+	}
+}
+
+func TestReloadRebuildsTheSessionFromItsLatestValidAnswer(t *testing.T) {
+	a := &fakeAuditor{pageSize: 2, entries: sessionEntries()}
+	conv, err := Reload(context.Background(), a, ref, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// llm.request 12 failed and 10's answer is not a turn: 8's answer is the last one the model gave.
+	if roles(conv) != "system,user,assistant,user,assistant" || conv[4].GetContent() != commandAnswer ||
+		conv.ModelTurns() != 2 || conv.Commands() != 1 {
+		t.Fatalf("conversation = %v", conv)
+	}
+}
+
+func TestReloadRefusesASessionTheIndexNoLongerHolds(t *testing.T) {
+	unanswered := []*gatewayv1.AuditEntry{
+		entry(5, audit.TypeLLMRequest, "", "", map[string]any{"messages": []any{}}),
+		entry(6, audit.TypeLLMResponse, "", "", llmResponse{RequestSeq: 5, Content: "garbage"}),
+	}
+	for name, a := range map[string]*fakeAuditor{
+		"truncated":          {entries: sessionEntries(), truncated: true},
+		"first request lost": {entries: sessionEntries()[4:]},
+		"no valid answer":    {entries: unanswered},
+	} {
+		if _, err := Reload(context.Background(), a, ref, 5); !errors.Is(err, ErrNoReload) {
+			t.Errorf("%s: Reload = %v, want ErrNoReload", name, err)
+		}
+	}
+}
+
+func TestReloadReturnsGatewayErrorsUnchanged(t *testing.T) {
+	a := &fakeAuditor{err: status.Error(codes.Unavailable, "the index could not be saved")}
+	if _, err := Reload(context.Background(), a, ref, 5); status.Code(err) != codes.Unavailable || errors.Is(err, ErrNoReload) {
+		t.Fatalf("Reload = %v", err)
 	}
 }

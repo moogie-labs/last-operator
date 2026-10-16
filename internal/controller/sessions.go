@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
@@ -55,15 +57,27 @@ func (s *sessionStore) drop(key types.NamespacedName) {
 }
 
 // conversation returns the Intent's planning session so far. fresh means a new
-// session starts: the Intent has none yet, or this process does not hold it.
-func (r *IntentReconciler) conversation(in *lastv1alpha1.Intent) (conv agent.Conversation, fresh bool) {
+// session starts: the Intent has none yet, or its session can no longer be
+// rebuilt. A session this process does not hold, after an operator restart or
+// a leader change, is reloaded from the audit log (M3 spec §4.3).
+func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.Intent) (conv agent.Conversation, fresh bool, err error) {
 	if in.Status.PlanningSessionSeq == 0 {
-		return newConversation(in, ""), true
+		return newConversation(in, ""), true, nil
 	}
 	if conv, ok := r.sessions.get(in); ok {
-		return conv, false
+		return conv, false, nil
 	}
-	return newConversation(in, noteRestarted), true
+	conv, err = agent.Reload(ctx, r.Gateway, intentRef(in), uint64(in.Status.PlanningSessionSeq))
+	switch {
+	case err == nil:
+		logf.FromContext(ctx).Info("Reloaded planning conversation", "session", in.Status.PlanningSessionSeq, "messages", len(conv))
+		r.sessions.put(in, conv)
+		return conv, false, nil
+	case errors.Is(err, agent.ErrNoReload) || terminal(err):
+		logf.FromContext(ctx).Info("Could not reload planning conversation; starting a new session", "reason", err.Error())
+		return newConversation(in, noteRestarted), true, nil
+	}
+	return nil, false, err
 }
 
 // newConversation starts a session for the Intent's current spec.
