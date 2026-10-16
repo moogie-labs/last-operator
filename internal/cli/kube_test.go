@@ -33,8 +33,6 @@ func fakeClient(objs ...client.Object) client.WithWatch {
 
 // depsFor runs the CLI against c as testUser in testNS, with input as what the
 // user types.
-//
-//nolint:unparam // later tasks feed input to prompts
 func depsFor(c client.Client, input string) (Deps, *bytes.Buffer) {
 	var out bytes.Buffer
 	return Deps{

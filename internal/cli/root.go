@@ -74,6 +74,6 @@ func NewRootCommand(d Deps) *cobra.Command {
 	root.SetErr(d.Err)
 	kf.addTo(root)
 	root.AddCommand(newAuditCommand(d), newPlanCommand(d, kf),
-		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny))
+		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny), newAnswerCommand(d, kf))
 	return root
 }
