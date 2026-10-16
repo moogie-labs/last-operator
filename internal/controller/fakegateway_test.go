@@ -14,6 +14,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // Call log entries.
@@ -25,6 +26,10 @@ const (
 	runS1        = "RunCommand:s1"
 	runProbes    = "RunProbes"
 	trueCmd      = "true"
+
+	beginDiscovery   = "BeginPhase:Discovery"
+	runDiscoveryStep = "RunCommand:discovery"
+	queryAudit       = "QueryAudit"
 )
 
 // llmFunc answers one CallLLM request.
@@ -36,7 +41,7 @@ func turns(answers ...string) llmFunc {
 	return func(req *gatewayv1.CallLLMRequest) (string, error) {
 		n := 0
 		for _, m := range req.GetMessages() {
-			if m.GetRole() == "assistant" {
+			if m.GetRole() == roleAssistant {
 				n++
 			}
 		}
@@ -57,6 +62,10 @@ type script struct {
 	failing  map[string]bool   // probe ID → fails; other probes pass
 	probeErr error             // RunProbes error
 	onProbe  func()            // called during a successful RunProbes
+
+	beginErr       error // returned by BeginPhase once the call is recorded
+	queryErr       error // returned by QueryAudit
+	auditTruncated bool  // QueryAudit reports that the index dropped entries
 }
 
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
@@ -68,22 +77,25 @@ type fakeGateway struct {
 
 	c client.Client
 
-	mu       sync.Mutex
-	scripts  map[types.NamespacedName]*script
-	log      map[types.NamespacedName][]string // "CallLLM", "BeginPhase", "RunCommand:s1", "EndPhase:failed", …
-	llmReqs  map[types.NamespacedName][]*gatewayv1.CallLLMRequest
-	argv     map[types.NamespacedName]map[string][]string          // step ID → argv sent
-	outputs  map[types.NamespacedName]map[string]map[string]string // ManagedResource → values sent
-	open     map[types.NamespacedName]string                       // subject of the open phase
-	executed map[types.NamespacedName]string                       // hash of the last executed plan
-	seq      uint64                                                // the last audit sequence number, across Intents
-	audit    map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
+	mu        sync.Mutex
+	scripts   map[types.NamespacedName]*script
+	log       map[types.NamespacedName][]string // "CallLLM", "BeginPhase", "RunCommand:s1", "EndPhase:failed", …
+	llmReqs   map[types.NamespacedName][]*gatewayv1.CallLLMRequest
+	argv      map[types.NamespacedName]map[string][]string          // step ID → argv sent
+	outputs   map[types.NamespacedName]map[string]map[string]string // ManagedResource → values sent
+	open      map[types.NamespacedName]string                       // subject of the open phase
+	openStage map[types.NamespacedName]string                       // stage of the open phase
+	used      map[string]bool                                       // Discovery subjects already opened: they are single-use
+	executed  map[types.NamespacedName]string                       // hash of the last executed plan
+	seq       uint64                                                // the last audit sequence number, across Intents
+	audit     map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
 }
 
 func newFakeGateway(c client.Client) *fakeGateway {
 	return &fakeGateway{c: c, scripts: map[types.NamespacedName]*script{}, log: map[types.NamespacedName][]string{},
 		llmReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{}, argv: map[types.NamespacedName]map[string][]string{},
 		outputs: map[types.NamespacedName]map[string]map[string]string{}, open: map[types.NamespacedName]string{},
+		openStage: map[types.NamespacedName]string{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
 }
 
@@ -177,15 +189,15 @@ func (f *fakeGateway) auditOf(key types.NamespacedName, typ string) []*gatewayv1
 }
 
 // approved reports whether an IntentApproval approves subject for the Intent's
-// Create stage and none denies it.
-func (f *fakeGateway) approved(ctx context.Context, key types.NamespacedName, subject string) (bool, error) {
+// stage and none denies it.
+func (f *fakeGateway) approved(ctx context.Context, key types.NamespacedName, stage, subject string) (bool, error) {
 	var list lastv1alpha1.IntentApprovalList
 	if err := f.c.List(ctx, &list, client.InNamespace(key.Namespace)); err != nil {
 		return false, err
 	}
 	ok := false
 	for _, a := range list.Items {
-		if a.Spec.IntentRef.Name != key.Name || a.Spec.Stage != lastv1alpha1.StageCreate || a.Spec.SubjectHash != subject {
+		if a.Spec.IntentRef.Name != key.Name || string(a.Spec.Stage) != stage || a.Spec.SubjectHash != subject {
 			continue
 		}
 		if a.Spec.Decision == lastv1alpha1.DecisionDeny {
@@ -196,22 +208,59 @@ func (f *fakeGateway) approved(ctx context.Context, key types.NamespacedName, su
 	return ok, nil
 }
 
+// pendingSubject checks a Discovery subject as the gateway does: it must be the
+// Intent's pending command, hashed with its nonce.
+func (f *fakeGateway) pendingSubject(ctx context.Context, key types.NamespacedName, subject string) error {
+	var in lastv1alpha1.Intent
+	if err := f.c.Get(ctx, key, &in); err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+	pc := in.Status.PendingCommand
+	if pc == nil {
+		return status.Error(codes.FailedPrecondition, "intent has no pending discovery command")
+	}
+	hash, _, err := plan.DiscoveryHash(pc.Command, pc.Nonce)
+	if err != nil || pc.Hash != subject || hash != subject {
+		return status.Error(codes.PermissionDenied, "the subject is not the pending discovery command")
+	}
+	return nil
+}
+
 func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.BeginPhaseResponse, error) {
-	key := keyOf(in.GetIntent())
-	approved, err := f.approved(ctx, key, in.GetSubjectHash())
+	key, stage, subject := keyOf(in.GetIntent()), in.GetStage(), in.GetSubjectHash()
+	discovery := stage == string(lastv1alpha1.StageDiscovery)
+	approved, err := f.approved(ctx, key, stage, subject)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
+	var pendingErr error
+	if discovery {
+		pendingErr = f.pendingSubject(ctx, key, subject)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record(key, "BeginPhase")
+	if discovery {
+		f.record(key, beginDiscovery)
+	} else {
+		f.record(key, beginPhase)
+	}
+	if err := f.scriptFor(key).beginErr; err != nil {
+		return nil, err
+	}
 	switch {
 	case f.open[key] != "":
 		return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
+	case pendingErr != nil:
+		return nil, pendingErr
+	case f.used[subject]:
+		return nil, status.Error(codes.FailedPrecondition, "this discovery command was already run")
 	case !approved:
 		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	}
-	f.open[key] = in.GetSubjectHash()
+	f.open[key], f.openStage[key] = subject, stage
+	if discovery {
+		f.used[subject] = true
+	}
 	return &gatewayv1.BeginPhaseResponse{}, nil
 }
 
@@ -239,6 +288,8 @@ func (f *fakeGateway) RunCommand(_ context.Context, in *gatewayv1.RunCommandRequ
 	if res.ExitCode != 0 {
 		res.Stderr = "boom"
 	}
+	f.appendAudit(key, "command.result", f.openStage[key], in.GetSubjectHash(),
+		map[string]any{"exitCode": res.ExitCode, "stdout": res.Stdout, "stderr": res.Stderr})
 	return &gatewayv1.RunCommandResponse{Result: res}, nil
 }
 
@@ -274,8 +325,11 @@ func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest,
 	if f.open[key] == "" || f.open[key] != in.GetSubjectHash() {
 		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
 	}
+	stage := f.openStage[key]
 	delete(f.open, key)
-	if in.GetSucceeded() {
+	delete(f.openStage, key)
+	// A Discovery phase ran one inspection command; it never becomes the executed plan.
+	if in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery) {
 		f.executed[key] = in.GetSubjectHash()
 	}
 	return &gatewayv1.EndPhaseResponse{}, nil
@@ -369,4 +423,41 @@ func (f *fakeGateway) updateScript(key types.NamespacedName, change func(*script
 		f.scripts[key] = &script{}
 	}
 	change(f.scripts[key])
+}
+
+func (f *fakeGateway) QueryAudit(_ context.Context, in *gatewayv1.QueryAuditRequest, _ ...grpc.CallOption) (*gatewayv1.QueryAuditResponse, error) {
+	key := keyOf(in.GetIntent())
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(key, queryAudit)
+	s := f.scriptFor(key)
+	if s.queryErr != nil {
+		return nil, s.queryErr
+	}
+	limit := int(in.GetLimit())
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 200 {
+		return nil, status.Error(codes.InvalidArgument, "limit must be 1..200")
+	}
+	resp := &gatewayv1.QueryAuditResponse{Truncated: s.auditTruncated}
+	for _, e := range f.audit[key] {
+		if e.GetSeq() <= in.GetAfterSeq() || (len(in.GetTypes()) > 0 && !slices.Contains(in.GetTypes(), e.GetType())) {
+			continue
+		}
+		if len(resp.Entries) == limit {
+			resp.More = true
+			break
+		}
+		resp.Entries = append(resp.Entries, e)
+	}
+	return resp, nil
+}
+
+// executedOf returns the hash of the Intent's last executed plan, or "".
+func (f *fakeGateway) executedOf(key types.NamespacedName) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.executed[key]
 }

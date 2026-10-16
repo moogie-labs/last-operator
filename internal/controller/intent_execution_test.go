@@ -18,7 +18,7 @@ import (
 
 var _ = Describe("Intent execution", func() {
 	var key types.NamespacedName
-	s1 := argvStep("s1", "kubectl", "get", "namespace", "x", "-o", "json")
+	s1 := argvStep("s1", argKubectl, argGet, "namespace", "x", "-o", "json")
 	s2 := argvStep("s2", "echo", "${steps.s1.json.metadata.name}")
 	resource := lastv1alpha1.ManagedResourceSpec{Description: "the namespace",
 		Probes:           []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}, Assert: trueCmd}},
@@ -145,5 +145,14 @@ var _ = Describe("Intent execution", func() {
 		// The EndPhase as failed is refused (no open phase) and changes nothing.
 		Expect(gw.calls(key)).To(Equal([]string{callLLM, endSucceeded, runProbes, endFailed}))
 		Expect(gw.openPhase(key)).To(BeEmpty())
+	})
+
+	It("retries an EndPhase that a running step holds off", func() {
+		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1})), stdout: stdout,
+			endErrs: []error{status.Error(codes.Aborted, "a step of this phase is still running; retry")}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(executedReason(key)).Should(Equal(ReasonPhaseEnded))
+		Expect(gw.calls(key)[:5]).To(Equal([]string{callLLM, beginPhase, runS1, endSucceeded, endSucceeded}))
 	})
 })

@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"context"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -71,10 +73,26 @@ func newConversation(in *lastv1alpha1.Intent, note string) agent.Conversation {
 }
 
 // pendingTurn returns the user turn the Intent's state owes the model (M3 spec
-// §4.3), or "" when there is none: the answers to status.questions.
-func pendingTurn(in *lastv1alpha1.Intent) string {
+// §4.3), or "" when there is none: the answers to status.questions, or how the
+// pending discovery command ended, which the Executed condition records.
+func (r *IntentReconciler) pendingTurn(ctx context.Context, in *lastv1alpha1.Intent) (string, error) {
 	if len(in.Status.Questions) > 0 {
-		return agent.AnswersTurn(in.Status.Questions, in.Spec.Answers)
+		return agent.AnswersTurn(in.Status.Questions, in.Spec.Answers), nil
 	}
-	return ""
+	pc := in.Status.PendingCommand
+	c := meta.FindStatusCondition(in.Status.Conditions, CondExecuted)
+	if pc == nil || c == nil {
+		return "", nil
+	}
+	switch c.Reason {
+	case ReasonDiscoveryRan:
+		turn, err := agent.DiscoveryResult(ctx, r.Gateway, intentRef(in), pc.Hash, uint64(in.Status.PlanningSessionSeq))
+		if terminal(err) {
+			return agent.ResultLostTurn(describe(err)), nil
+		}
+		return turn, err
+	case ReasonDiscoveryDenied, ReasonDiscoveryFailed:
+		return c.Message, nil
+	}
+	return "", nil
 }

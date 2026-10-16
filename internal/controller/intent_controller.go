@@ -68,6 +68,8 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.plan(ctx, &in)
 	case lastv1alpha1.PhaseClarifying:
 		return r.clarify(ctx, &in)
+	case lastv1alpha1.PhaseAwaitingDiscoveryApproval:
+		return r.awaitDiscovery(ctx, &in)
 	case lastv1alpha1.PhaseAwaitingApproval:
 		return r.awaitApproval(ctx, &in)
 	case lastv1alpha1.PhaseExecuting:

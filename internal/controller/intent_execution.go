@@ -91,7 +91,7 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 		if err != nil {
 			return r.endFailed(ctx, in, fmt.Sprintf("step %s: %v", step.ID, err), false)
 		}
-		res, err := r.runStep(ctx, in, step.ID, raw)
+		res, err := r.runStep(ctx, in, in.Status.Plan.Hash, step.ID, raw)
 		switch {
 		case ctx.Err() != nil:
 			return ctrl.Result{}, ctx.Err() // shutting down; the next process abandons the phase
@@ -117,8 +117,8 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 }
 
 // runStep calls RunCommand, retrying while another call of the phase holds it (Aborted).
-func (r *IntentReconciler) runStep(ctx context.Context, in *lastv1alpha1.Intent, id string, raw []byte) (*gatewayv1.CommandResult, error) {
-	req := &gatewayv1.RunCommandRequest{Intent: intentRef(in), SubjectHash: in.Status.Plan.Hash, StepId: id, CommandJson: raw}
+func (r *IntentReconciler) runStep(ctx context.Context, in *lastv1alpha1.Intent, subject, id string, raw []byte) (*gatewayv1.CommandResult, error) {
+	req := &gatewayv1.RunCommandRequest{Intent: intentRef(in), SubjectHash: subject, StepId: id, CommandJson: raw}
 	for attempt := 1; ; attempt++ {
 		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
 		resp, err := r.Gateway.RunCommand(sctx, req)
@@ -179,15 +179,16 @@ func (r *IntentReconciler) writeOutputs(ctx context.Context, in *lastv1alpha1.In
 	return nil
 }
 
-// endPhase calls EndPhase, retrying Unavailable with the same outcome: the
-// gateway treats a repeated EndPhase as a retry of its record save.
-func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent, succeeded bool, reason string) error {
-	req := &gatewayv1.EndPhaseRequest{Intent: intentRef(in), SubjectHash: in.Status.Plan.Hash, Succeeded: succeeded, Reason: reason}
+// endPhase calls EndPhase with the same outcome until it is recorded, retrying
+// while the gateway is unavailable (it treats a repeated EndPhase as a retry of
+// its record save) or a step of the phase still holds it (Aborted).
+func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent, subject string, succeeded bool, reason string) error {
+	req := &gatewayv1.EndPhaseRequest{Intent: intentRef(in), SubjectHash: subject, Succeeded: succeeded, Reason: reason}
 	for attempt := 1; ; attempt++ {
 		ectx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
 		_, err := r.Gateway.EndPhase(ectx, req)
 		cancel()
-		if status.Code(err) != codes.Unavailable || attempt == retries {
+		if code := status.Code(err); (code != codes.Unavailable && code != codes.Aborted) || attempt == retries {
 			return err
 		}
 		if err := sleep(ctx, r.RetryDelay); err != nil {
@@ -201,7 +202,7 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 // else fails the Intent.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
-	if err := r.endPhase(ctx, in, false, reason); err != nil && status.Code(err) != codes.FailedPrecondition {
+	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason); err != nil && status.Code(err) != codes.FailedPrecondition {
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
 	if replan {
@@ -212,7 +213,7 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 
 // abandonPhase closes a phase this process cannot continue and fails the Intent.
 func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.Intent, why string) (ctrl.Result, error) {
-	if err := r.endPhase(ctx, in, false, why); err != nil && status.Code(err) != codes.FailedPrecondition {
+	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); err != nil && status.Code(err) != codes.FailedPrecondition {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")
@@ -225,7 +226,7 @@ func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.In
 // RunProbes reports which plan the gateway last executed. Unless it is this
 // plan, the phase is ended as failed, in case it is still open.
 func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
-	err := r.endPhase(ctx, in, true, "")
+	err := r.endPhase(ctx, in, in.Status.Plan.Hash, true, "")
 	if status.Code(err) == codes.FailedPrecondition {
 		executed, perr := r.executedPlan(ctx, in)
 		if perr != nil {
@@ -233,7 +234,7 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 		}
 		if executed != in.Status.Plan.Hash {
 			why := "The phase ended before it succeeded (" + describe(err) + ")"
-			if eerr := r.endPhase(ctx, in, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
+			if eerr := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
 				return ctrl.Result{}, eerr // still StepsSucceeded: the next attempt asks again
 			}
 			return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")

@@ -24,6 +24,10 @@ const (
 	roleUser       = "user"
 	namespacesArg  = "namespaces"
 	whichNamespace = "Which namespace?"
+	roleAssistant  = "assistant"
+	roleSystem     = "system"
+	argGet         = "get"
+	argKubectl     = "kubectl"
 )
 
 func newNamespace() string {
@@ -95,8 +99,8 @@ func questionsTurn(qs ...lastv1alpha1.Question) string {
 }
 
 // commandTurn is a model answer asking to run a discovery command.
-func commandTurn(reason string, c lastv1alpha1.Command) string {
-	return encodeTurn(agent.Turn{Kind: agent.KindCommand, Command: &c, Reason: reason})
+func commandTurn(c lastv1alpha1.Command) string {
+	return encodeTurn(agent.Turn{Kind: agent.KindCommand, Command: &c, Reason: "see what exists"})
 }
 
 func encodeTurn(t agent.Turn) string {
@@ -212,4 +216,12 @@ func setInSync(ns, name string, s metav1.ConditionStatus) {
 		setCondition(&mr.Status.Conditions, mr.Generation, CondInSync, s, ReasonProbesFailed, "set by the test")
 		return k8sClient.Status().Update(ctx, mr)
 	})).To(Succeed())
+}
+
+// approveCommand files a decision on a discovery command, as kubectl last does.
+func approveCommand(key types.NamespacedName, subject string, decision lastv1alpha1.Decision, reason string) {
+	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, Stage: lastv1alpha1.StageDiscovery,
+			SubjectHash: subject, Decision: decision, ApprovedBy: "alice", Reason: reason}}
+	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }

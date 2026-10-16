@@ -66,9 +66,14 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	if in.Generation != in.Status.ObservedGeneration {
 		return r.startPlanning(ctx, in, "")
 	}
+	pctx, cancel := context.WithTimeout(ctx, planTimeout)
+	defer cancel()
 	conv, fresh := r.conversation(in)
 	if !fresh {
-		next := pendingTurn(in)
+		next, err := r.pendingTurn(pctx, in)
+		if err != nil {
+			return ctrl.Result{}, err // transient: retried with backoff
+		}
 		if next == "" {
 			// Nothing in the Intent's state continues the session, which ends
 			// with the model's own answer: start a new one.
@@ -76,8 +81,6 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		}
 		conv = conv.With(next)
 	}
-	pctx, cancel := context.WithTimeout(ctx, planTimeout)
-	defer cancel()
 	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, answeredCheck(in))
 	var capped *agent.CapError
 	switch {
@@ -204,29 +207,19 @@ func storedTurnChanged(stored *lastv1alpha1.Intent, kind agent.Kind, hash string
 	return false
 }
 
-// awaitApproval waits for an IntentApproval of the current plan. The gateway
-// re-checks every approval itself (spec §8.3); this only decides when to try.
-// A Deny wins over any Approve, as in the gateway.
+// awaitApproval waits for an IntentApproval of the current plan.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Generation != in.Status.ObservedGeneration || in.Status.Plan == nil {
 		return r.startPlanning(ctx, in, "")
 	}
-	var list lastv1alpha1.IntentApprovalList
-	if err := r.List(ctx, &list, client.InNamespace(in.Namespace)); err != nil {
+	approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageCreate, in.Status.Plan.Hash)
+	switch {
+	case err != nil:
 		return ctrl.Result{}, err
-	}
-	approved := false
-	for _, a := range list.Items {
-		s := a.Spec
-		if s.IntentRef.Name != in.Name || s.Stage != lastv1alpha1.StageCreate || s.SubjectHash != in.Status.Plan.Hash {
-			continue
-		}
-		if s.Decision == lastv1alpha1.DecisionDeny {
-			return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied, fmt.Sprintf("IntentApproval %s denied the plan: %s", a.Name, s.Reason))
-		}
-		approved = true
-	}
-	if !approved {
+	case denial != nil:
+		return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied,
+			fmt.Sprintf("IntentApproval %s denied the plan: %s", denial.Name, denial.Spec.Reason))
+	case !approved:
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}
 	gen, subject := in.Generation, in.Status.Plan.Hash
@@ -238,4 +231,26 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 		}
 		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+in.Status.Plan.Hash)
 	})
+}
+
+// decision reads the IntentApprovals of subject for the Intent and stage. The
+// gateway re-checks every approval itself (spec §8.3); this only decides when
+// to try. A Deny wins over any Approve, as in the gateway.
+func (r *IntentReconciler) decision(ctx context.Context, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage,
+	subject string) (approved bool, denial *lastv1alpha1.IntentApproval, err error) {
+	var list lastv1alpha1.IntentApprovalList
+	if err := r.List(ctx, &list, client.InNamespace(in.Namespace)); err != nil {
+		return false, nil, err
+	}
+	for i := range list.Items {
+		s := list.Items[i].Spec
+		if s.IntentRef.Name != in.Name || s.Stage != stage || s.SubjectHash != subject {
+			continue
+		}
+		if s.Decision == lastv1alpha1.DecisionDeny {
+			return false, &list.Items[i], nil
+		}
+		approved = true
+	}
+	return approved, nil, nil
 }

@@ -55,7 +55,7 @@ func pruningClient(prune func(*lastv1alpha1.Intent) bool) client.Client {
 
 var _ = Describe("Intent planning", func() {
 	var key types.NamespacedName
-	steps := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", namespacesArg)}
+	steps := []lastv1alpha1.Command{argvStep("s1", argKubectl, argGet, namespacesArg)}
 
 	BeforeEach(func() {
 		key = types.NamespacedName{Namespace: newNamespace(), Name: intentName}
@@ -147,7 +147,7 @@ var _ = Describe("Intent planning", func() {
 	})
 
 	It("does not run an approval granted before a spec edit", func() {
-		other := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "pods")}
+		other := []lastv1alpha1.Command{argvStep("s1", argKubectl, argGet, "pods")}
 		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
 			if strings.Contains(requestText(req), "v2") {
 				return answer(other), nil
@@ -203,10 +203,10 @@ var _ = Describe("Intent planning", func() {
 	})
 
 	It("fails when the API server changes the discovery command it stores", func() {
-		look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", namespacesArg}}}
+		look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{argKubectl, argGet, namespacesArg}}}
 		createIntent(key, "list namespaces") // no script yet: the suite's controller fails it and leaves it alone
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
-		gw.setScript(key, &script{llm: turns(commandTurn("see what exists", look))})
+		gw.setScript(key, &script{llm: turns(commandTurn(look))})
 
 		// A CRD from before M3 has no pendingCommand.nonce.
 		pruning := pruningClient(func(in *lastv1alpha1.Intent) bool {
@@ -258,7 +258,7 @@ var _ = Describe("Intent planning", func() {
 		Expect(in.Status.ObservedGeneration).To(Equal(in.Generation))
 		Expect(gw.calls(key)).To(Equal([]string{callLLM, callLLM}))
 		msgs := gw.lastRequest(key).GetMessages()
-		Expect(roles(msgs)).To(Equal([]string{"system", roleUser, "assistant", roleUser}))
+		Expect(roles(msgs)).To(Equal([]string{roleSystem, roleUser, roleAssistant, roleUser}))
 		Expect(msgs[3].GetContent()).To(Equal("Answers:\n- q1: web\n- q2: 2\n"))
 	})
 
@@ -280,7 +280,7 @@ var _ = Describe("Intent planning", func() {
 		Expect(in.Status.PlanningSessionSeq).NotTo(Equal(first))
 		Expect(in.Status.ObservedRequestHash).To(Equal(requestHash("list namespaces v2")))
 		Expect(in.Status.Questions).To(BeEmpty())
-		Expect(roles(gw.lastRequest(key).GetMessages())).To(Equal([]string{"system", "user"}))
+		Expect(roles(gw.lastRequest(key).GetMessages())).To(Equal([]string{roleSystem, roleUser}))
 	})
 
 	It("corrects questions that reuse an answered id", func() {
@@ -299,8 +299,8 @@ var _ = Describe("Intent planning", func() {
 	})
 
 	It("asks for approval of a discovery command", func() {
-		look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", namespacesArg}}}
-		gw.setScript(key, &script{llm: turns(commandTurn("see what exists", look))})
+		look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{argKubectl, argGet, namespacesArg}}}
+		gw.setScript(key, &script{llm: turns(commandTurn(look))})
 		createIntent(key, "list namespaces")
 
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingDiscoveryApproval))

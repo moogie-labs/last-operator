@@ -57,6 +57,14 @@ const (
 	ReasonPhaseEnded     = "PhaseEnded"     // the gateway recorded the phase as succeeded
 )
 
+// Executed reasons for a discovery command that ended. The Intent is back in
+// Planning, and pendingTurn tells the model.
+const (
+	ReasonDiscoveryRan    = "DiscoveryRan"    // the command ran; its command.result audit entry holds the output
+	ReasonDiscoveryDenied = "DiscoveryDenied" // an IntentApproval denied it; the message is the turn for the model
+	ReasonDiscoveryFailed = "DiscoveryFailed" // it did not run, or its run was lost; the message is the turn for the model
+)
+
 // InSync reasons.
 const (
 	ReasonProbesPassed = "ProbesPassed"

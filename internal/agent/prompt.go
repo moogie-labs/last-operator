@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 )
@@ -160,4 +161,57 @@ func NotRunTurn(why string) string { return "The command did not run: " + why }
 
 func correctionTurn(err error) string {
 	return fmt.Sprintf("That answer is not a valid turn: %v\nAnswer again with only the JSON turn object.", err)
+}
+
+// maxResultBytes bounds each of a discovery command's stdout and stderr in the
+// conversation (M3 spec §4.2).
+const maxResultBytes = 16 << 10
+
+// resultTurn reports a discovery command's result.
+func resultTurn(r commandResult) string {
+	var b strings.Builder
+	if r.Error != "" {
+		fmt.Fprintf(&b, "The command could not finish: %s\n", r.Error)
+	} else {
+		fmt.Fprintf(&b, "The command exited %d.\n", r.ExitCode)
+	}
+	writeStream(&b, "stdout", r.Stdout, r.StdoutTruncated)
+	writeStream(&b, "stderr", r.Stderr, r.StderrTruncated)
+	return b.String()
+}
+
+// writeStream writes one output stream, clipped to maxResultBytes.
+func writeStream(b *strings.Builder, name, s string, truncated bool) {
+	s, clipped := head(s, maxResultBytes)
+	switch {
+	case s == "" && !truncated:
+		fmt.Fprintf(b, "%s: empty\n", name)
+		return
+	case truncated || clipped:
+		fmt.Fprintf(b, "%s (truncated):\n", name)
+	default:
+		fmt.Fprintf(b, "%s:\n", name)
+	}
+	b.WriteString(s)
+	if !strings.HasSuffix(s, "\n") {
+		b.WriteString("\n")
+	}
+}
+
+// head returns the first n bytes of s, cut on a UTF-8 boundary, and whether it cut.
+func head(s string, n int) (string, bool) {
+	if len(s) <= n {
+		return s, false
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
+// ResultLostTurn reports a discovery command that ran but whose result cannot
+// be read back.
+func ResultLostTurn(why string) string {
+	return "The command ran, but its result could not be read back: " + why
 }
