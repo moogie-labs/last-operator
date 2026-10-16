@@ -69,7 +69,10 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	pctx, cancel := context.WithTimeout(ctx, planTimeout)
 	defer cancel()
 	conv, fresh, err := r.conversation(pctx, in)
-	if err != nil {
+	switch {
+	case errors.Is(err, errBadPolicy):
+		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
+	case err != nil:
 		return ctrl.Result{}, err // transient: retried with backoff
 	}
 	if !fresh {

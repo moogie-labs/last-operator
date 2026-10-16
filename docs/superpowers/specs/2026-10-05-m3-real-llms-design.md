@@ -51,7 +51,7 @@ M3 makes last-operator work against a real model. It adds:
 - **API key.** Read from the Secret named by `LLMProvider.spec.secretRef` in the gateway namespace, key `apiKey`. It is never logged and never placed in errors or audit payloads.
 - **Thinking and effort.** Thinking is left at the model default; on Claude Opus 5.5 it is always on. New optional field `LLMProvider.spec.effort` (`low` | `medium` | `high` | `xhigh` | `max`), sent as `output_config.effort`. The adapter defaults it to `high`: planning is intelligence-sensitive, and Claude Opus 5.5's own default is `medium`.
 - **Prompt caching.** The request's `system` message, which is the long and stable planning instructions, is sent as a system block with `cache_control: ephemeral`. Cache read and creation tokens are added to the audited token counts.
-- **Streaming.** Requests use the SDK's streaming API and wait for the final message, so long turns don't hit HTTP timeouts. `max_tokens` comes from the request (the operator sends 16000).
+- **Streaming.** Requests use the SDK's streaming API and wait for the final message, so long turns don't hit HTTP timeouts. `max_tokens` comes from the request (the operator sends 64000: thinking, always on, shares the budget, so 16000 risked truncated answers at effort `high`).
 - **Refusals.** The adapter enables the API's server-side refusal fallback (`fallbacks: "default"` with the `server-side-fallback-2026-07-01` beta), so a false-positive safety decline is re-served by another model in the same call. A refusal that still stands (`stop_reason: refusal`) is an adapter error: "the model declined (category <c>)".
 - **Error mapping**, as gRPC codes the operator already classifies:
 
@@ -142,6 +142,13 @@ The planner's system prompt and `agent.Parse` move from "answer with a plan" to 
 - **`questions`** needs 1–5 questions with unique, non-empty `id`s and non-empty text. `options` are optional.
 - **`command`** must pass `checkCommand`, and argv commands may not use `${steps…}` references. It gets `id: "discovery"` before hashing.
 - **The schema.** The operator builds the JSON Schema for this union once and sends it as `response_schema`.
+  - **One closed object.** OpenAI strict mode needs an object root with every property required, and both providers need closed objects. So the schema is one closed object: `kind` plus every field of every kind. The fields a kind does not use are left empty, and `command` is null.
+  - **A wire format of its own.** The JSON the model writes differs from the CRD's:
+    - `run` is flattened to `argv` and `script`;
+    - the maps `files` and `outputs` are arrays of `{path, content}` and `{key, value}`;
+    - the free-form `identity` and `desired` are JSON objects written as strings;
+    - `outputsSecretRef` is the string `outputsSecret`.
+  - **Lenient parsing.** The parser accepts omitted fields and `null`, for models that do not enforce the schema.
 - **Malformed answers.** They remain correction turns, at most 3 in a row (`agent.MaxTurns` becomes the per-answer correction budget).
 
 ### 4.2 Planning session
@@ -159,17 +166,23 @@ A **planning session** is one conversation. It starts on a new Intent, on a `spe
    - **Deny:** the operator appends "The command was denied: <reason>" and returns to Planning. The model may try something else or ask a question (main spec §5.2).
 5. **Caps.** On the 21st model turn or the 11th discovery command in one session, the Intent fails with `PlanningFailed` ("planning exceeded N turns").
 
+**Between turns.**
+- **Owed turns.** Returning to Planning keeps `status.questions` or `status.pendingCommand` until the model's next turn replaces them. How a discovery command ended is recorded in the `Executed` condition: `DiscoveryRan`, `DiscoveryDenied` or `DiscoveryFailed`. A restart can then re-derive the user turn the model is owed (§4.3).
+- **Reused question ids.** A question whose `id` is already in `spec.answers` is refused with a correction, because its old answer would answer it at once.
+- **Lost discovery phases.** A Discovery phase found open after a restart is ended as failed and reported to the model as lost.
+- **Refusals.** A gateway refusal of an approved command is reported as "The command did not run: …".
+
 ### 4.3 Conversation memory and reload
 
 - **In memory.** Conversations live in memory, keyed by Intent UID and session.
 - **Reload.** On a miss (an operator restart or a leader change), the operator rebuilds the conversation from `QueryAudit`:
-  - the latest `llm.request` gives the message list;
-  - its `llm.response` gives the assistant turn;
-  - the discovery `command.result` entries since then give the user turns that followed.
+  - the session's latest `llm.request` whose `llm.response` holds a valid turn gives the message list;
+  - that `llm.response` gives the assistant turn;
+  - the pending user turn follows (below). A discovery result is read from the command's `command.result` entry.
 
   The session's start sequence number (the `request_seq` of its first `CallLLM`) is kept in `status.planningSessionSeq`, so the operator never mixes in an earlier session.
-- **The pending user turn.** The turn not yet sent to the model is re-derived from the Intent's state: answers from `spec.answers` with `status.questions`, a denial from the matching `IntentApproval`, or a command result from its `command.result` entry.
-- **Unrecoverable reload.** If the conversation can't be rebuilt (`truncated`, or entries missing), the operator starts a new session, and the transcript notes the restart.
+- **The pending user turn.** The turn not yet sent to the model is re-derived from the Intent's state: answers from `spec.answers` with `status.questions`, a denial or failure from the `Executed` condition's message, or a command result from its `command.result` entry.
+- **Unrecoverable reload.** If the conversation can't be rebuilt (`truncated`, or entries missing), the operator starts a new session, and the transcript notes the restart. The session's first `llm.request` must still be in the index, which catches the loss of the session's start. The rebuilt conversation must also end with the turn the Intent's status records (the same questions, or the pending command with its nonce); a later answer the operator never recorded, a lost index tail, or an answer the operator refused all fall back to the latest matching answer, or to a new session when none matches.
 
 ### 4.4 Context in the first message
 

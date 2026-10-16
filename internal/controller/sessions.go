@@ -3,9 +3,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -14,6 +18,7 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/policy"
 )
 
 // noteRestarted tells the model why its session started over.
@@ -64,7 +69,8 @@ func (s *sessionStore) drop(key types.NamespacedName) {
 // a leader change, is reloaded from the audit log (M3 spec §4.3).
 func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.Intent) (conv agent.Conversation, fresh bool, err error) {
 	if in.Status.PlanningSessionSeq == 0 {
-		return newConversation(in, ""), true, nil
+		conv, err = r.newConversation(ctx, in, "")
+		return conv, true, err
 	}
 	if conv, ok := r.sessions.get(in); ok {
 		return conv, false, nil
@@ -77,15 +83,59 @@ func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.In
 		return conv, false, nil
 	case errors.Is(err, agent.ErrNoReload) || terminal(err):
 		logf.FromContext(ctx).Info("Could not reload planning conversation; starting a new session", "reason", err.Error())
-		return newConversation(in, noteRestarted), true, nil
+		conv, err = r.newConversation(ctx, in, noteRestarted)
+		return conv, true, err
 	}
 	return nil, false, err
 }
 
-// newConversation starts a session for the Intent's current spec.
-func newConversation(in *lastv1alpha1.Intent, note string) agent.Conversation {
+// newConversation starts a session for the Intent's current spec, telling the
+// model what the namespace's policy lets commands use.
+func (r *IntentReconciler) newConversation(ctx context.Context, in *lastv1alpha1.Intent, note string) (agent.Conversation, error) {
+	env, err := r.environment(ctx, in.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	return agent.NewConversation(agent.FirstMessage(agent.Request{Namespace: in.Namespace, Name: in.Name,
-		Text: in.Spec.Request, Answers: in.Spec.Answers, Feedback: replanFeedback(in), Note: note}))
+		Text: in.Spec.Request, Answers: in.Spec.Answers, Feedback: replanFeedback(in), Note: note, Env: env})), nil
+}
+
+// errBadPolicy marks a namespace whose effective policy cannot be resolved:
+// the gateway would refuse every command, so planning fails.
+var errBadPolicy = errors.New("the namespace's effective policy is invalid")
+
+// environment returns what the namespace's effective policy lets commands use
+// (M3 spec §4.4): the Providers that exist and the policy allows, the allowed
+// egress, and whether scripts may run. The gateway enforces the policy; this
+// only tells the model. It reads uncached, so a policy edited just before a
+// session starts is current.
+func (r *IntentReconciler) environment(ctx context.Context, ns string) (agent.Environment, error) {
+	op := &lastv1alpha1.OperatorConfig{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Name: "default"}, op); apierrors.IsNotFound(err) {
+		op = nil
+	} else if err != nil {
+		return agent.Environment{}, err
+	}
+	var policies lastv1alpha1.IntentPolicyList
+	if err := r.Reader.List(ctx, &policies, client.InNamespace(ns)); err != nil {
+		return agent.Environment{}, err
+	}
+	eff, err := policy.Resolve(op, policies.Items)
+	if err != nil {
+		return agent.Environment{}, fmt.Errorf("%w: %v", errBadPolicy, err)
+	}
+	var providers lastv1alpha1.ProviderList
+	if err := r.Reader.List(ctx, &providers); err != nil {
+		return agent.Environment{}, err
+	}
+	slices.SortFunc(providers.Items, func(a, b lastv1alpha1.Provider) int { return strings.Compare(a.Name, b.Name) })
+	env := agent.Environment{Egress: eff.Egress(), NoScripts: !eff.AllowScripts}
+	for _, p := range providers.Items {
+		if eff.AllowsProvider(p.Name) {
+			env.Providers = append(env.Providers, agent.Provider{Name: p.Name, Description: p.Spec.Description})
+		}
+	}
+	return env, nil
 }
 
 // pendingTurn returns the user turn the Intent's state owes the model (M3 spec

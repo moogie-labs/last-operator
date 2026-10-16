@@ -164,7 +164,9 @@ leader election):
 - get/list/watch/create/update/patch on `ManagedResource` and its status.
   **No delete**: deleting a ManagedResource garbage-collects its output
   Secret with no audit entry.
-- get/list/watch on `IntentApproval`, `IntentPolicy`, and `OperatorConfig`.
+- get/list/watch on `IntentApproval`, `IntentPolicy`, `OperatorConfig`,
+  and `Provider`. The first message of a planning session lists the
+  Providers the namespace may use (M3).
 - create/patch on `events.k8s.io` Events.
 - Later milestones add:
   - create on `CommandRuleSuggestion` (M7). The `spec.decision` field is
@@ -505,14 +507,28 @@ Pending → Clarifying ⇄ (user answers)
     or when every command involved matches an allow rule for that stage (§9.3)
 ```
 
-- **Clarifying.** The agent may ask questions instead of acting. They
-  appear in `status.questions`; answers go in `spec.answers`.
-- **Planning.** An agentic conversation. The LLM may run **discovery
-  commands** to inspect the world. Each one is treated as a
-  single-command approval subject (stage `Discovery`). When it needs
-  approval, the Intent shows `phase: AwaitingDiscoveryApproval` with
-  `status.pendingCommand`. The planning conversation is kept in memory
-  and the audit log, so it resumes after approval.
+- **Clarifying.** The agent may ask 1–5 questions instead of acting.
+  They appear in `status.questions`; answers go in `spec.answers`. Once
+  every question has an answer, planning continues in the same session.
+  Answers bump `generation` but never start a new session; only a
+  changed `spec.request` does (`status.observedRequestHash`).
+- **Planning.** An agentic conversation. A **planning session** starts
+  with a new Intent, a `spec.request` edit, or a replan after a failed
+  step, and ends when a plan is written.
+  - **Turns.** Every model answer is one JSON turn: a plan, questions,
+    or a discovery command. It is checked against a JSON Schema sent
+    with `CallLLM`, and again by the operator. A malformed answer gets a
+    correction, at most 3 in a row.
+  - **Discovery commands** inspect the world. Each one is a
+    single-command approval subject: stage `Discovery`, subject
+    `sha256(canonical {command, nonce})`, so each approval is
+    single-use. The Intent shows `phase: AwaitingDiscoveryApproval`
+    with `status.pendingCommand`. Once approved, the command runs as a
+    one-step Discovery phase. Its result, a denial, or the gateway's
+    refusal goes back to the model.
+  - **Caps.** A session allows at most 20 model answers and 10
+    discovery commands. Reaching either fails the Intent with
+    `PlanningFailed` (M3 design D7, §4).
 - **AwaitingApproval.** Waits for a matching `IntentApproval`.
 - **Executing.** Runs the plan's steps deterministically (§8.3).
 - **Verifying.** Runs every probe once; all must pass. A failure here
@@ -543,10 +559,20 @@ Pending → Clarifying ⇄ (user answers)
     accepts the execution only when `RunProbes` reports the plan's hash as
     the last executed plan.
 
-**Operator restarts during Planning:** the operator reloads the
-conversation from `QueryAudit` (`llm.*` and `command.*` entries for the
-current phase) and continues. Until `QueryAudit` arrives (M3), a restart during
-Planning starts the conversation over.
+**Operator restarts during a planning session:** the conversation lives
+in the operator's memory.
+- **Reload.** After a restart or a leader change, the operator rebuilds
+  the conversation from `QueryAudit`: the session's latest
+  `llm.request` (from `status.planningSessionSeq` on) whose
+  `llm.response` holds a valid turn, followed by that turn, which must be the turn the Intent's status records.
+- **The owed user turn** is re-derived from the Intent: the answers, or
+  the discovery outcome its `Executed` condition records. A discovery
+  result is read from the command's `command.result` entry.
+- **Lost sessions.** If the audit index no longer holds the session, a
+  new session starts and its first message says so.
+- **Lost discovery phases.** A discovery phase that was open when the
+  operator stopped is ended as failed, and the model is told the
+  command was lost.
 
 ## 8. Commands, plans, and enforcement
 
@@ -1302,8 +1328,10 @@ The CRs emit standard Kubernetes Events for phase transitions.
 - **Rules can be broad.** A rule is exactly as safe as its pattern.
   Rules don't inspect `files` or stdin. The breadth lint warns but does
   not block.
-- **No hard caps on agent turns or cost.** Runaway agents are visible
-  in metrics but not stopped automatically.
+- **Caps on planning, not on cost.** A planning session stops after 20
+  model answers or 10 discovery commands (M3 design D7). Nothing caps
+  cost across sessions or replans: runaway spend shows in the token
+  metrics but is not stopped automatically.
 - **Shell commands can do anything their credentials allow.** The audit
   log records the exact command and output, but not the individual API
   calls the CLI makes. Provider-side audit trails (e.g. CloudTrail,

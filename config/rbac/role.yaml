@@ -18,6 +18,7 @@ rules:
   - intentpolicies
   - intents
   - operatorconfigs
+  - providers
   verbs:
   - get
   - list

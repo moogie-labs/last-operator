@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -316,5 +317,57 @@ var _ = Describe("Intent planning", func() {
 		Expect(pc.Hash).To(Equal(hash))
 		Expect(in.Status.Stage).To(Equal(lastv1alpha1.StageDiscovery))
 		Expect(readyReason(key)).To(Equal(ReasonAwaitingDiscoveryApproval))
+	})
+})
+
+var _ = Describe("Intent planning context", func() {
+	var key types.NamespacedName
+	steps := []lastv1alpha1.Command{argvStep("s1", "kubectl", "get", "namespaces")}
+
+	BeforeEach(func() {
+		key = types.NamespacedName{Namespace: newNamespace(), Name: intentName}
+	})
+
+	createCleanly := func(obj client.Object) {
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, obj)).To(Succeed()) })
+	}
+	provider := func(name, description string) *lastv1alpha1.Provider {
+		return &lastv1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: lastv1alpha1.ProviderSpec{
+			Type: lastv1alpha1.ProviderEnvSecret, Description: description, SecretRef: &lastv1alpha1.LocalRef{Name: name}}}
+	}
+
+	It("tells the model which Providers and egress the namespace may use", func() {
+		scripts := false
+		createCleanly(&lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec: lastv1alpha1.OperatorConfigSpec{Defaults: &lastv1alpha1.IntentPolicySpec{
+				Providers: []string{"ctx-k8s", "ctx-aws"}, AllowScripts: &scripts,
+				Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"10.0.0.0/8:443"}}}}})
+		createCleanly(provider("ctx-k8s", "cluster-admin on this cluster"))
+		createCleanly(provider("ctx-db", "the orders database")) // exists, but the policy does not allow it
+		Expect(k8sClient.Create(ctx, &lastv1alpha1.IntentPolicy{ObjectMeta: metav1.ObjectMeta{Name: "narrow", Namespace: key.Namespace},
+			Spec: lastv1alpha1.IntentPolicySpec{Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"10.1.0.0/16:443"}}}})).To(Succeed())
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		first := requestText(gw.lastRequest(key))
+		Expect(first).To(ContainSubstring("Providers commands may use:\n- ctx-k8s: cluster-admin on this cluster\n\n"))
+		Expect(first).NotTo(ContainSubstring("ctx-db"))
+		Expect(first).NotTo(ContainSubstring("ctx-aws"), "allowed, but no such Provider exists")
+		Expect(first).To(ContainSubstring("every one of these lists:\n- 10.0.0.0/8:443\n- 10.1.0.0/16:443\n"))
+		Expect(first).To(ContainSubstring("Scripts are not allowed"))
+	})
+
+	It("fails planning when the namespace's policy is invalid", func() {
+		Expect(k8sClient.Create(ctx, &lastv1alpha1.IntentPolicy{ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: key.Namespace},
+			Spec: lastv1alpha1.IntentPolicySpec{Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"nope"}}}})).To(Succeed())
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("effective policy is invalid"))
+		Expect(gw.calls(key)).To(BeEmpty())
 	})
 })

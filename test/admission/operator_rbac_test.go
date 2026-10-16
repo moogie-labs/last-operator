@@ -77,6 +77,8 @@ func TestOperatorRBAC(t *testing.T) {
 		attr(last, "", "intentapprovals", "", "list"),
 		attr(last, "", "intentpolicies", "", "list"),
 		attr(last, "", "operatorconfigs", "", "get"),
+		attr(last, "", "providers", "", "list"),
+		attr(last, "", "providers", "", "watch"),
 		attr("events.k8s.io", "team-x", "events", "", "create"),
 	}
 	// The binding reaches the authorizer through an informer; wait until it applies.

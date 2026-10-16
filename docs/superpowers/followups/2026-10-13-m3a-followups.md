@@ -16,7 +16,7 @@ Deferred items from the final review of `docs/superpowers/plans/2026-10-05-m3a-g
 
 - **Fallback text joining.** The Anthropic adapter joins the text blocks on either side of a mid-stream fallback. We believe this is correct, because the fallback continues from the partial text, but no test pins it. Confirm it in the M3c real-model demo and add a pinning test.
 - **Discovery refusal wording.** Discovery refusals reuse the Create wording ("this plan already opened a phase", "approval … denies this plan"). Tune the wording before M3c shows it to users.
-- **Token budget.** The operator's `max_tokens` (16000, M3 spec §3.2) shares its budget with always-on thinking at effort `high`, so truncated answers are likely. M3b or M3c should measure this, consider about 64000 with streaming, and amend the spec.
+- **Token budget.** Done in M3b. The operator sends `max_tokens` 64000, and M3 spec §3.2 is amended. Still open: OpenAI-compatible models with a smaller output limit reject 64000 with a 400 (`InvalidArgument`), which fails planning. A per-provider limit (`LLMProvider.spec.maxTokens`, or clamping in the adapter) belongs with the first OpenAI-compatible user.
 - **Pending index cap.** During API outages the per-Intent pending index entries grow without bound. Cap them at `maxIndexEntries`.
 - **ObserveQuery placement.** `QueryAudit` counts only successful calls. Count every call.
 - **Record ConfigMap lifetime.** Record ConfigMaps are never garbage-collected, and CallLLM-only Intents now create them too. This belongs to M5 teardown.

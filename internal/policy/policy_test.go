@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/moogie-labs/last-operator/internal/policy"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
+
+const narrowEgress = "10.1.0.0/16:443"
 
 func opConfig(providers []string, egress []string, scripts *bool) *lastv1alpha1.OperatorConfig {
 	d := &lastv1alpha1.IntentPolicySpec{Providers: providers, AllowScripts: scripts}
@@ -56,7 +59,7 @@ func TestProvidersIntersectAcrossLayers(t *testing.T) {
 }
 
 func TestEgressCoverageComparesParsedCIDRs(t *testing.T) {
-	ip := lastv1alpha1.IntentPolicy{Spec: lastv1alpha1.IntentPolicySpec{Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{"10.1.0.0/16:443"}}}}
+	ip := lastv1alpha1.IntentPolicy{Spec: lastv1alpha1.IntentPolicySpec{Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{narrowEgress}}}}
 	//nolint:goconst // test data reuse
 	e, err := policy.Resolve(opConfig(nil, []string{"10.0.0.0/8:443", "api.example.com:443"}, nil), []lastv1alpha1.IntentPolicy{ip})
 	if err != nil {
@@ -104,5 +107,25 @@ func TestCheckCommand(t *testing.T) {
 	}
 	if err := e.CheckCommand(bad["install"]); !strings.Contains(err.Error(), "image.install") {
 		t.Errorf("install denial should name image.install: %v", err)
+	}
+}
+
+func TestEgressListsEachLayersRules(t *testing.T) {
+	narrow := lastv1alpha1.IntentPolicy{Spec: lastv1alpha1.IntentPolicySpec{
+		Egress: &lastv1alpha1.EgressPolicy{Allowed: []string{narrowEgress}}}}
+	e, err := policy.Resolve(opConfig(nil, []string{"10.0.0.0/8:443", "db.example.com:5432"}, nil), []lastv1alpha1.IntentPolicy{narrow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Host patterns need Cilium (spec §11.1) and allow nothing yet.
+	if got := e.Egress(); !reflect.DeepEqual(got, [][]string{{"10.0.0.0/8:443"}, {narrowEgress}}) {
+		t.Errorf("Egress = %v", got)
+	}
+	shipped, err := policy.Resolve(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := shipped.Egress(); !reflect.DeepEqual(got, [][]string{{}}) {
+		t.Errorf("shipped defaults: Egress = %v, want one layer that allows nothing", got)
 	}
 }

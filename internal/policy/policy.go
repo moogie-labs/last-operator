@@ -100,6 +100,20 @@ func (e Effective) AllowsEgress(r sandbox.EgressRule) bool {
 	return true
 }
 
+// Egress returns each layer's allowed destinations, as CIDR:port. A
+// destination must be allowed by every layer (AllowsEgress).
+func (e Effective) Egress() [][]string {
+	out := make([][]string, 0, len(e.egressLayers))
+	for _, layer := range e.egressLayers {
+		rules := make([]string, 0, len(layer))
+		for _, r := range layer {
+			rules = append(rules, r.String())
+		}
+		out = append(out, rules)
+	}
+	return out
+}
+
 func covers(allowed, r sandbox.EgressRule) bool {
 	pa, errA := netip.ParsePrefix(allowed.CIDR)
 	pr, errR := netip.ParsePrefix(r.CIDR)
