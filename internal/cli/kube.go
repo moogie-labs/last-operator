@@ -55,11 +55,11 @@ func NewKube(f KubeFlags) (*Kube, error) {
 	}
 	c, err := client.New(cfg, client.Options{Scheme: newScheme()})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect to the cluster: %w", err)
 	}
 	kc, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect to the cluster: %w", err)
 	}
 	return &Kube{Client: c, Namespace: ns, WhoAmI: func(ctx context.Context) (string, error) {
 		r, err := kc.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})

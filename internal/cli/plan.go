@@ -27,7 +27,7 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 			case in.Status.Plan != nil:
 				renderPlan(d.Out, in.Status.Plan)
 			default:
-				pln(d.Out, "No plan or pending command yet.")
+				writeln(d.Out, "No plan or pending command yet.")
 			}
 			return nil
 		},

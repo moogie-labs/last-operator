@@ -24,6 +24,9 @@ func TestCleanEscapesWhatCouldHideText(t *testing.T) {
 		"carriage\rreturn": `carriage\u000dreturn`,
 		"evil\u202etxt":    `evil\u202etxt`,
 		"café ✓":           "café ✓",
+		"zero\u200bwidth":  `zero\u200bwidth`,
+		"para\u2028sep":    `para\u2028sep`,
+		"tab\there":        "tab\there",
 	} {
 		if got := clean(in); got != want {
 			t.Errorf("clean(%q) = %q, want %q", in, got, want)
@@ -58,6 +61,7 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 		Identity:    &runtime.RawExtension{Raw: []byte(`{"kind":"Deployment"}`)},
 		Probes: []lastv1alpha1.Probe{{ID: "ready", Command: argvCommand(wordKubectl, "get", "deploy", "web"),
 			Assert: "result.exitCode == 0"}},
+		Teardown:         []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{wordKubectl, "delete", "deploy", "web"}}}},
 		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
 		Outputs:          map[string]string{"ip": "${steps.svc.json.spec.clusterIP}"},
 	}}}
@@ -83,6 +87,8 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 		"      run:       kubectl get deploy web\n",
 		"    outputs to Secret web-outputs:\n",
 		"      ip = ${steps.svc.json.spec.clusterIP}\n",
+		"    teardown t1\n",
+		"      run:       kubectl delete deploy web\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan lacks %q:\n%s", want, got)
@@ -102,5 +108,36 @@ func TestRenderPendingShowsTheCommandAndItsReason(t *testing.T) {
 	want := "Discovery command " + h1 + " (stage Discovery)\nReason: see what exists\n  run:       kubectl get ns\n"
 	if b.String() != want {
 		t.Fatalf("pending command =\n%s\nwant\n%s", b.String(), want)
+	}
+}
+
+func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
+	c := argvCommand(wordKubectl, "get")
+	c.ID = "id\x1b[1m"
+	c.Files = map[string]string{"/f\x1b[2K\nx": "data"}
+	c.Providers = []string{"prov\x1bp"}
+	c.Egress = []string{"1.2.3.4:1\nbad"}
+	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{}, {}}}
+	p := &lastv1alpha1.Plan{Hash: h2, Steps: []lastv1alpha1.Command{c}, Resources: []lastv1alpha1.ManagedResourceSpec{{
+		Description: "res\x1b[8m\ndesc",
+		Probes:      []lastv1alpha1.Probe{{ID: "pr\x1bobe", Command: argvCommand(wordKubectl), Assert: "a\nb"}},
+	}}}
+	var b strings.Builder
+	renderPlan(&b, p)
+	got := b.String()
+	if strings.ContainsRune(got, '\x1b') {
+		t.Errorf("an escape sequence reached the output:\n%q", got)
+	}
+	for _, want := range []string{`/f\u001b[2K\u000ax`, `prov\u001bp`, `1.2.3.4:1\u000abad`, `res\u001b[8m\u000adesc`,
+		`probe pr\u001bobe, assert a\u000ab`, `id\u001b[1m`, "image:     2 install commands\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan lacks %q:\n%s", want, got)
+		}
+	}
+	// Every line starts at a known structural prefix, so no injected newline made a fake line.
+	for line := range strings.SplitSeq(strings.TrimSuffix(got, "\n"), "\n") {
+		if strings.Contains(line, "bad") && !strings.Contains(line, `\u000a`) {
+			t.Errorf("injected text on its own line: %q", line)
+		}
 	}
 }

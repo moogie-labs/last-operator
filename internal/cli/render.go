@@ -25,7 +25,7 @@ const condReady = "Ready"
 func clean(s string) string {
 	var b strings.Builder
 	for _, r := range s {
-		if unicode.IsControl(r) || isBidi(r) {
+		if r != '\t' && (!unicode.IsGraphic(r) || isBidi(r)) {
 			fmt.Fprintf(&b, `\u%04x`, r)
 			continue
 		}
@@ -41,7 +41,9 @@ func isBidi(r rune) bool {
 var plainWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
 // shellWord writes one argv element, quoted when it would be ambiguous
-// unquoted. strconv.Quote escapes control characters and overrides too.
+// unquoted. The quoting is Go-style (strconv.Quote, which also escapes control
+// characters and overrides) and for display only: argv is executed directly,
+// never through a shell.
 func shellWord(s string) string {
 	if plainWord.MatchString(s) {
 		return s
@@ -52,39 +54,43 @@ func shellWord(s string) string {
 // renderPlan writes a plan as its approver reviews it (M3 spec §5): the
 // summary, each step, and each resource with its probes and outputs.
 func renderPlan(w io.Writer, p *lastv1alpha1.Plan) {
-	pf(w, "Plan %s (stage Create)\n", p.Hash)
+	writef(w, "Plan %s (stage Create)\n", p.Hash)
 	if p.Summary != "" {
-		pf(w, "Summary: %s\n", clean(p.Summary))
+		writef(w, "Summary: %s\n", clean(p.Summary))
 	}
-	pln(w, "Steps:")
+	writeln(w, "Steps:")
 	for i, s := range p.Steps {
-		pf(w, "  %d. %s", i+1, clean(s.ID))
+		writef(w, "  %d. %s", i+1, clean(s.ID))
 		if s.Reason != "" {
-			pf(w, ": %s", clean(s.Reason))
+			writef(w, ": %s", clean(s.Reason))
 		}
-		pln(w)
+		writeln(w)
 		renderCommand(w, "     ", s)
 	}
 	if len(p.Resources) > 0 {
-		pln(w, "Resources:")
+		writeln(w, "Resources:")
 	}
 	for _, r := range p.Resources {
-		pf(w, "  - %s\n", clean(r.Description))
+		writef(w, "  - %s\n", clean(r.Description))
 		if r.Identity != nil {
-			pf(w, "    identity: %s\n", clean(string(r.Identity.Raw)))
+			writef(w, "    identity: %s\n", clean(string(r.Identity.Raw)))
 		}
 		if r.Desired != nil {
-			pf(w, "    desired:  %s\n", clean(string(r.Desired.Raw)))
+			writef(w, "    desired:  %s\n", clean(string(r.Desired.Raw)))
 		}
 		for _, pr := range r.Probes {
-			pf(w, "    probe %s, assert %s\n", clean(pr.ID), clean(pr.Assert))
+			writef(w, "    probe %s, assert %s\n", clean(pr.ID), clean(pr.Assert))
 			renderCommand(w, "      ", pr.Command)
 		}
 		if r.OutputsSecretRef != nil {
-			pf(w, "    outputs to Secret %s:\n", clean(r.OutputsSecretRef.Name))
+			writef(w, "    outputs to Secret %s:\n", clean(r.OutputsSecretRef.Name))
 			for _, k := range slices.Sorted(maps.Keys(r.Outputs)) {
-				pf(w, "      %s = %s\n", clean(k), clean(r.Outputs[k]))
+				writef(w, "      %s = %s\n", clean(k), clean(r.Outputs[k]))
 			}
+		}
+		for _, t := range r.Teardown {
+			writef(w, "    teardown %s\n", clean(t.ID))
+			renderCommand(w, "      ", t)
 		}
 	}
 }
@@ -92,9 +98,9 @@ func renderPlan(w io.Writer, p *lastv1alpha1.Plan) {
 // renderPending writes a discovery command awaiting approval, with the
 // model's reason for it.
 func renderPending(w io.Writer, pc *lastv1alpha1.PendingCommand) {
-	pf(w, "Discovery command %s (stage Discovery)\n", pc.Hash)
+	writef(w, "Discovery command %s (stage Discovery)\n", pc.Hash)
 	if pc.Reason != "" {
-		pf(w, "Reason: %s\n", clean(pc.Reason))
+		writef(w, "Reason: %s\n", clean(pc.Reason))
 	}
 	renderCommand(w, "  ", pc.Command)
 }
@@ -107,24 +113,27 @@ func renderCommand(w io.Writer, indent string, c lastv1alpha1.Command) {
 		for i, a := range c.Run.Argv {
 			words[i] = shellWord(a)
 		}
-		pf(w, "%srun:       %s\n", indent, strings.Join(words, " "))
+		writef(w, "%srun:       %s\n", indent, strings.Join(words, " "))
 	} else {
-		pf(w, "%sscript:\n", indent)
+		writef(w, "%sscript:\n", indent)
 		for line := range strings.SplitSeq(c.Run.Script, "\n") {
-			pf(w, "%s  | %s\n", indent, clean(line))
+			writef(w, "%s  | %s\n", indent, clean(line))
 		}
 	}
 	for _, path := range slices.Sorted(maps.Keys(c.Files)) {
-		pf(w, "%sfile:      %s (%d bytes)\n", indent, clean(path), len(c.Files[path]))
+		writef(w, "%sfile:      %s (%d bytes)\n", indent, clean(path), len(c.Files[path]))
 	}
 	if len(c.Providers) > 0 {
-		pf(w, "%sproviders: %s\n", indent, clean(strings.Join(c.Providers, ", ")))
+		writef(w, "%sproviders: %s\n", indent, clean(strings.Join(c.Providers, ", ")))
 	}
 	if len(c.Egress) > 0 {
-		pf(w, "%segress:    %s\n", indent, clean(strings.Join(c.Egress, ", ")))
+		writef(w, "%segress:    %s\n", indent, clean(strings.Join(c.Egress, ", ")))
+	}
+	if c.Image != nil {
+		writef(w, "%simage:     %d install commands\n", indent, len(c.Image.Install))
 	}
 	if c.Timeout != nil {
-		pf(w, "%stimeout:   %s\n", indent, c.Timeout.Duration)
+		writef(w, "%stimeout:   %s\n", indent, c.Timeout.Duration)
 	}
 }
 
@@ -141,11 +150,11 @@ func renderSubject(w io.Writer, in *lastv1alpha1.Intent, stage lastv1alpha1.Stag
 
 // printStatus writes the Intent's phase and, from its Ready condition, why.
 func printStatus(w io.Writer, in *lastv1alpha1.Intent) {
-	pf(w, "Intent %s/%s: %s", in.Namespace, in.Name, phaseOf(in))
+	writef(w, "Intent %s/%s: %s", in.Namespace, in.Name, phaseOf(in))
 	if c := meta.FindStatusCondition(in.Status.Conditions, condReady); c != nil && c.Message != "" {
-		pf(w, " (%s)", clean(c.Message))
+		writef(w, " (%s)", clean(c.Message))
 	}
-	pln(w)
+	writeln(w)
 }
 
 // phaseOf is the Intent's phase; a new Intent the operator has not seen yet is Pending.
@@ -156,7 +165,8 @@ func phaseOf(in *lastv1alpha1.Intent) lastv1alpha1.Phase {
 	return in.Status.Phase
 }
 
-// pf and pln write to w, ignoring write errors as fmt.Println does.
-func pf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+// writef and writeln write to w and discard the write error, which errcheck
+// would flag on a bare fmt.Fprint*.
+func writef(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 
-func pln(w io.Writer, a ...any) { _, _ = fmt.Fprintln(w, a...) }
+func writeln(w io.Writer, a ...any) { _, _ = fmt.Fprintln(w, a...) }
