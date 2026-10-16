@@ -4,7 +4,7 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 ## Before M3c builds on this
 
-- **Run the kind e2e once.** Neither the chart's new `providers` RBAC nor the scripted plan turn encoded with `agent.Encode` has run end to end. `go vet -tags e2e` is clean.
+- **Run the kind e2e once.** Done on 2026-10-16 (see the M3c follow-ups): the full suite passed, including the chart's Provider RBAC and the encoded turns.
 - **Check the schema against real providers.** The turn schema inlines the command object 4 times and has no `$defs`. The M3c demo should confirm that Anthropic structured outputs accept it, and OpenAI strict mode for anyone using that adapter.
 - **The OpenAI adapter caps a turn at 10 minutes.** `internal/gateway/llm/openai.go` sets an `http.Client` timeout of 10 minutes. That cuts long turns short whatever the operator's per-call bound (`agent.CallTimeout`, 30 minutes). Anthropic has no such cap. A related issue is still open: OpenAI-compatible models with a smaller output limit reject `max_tokens` 64000 (see the M3a follow-ups, Token budget).
 

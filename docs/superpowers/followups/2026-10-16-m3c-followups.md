@@ -4,7 +4,7 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 ## Before M3 is done
 
-- **Run the kind e2e.** `TestOperatorWebServer` now drives `kubectl last` with scripted input: one question, one discovery command, then the plan. The test has not run, because Docker was down. Run `KIND_CLUSTER=last-e2e-m2a hack/e2e.sh`. If it fails, reopen M3c Task 6. The run also checks the M3b work and the chart's read-only Provider RBAC end to end.
+- **Run the kind e2e.** Done on 2026-10-16 at 48cd4cf: `KIND_CLUSTER=last-e2e-m2a hack/e2e.sh` passed every test, with `ok test/e2e 376s`. `TestOperatorWebServer` passed in 124s. It drove `kubectl last` through a question, a discovery command and the plan to Ready, and verified the audit chain.
 - **Run the demo.** `ANTHROPIC_API_KEY=… make demo 2>&1 | tee demo.log` runs the M3 done-criterion against Claude. It also confirms three things nothing else has checked:
   - that Anthropic structured outputs accept the turn schema (M3b follow-ups);
   - that fallback text is joined correctly (M3a follow-ups);
