@@ -29,25 +29,40 @@ var fence = regexp.MustCompile("(?s)^\\s*```(?:json)?[ \\t]*\\n(.*?)\\n?```\\s*$
 // fence. It checks everything the gateway and the CRD schema would refuse, so a
 // bad answer becomes a correction turn rather than a rejected status write.
 func Parse(content string) (*lastv1alpha1.Plan, error) {
+	var a answer
+	if err := decodeOne(content, &a, "plan"); err != nil {
+		return nil, err
+	}
+	return checkPlan(a.Summary, a.Steps, a.Resources)
+}
+
+// decodeOne reads content as exactly one JSON object, optionally inside a
+// ```json fence, refusing unknown fields. what names the object in errors.
+func decodeOne(content string, v any, what string) error {
 	raw := strings.TrimSpace(content)
 	if m := fence.FindStringSubmatch(content); m != nil {
 		raw = m[1]
 	}
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
-	var a answer
-	if err := dec.Decode(&a); err != nil {
-		return nil, fmt.Errorf("the answer is not a plan object: %w", err)
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("the answer is not a %s object: %w", what, err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("the answer has text after the plan object")
+		return fmt.Errorf("the answer has text after the %s object", what)
 	}
-	for _, s := range a.Steps {
+	return nil
+}
+
+// checkPlan checks a plan for everything the gateway and the CRD schema would
+// refuse, and hashes it.
+func checkPlan(summary string, steps []lastv1alpha1.Command, resources []lastv1alpha1.ManagedResourceSpec) (*lastv1alpha1.Plan, error) {
+	for _, s := range steps {
 		if err := checkCommand("step "+s.ID, s); err != nil {
 			return nil, err
 		}
 	}
-	for i, r := range a.Resources {
+	for i, r := range resources {
 		if r.IntentRef != nil {
 			return nil, fmt.Errorf("resource %d sets intentRef; the operator sets it", i)
 		}
@@ -63,7 +78,7 @@ func Parse(content string) (*lastv1alpha1.Plan, error) {
 			}
 		}
 	}
-	body := plan.Body{Steps: a.Steps, Resources: a.Resources}
+	body := plan.Body{Steps: steps, Resources: resources}
 	if err := plan.Validate(body); err != nil {
 		return nil, err
 	}
@@ -78,7 +93,7 @@ func Parse(content string) (*lastv1alpha1.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &lastv1alpha1.Plan{Hash: hash, Summary: a.Summary, Steps: a.Steps, Resources: a.Resources}, nil
+	return &lastv1alpha1.Plan{Hash: hash, Summary: summary, Steps: steps, Resources: resources}, nil
 }
 
 // checkCommand mirrors the CRD's rule for commands and refuses image builds,
