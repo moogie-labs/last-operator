@@ -161,6 +161,11 @@ func requestText(req *gatewayv1.CallLLMRequest) string {
 	return ""
 }
 
+// revised reports whether a CallLLM request plans an edited request: specs edit
+// it by appending " v2". The space matters, as the prompt also names the
+// Intent's namespace, whose random suffix can hold "v2".
+func revised(req *gatewayv1.CallLLMRequest) bool { return strings.Contains(requestText(req), " v2") }
+
 func zeroHash() string { return "sha256:" + strings.Repeat("0", 64) }
 
 // setStatus rewrites an Intent's status, as an earlier operator process might

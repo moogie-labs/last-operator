@@ -19,8 +19,10 @@ import (
 	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
-// planTimeout bounds one model turn, corrections included.
-const planTimeout = 10 * time.Minute
+// planTimeout bounds one model turn: up to MaxAttempts calls, corrections
+// included, each bounded by CallTimeout, and a minute to spare. The audit reads
+// before it have their own bound.
+const planTimeout = agent.MaxAttempts*agent.CallTimeout + time.Minute
 
 // startPlanning discards the current plan and planning session and starts a
 // new session for the current spec. feedback, when set, is a failure the new
@@ -66,9 +68,9 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	if in.Generation != in.Status.ObservedGeneration {
 		return r.startPlanning(ctx, in, "")
 	}
-	pctx, cancel := context.WithTimeout(ctx, planTimeout)
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout) // reload and result reads
 	defer cancel()
-	conv, fresh, err := r.conversation(pctx, in)
+	conv, fresh, err := r.conversation(actx, in)
 	switch {
 	case errors.Is(err, errBadPolicy):
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
@@ -76,7 +78,7 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		return ctrl.Result{}, err // transient: retried with backoff
 	}
 	if !fresh {
-		next, err := r.pendingTurn(pctx, in)
+		next, err := r.pendingTurn(actx, in)
 		if err != nil {
 			return ctrl.Result{}, err // transient: retried with backoff
 		}
@@ -87,13 +89,17 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		}
 		conv = conv.With(next)
 	}
+	pctx, pcancel := context.WithTimeout(ctx, planTimeout)
+	defer pcancel()
 	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, answeredCheck(in))
 	var capped *agent.CapError
 	switch {
 	case errors.Is(err, agent.ErrNoTurn) || errors.Is(err, agent.ErrNoSeq) || errors.As(err, &capped) || terminal(err):
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, describe(err))
 	case err != nil:
-		return ctrl.Result{}, err // transient: retried with backoff
+		// Transient, a deadline included: retried with backoff, never counted
+		// (M3 spec §6).
+		return ctrl.Result{}, err
 	}
 	session := in.Status.PlanningSessionSeq
 	if fresh {
@@ -130,6 +136,11 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			return // the spec changed while planning; the next reconcile plans again
 		}
 		in.Status.PlanningSessionSeq = session
+		if in.Status.ObservedRequestHash == "" {
+			// An Intent an M2 operator left in Planning; clarify would discard
+			// its questions.
+			in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
+		}
 		in.Status.Questions = nil
 		in.Status.PendingCommand = nil
 		meta.RemoveStatusCondition(&in.Status.Conditions, CondExecuted)

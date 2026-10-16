@@ -89,6 +89,13 @@ func TestParseTurnReadsQuestionsAndCommands(t *testing.T) {
 	}
 }
 
+func TestParseTurnTrimsQuestionIDs(t *testing.T) {
+	got, err := ParseTurn(`{"kind":"questions","questions":[{"id":" q1 ","text":"Which?"}]}`)
+	if err != nil || len(got.Questions) != 1 || got.Questions[0].ID != "q1" {
+		t.Fatalf("questions turn = %+v, %v; want id \"q1\"", got, err)
+	}
+}
+
 func TestParseTurnAcceptsFencesAndWhitespace(t *testing.T) {
 	turn := encode(t, Turn{Kind: KindQuestions, Questions: []lastv1alpha1.Question{{ID: "q1", Text: "Which?"}}})
 	for name, content := range map[string]string{
@@ -149,6 +156,7 @@ func TestParseTurnRefusesMalformedTurns(t *testing.T) {
 		"six questions":     {`{"kind":"questions","questions":[` + strings.Join(sixQuestions, ",") + `]}`, "1 to 5 questions"},
 		"question no id":    {`{"kind":"questions","questions":[{"id":" ","text":"?"}]}`, "question 0 has no id"},
 		"question repeated": {`{"kind":"questions","questions":[{"id":"q1","text":"?"},{"id":"q1","text":"?"}]}`, `duplicate question id "q1"`},
+		"question respaced": {`{"kind":"questions","questions":[{"id":"q1","text":"?"},{"id":"q1 ","text":"?"}]}`, `duplicate question id "q1"`},
 		"question no text":  {`{"kind":"questions","questions":[{"id":"q1","text":""}]}`, `question "q1" has no text`},
 		"empty option":      {`{"kind":"questions","questions":[{"id":"q1","text":"?","options":["a",""]}]}`, `question "q1" has an empty option`},
 		"questions + steps": {`{"kind":"questions","questions":[{"id":"q1","text":"?"}],"steps":[` + step + `]}`, "a questions turn leaves"},

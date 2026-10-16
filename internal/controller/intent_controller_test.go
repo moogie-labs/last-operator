@@ -114,7 +114,7 @@ var _ = Describe("Intent planning", func() {
 		v1 := []lastv1alpha1.Command{argvStep("s1", "echo", "v1")}
 		v2 := []lastv1alpha1.Command{argvStep("s1", "echo", "v2")}
 		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if strings.Contains(requestText(req), "v2") {
+			if revised(req) {
 				return answer(v2), nil
 			}
 			return answer(v1), nil
@@ -150,7 +150,7 @@ var _ = Describe("Intent planning", func() {
 	It("does not run an approval granted before a spec edit", func() {
 		other := []lastv1alpha1.Command{argvStep("s1", argKubectl, argGet, "pods")}
 		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if strings.Contains(requestText(req), "v2") {
+			if revised(req) {
 				return answer(other), nil
 			}
 			return answer(steps), nil
@@ -266,7 +266,7 @@ var _ = Describe("Intent planning", func() {
 	It("starts a new session when the request changes while clarifying", func() {
 		q1 := lastv1alpha1.Question{ID: "q1", Text: whichNamespace}
 		gw.setScript(key, &script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if strings.Contains(requestText(req), "v2") {
+			if revised(req) {
 				return answer(steps), nil
 			}
 			return questionsTurn(q1), nil
@@ -282,6 +282,27 @@ var _ = Describe("Intent planning", func() {
 		Expect(in.Status.ObservedRequestHash).To(Equal(requestHash("list namespaces v2")))
 		Expect(in.Status.Questions).To(BeEmpty())
 		Expect(roles(gw.lastRequest(key).GetMessages())).To(Equal([]string{roleSystem, roleUser}))
+	})
+
+	It("keeps the session of an Intent an M2 operator left in Planning", func() {
+		q1 := lastv1alpha1.Question{ID: "q1", Text: whichNamespace}
+		createIntent(key, "list namespaces") // no script yet: the suite's controller fails it and leaves it alone
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		gw.setScript(key, &script{llm: turns(questionsTurn(q1), answer(steps))})
+
+		// An M2 operator recorded no request hash.
+		setStatus(key, func(in *lastv1alpha1.Intent) {
+			in.Status.ObservedRequestHash = ""
+			setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "set by the test")
+		})
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseClarifying))
+		session := getIntent(key).Status.PlanningSessionSeq
+		Expect(getIntent(key).Status.ObservedRequestHash).To(Equal(requestHash("list namespaces")))
+
+		answerQuestions(key, lastv1alpha1.Answer{ID: "q1", Value: intentName})
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(getIntent(key).Status.PlanningSessionSeq).To(Equal(session))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, callLLM, callLLM}))
 	})
 
 	It("corrects questions that reuse an answered id", func() {

@@ -171,18 +171,19 @@ func parseQuestions(w wireTurn) (Turn, error) {
 	seen := map[string]bool{}
 	qs := make([]lastv1alpha1.Question, 0, len(w.Questions))
 	for i, q := range w.Questions {
+		id := strings.TrimSpace(q.ID) // spec.answers names it; "q1" and "q1 " would look alike
 		switch {
-		case strings.TrimSpace(q.ID) == "":
+		case id == "":
 			return Turn{}, fmt.Errorf("question %d has no id", i)
-		case seen[q.ID]:
-			return Turn{}, fmt.Errorf("duplicate question id %q", q.ID)
+		case seen[id]:
+			return Turn{}, fmt.Errorf("duplicate question id %q", id)
 		case strings.TrimSpace(q.Text) == "":
-			return Turn{}, fmt.Errorf("question %q has no text", q.ID)
+			return Turn{}, fmt.Errorf("question %q has no text", id)
 		case slices.ContainsFunc(q.Options, func(o string) bool { return strings.TrimSpace(o) == "" }):
-			return Turn{}, fmt.Errorf("question %q has an empty option", q.ID)
+			return Turn{}, fmt.Errorf("question %q has an empty option", id)
 		}
-		seen[q.ID] = true
-		qs = append(qs, lastv1alpha1.Question{ID: q.ID, Text: q.Text, Options: nilIfEmpty(q.Options)})
+		seen[id] = true
+		qs = append(qs, lastv1alpha1.Question{ID: id, Text: q.Text, Options: nilIfEmpty(q.Options)})
 	}
 	if b, err := json.Marshal(qs); err != nil || len(b) > maxQuestionsBytes {
 		return Turn{}, fmt.Errorf("the questions are %d bytes; the limit is %d", len(b), maxQuestionsBytes)

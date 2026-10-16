@@ -247,11 +247,12 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	if err := f.scriptFor(key).beginErr; err != nil {
 		return nil, err
 	}
+	// The gateway's order: the subject, then an open phase, then the rest.
 	switch {
-	case f.open[key] != "":
-		return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
 	case pendingErr != nil:
 		return nil, pendingErr
+	case f.open[key] != "":
+		return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
 	case f.used[subject]:
 		return nil, status.Error(codes.FailedPrecondition, "this discovery command was already run")
 	case !approved:

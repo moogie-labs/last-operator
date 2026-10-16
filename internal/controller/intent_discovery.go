@@ -30,9 +30,12 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.discovered(ctx, in, ReasonDiscoveryFailed,
-			agent.NotRunTurn("the operator lost track of it while it ran; ask again if you still need it"))
+			agent.LostTurn("the operator lost track of it while it ran; ask again if you still need it"))
 	}
 	if in.Generation != in.Status.ObservedGeneration || pc == nil {
+		if err := r.endApprovedPhase(ctx, in); err != nil {
+			return ctrl.Result{}, err
+		}
 		return r.startPlanning(ctx, in, "")
 	}
 	approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
@@ -45,6 +48,27 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}
 	return ctrl.Result{}, r.runDiscovery(ctx, in)
+}
+
+// endApprovedPhase ends the pending command's phase, if it is approved, before
+// a spec edit discards the command. An earlier attempt may have opened the phase
+// and stopped before recording it; nothing else would ever end it, and the
+// gateway opens no other phase for the Intent while it is open. An unapproved
+// command never opened a phase.
+func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha1.Intent) error {
+	pc := in.Status.PendingCommand
+	if pc == nil {
+		return nil
+	}
+	approved, _, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
+	if err != nil || !approved {
+		return err
+	}
+	err = r.endPhase(ctx, in, pc.Hash, false, "The Intent's spec changed before the discovery command ran")
+	if status.Code(err) == codes.FailedPrecondition {
+		return nil // no phase was open
+	}
+	return err
 }
 
 // runDiscovery runs the approved command as a one-step Discovery phase. A
@@ -85,16 +109,22 @@ func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.In
 	succeeded := err == nil && res.GetExitCode() == 0 && res.GetError() == ""
 	why := ""
 	switch {
-	case err != nil:
+	case terminal(err):
 		why = "the command could not run: " + describe(err)
+	case err != nil:
+		why = "the command's result was lost: " + describe(err)
 	case !succeeded:
 		why = stepFailure(plan.DiscoveryStepID, res)
 	}
 	if eerr := r.endPhase(ctx, in, subject, succeeded, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
 		return eerr // still PhaseOpen: the next attempt reports the command as lost
 	}
-	if err != nil {
+	switch {
+	case terminal(err):
 		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn(describe(err)))
+	case err != nil:
+		// The call failed in transit or timed out: the command may have run.
+		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.LostTurn(describe(err)))
 	}
 	logf.FromContext(ctx).Info("Ran discovery command", "command", subject, "exitCode", res.GetExitCode())
 	return r.discovered(ctx, in, ReasonDiscoveryRan, "Discovery command "+subject+" ran")

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -29,6 +30,10 @@ const (
 // maxTokens caps each answer, thinking included. The gateway streams, so a long
 // answer does not hit an HTTP timeout (M3 spec §3.2).
 const maxTokens = 64000
+
+// CallTimeout bounds one CallLLM. It is sized for a streamed answer of
+// maxTokens with thinking, which can take well over ten minutes.
+const CallTimeout = 30 * time.Minute
 
 // Message roles.
 const (
@@ -121,7 +126,8 @@ func (c Conversation) Waiting() bool { return len(c) > 0 && c[len(c)-1].GetRole(
 // appended, and the audit sequence number of the first llm.request it caused.
 // check, when set, refuses turns the caller cannot accept; its error becomes a
 // correction like a malformed answer's. Gateway errors are returned unchanged
-// so callers can classify their codes. ErrNoTurn, ErrNoSeq and *CapError end
+// so callers can classify their codes. Each call is bounded by CallTimeout.
+// ErrNoTurn, ErrNoSeq and *CapError end
 // the session.
 func (p *Planner) Next(ctx context.Context, ref *gatewayv1.IntentRef, conv Conversation, check func(Turn) error) (Turn, Conversation, uint64, error) {
 	if !conv.Waiting() {
@@ -133,8 +139,10 @@ func (p *Planner) Next(ctx context.Context, ref *gatewayv1.IntentRef, conv Conve
 		if conv.ModelTurns() >= MaxModelTurns {
 			return Turn{}, nil, 0, &CapError{Max: MaxModelTurns, What: "model turns"}
 		}
-		resp, err := p.LLM.CallLLM(ctx, &gatewayv1.CallLLMRequest{Intent: ref, Messages: conv, MaxTokens: maxTokens,
+		cctx, cancel := context.WithTimeout(ctx, CallTimeout)
+		resp, err := p.LLM.CallLLM(cctx, &gatewayv1.CallLLMRequest{Intent: ref, Messages: conv, MaxTokens: maxTokens,
 			ResponseSchema: Schema()})
+		cancel()
 		if err != nil {
 			return Turn{}, nil, 0, err
 		}

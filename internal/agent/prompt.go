@@ -159,6 +159,10 @@ func DeniedTurn(reason string) string {
 // NotRunTurn reports a discovery command that did not run.
 func NotRunTurn(why string) string { return "The command did not run: " + why }
 
+// LostTurn reports a discovery command whose run the operator cannot account
+// for: it may have run, so asking again could run it twice.
+func LostTurn(why string) string { return "The command may have run, but its result was lost: " + why }
+
 func correctionTurn(err error) string {
 	return fmt.Sprintf("That answer is not a valid turn: %v\nAnswer again with only the JSON turn object.", err)
 }

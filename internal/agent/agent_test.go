@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -15,17 +16,20 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
-// fakeLLM answers in order and records every request. Its llm.request
-// sequence numbers start at 101, or are 0 when noSeq is set.
+// fakeLLM answers in order and records every request and its deadline. Its
+// llm.request sequence numbers start at 101, or are 0 when noSeq is set.
 type fakeLLM struct {
-	answers []string
-	err     error
-	noSeq   bool
-	reqs    []*gatewayv1.CallLLMRequest
+	answers   []string
+	err       error
+	noSeq     bool
+	reqs      []*gatewayv1.CallLLMRequest
+	deadlines []time.Time // zero when the call had none
 }
 
-func (f *fakeLLM) CallLLM(_ context.Context, in *gatewayv1.CallLLMRequest, _ ...grpc.CallOption) (*gatewayv1.CallLLMResponse, error) {
+func (f *fakeLLM) CallLLM(ctx context.Context, in *gatewayv1.CallLLMRequest, _ ...grpc.CallOption) (*gatewayv1.CallLLMResponse, error) {
 	f.reqs = append(f.reqs, in)
+	deadline, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, deadline)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -88,6 +92,22 @@ func TestNextCorrectsMalformedAnswers(t *testing.T) {
 	}
 	if roles(conv) != "system,user,assistant,user,assistant" || !strings.Contains(conv[3].GetContent(), "not a valid turn") {
 		t.Fatalf("conversation = %v", conv)
+	}
+}
+
+func TestNextBoundsEachCall(t *testing.T) {
+	llm := &fakeLLM{answers: []string{nginxReply, questionsAnswer}}
+	start := time.Now()
+	if _, _, _, err := (&Planner{LLM: llm}).Next(context.Background(), ref, NewConversation(nginxRequest), nil); err != nil {
+		t.Fatalf("Next = %v", err)
+	}
+	if len(llm.deadlines) != 2 {
+		t.Fatalf("%d calls, want 2", len(llm.deadlines))
+	}
+	for i, d := range llm.deadlines {
+		if left := d.Sub(start); left < CallTimeout-time.Minute || left > CallTimeout+time.Minute {
+			t.Errorf("call %d: deadline %v after the start, want about %v", i, left, CallTimeout)
+		}
 	}
 }
 
@@ -225,5 +245,8 @@ func TestUserTurns(t *testing.T) {
 	}
 	if got := NotRunTurn("the gateway refused it: policy"); got != "The command did not run: the gateway refused it: policy" {
 		t.Errorf("NotRunTurn = %q", got)
+	}
+	if got := LostTurn("connection reset"); got != "The command may have run, but its result was lost: connection reset" {
+		t.Errorf("LostTurn = %q", got)
 	}
 }

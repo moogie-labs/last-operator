@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"strings"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -75,7 +73,7 @@ var _ = Describe("Intent verification", func() {
 		single := lastv1alpha1.ManagedResourceSpec{Description: "web server", Probes: []lastv1alpha1.Probe{probe("p1")}}
 		extra := lastv1alpha1.ManagedResourceSpec{Description: "cache", Probes: []lastv1alpha1.Probe{probe("p2")}}
 		gw.setScript(key, &script{failing: map[string]bool{"p2": true}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if strings.Contains(requestText(req), "v2") {
+			if revised(req) {
 				return answer(steps, single), nil
 			}
 			return answer(steps, single, extra), nil
@@ -106,7 +104,7 @@ var _ = Describe("Intent verification", func() {
 		probed := lastv1alpha1.ManagedResourceSpec{Description: "web server", Probes: []lastv1alpha1.Probe{probe("p1")}}
 		unprobed := lastv1alpha1.ManagedResourceSpec{Description: "web without probes"}
 		gw.setScript(key, &script{failing: map[string]bool{"p1": true}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if strings.Contains(requestText(req), "v2") {
+			if revised(req) {
 				return answer(steps, unprobed), nil
 			}
 			return answer(steps, probed), nil
