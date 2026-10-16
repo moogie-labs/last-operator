@@ -22,9 +22,12 @@ LLM=demo-anthropic
 
 hack/kind-install.sh
 
-# The model's API key, under the key name the gateway reads.
+# The model's API key, under the key name the gateway reads. Server-side apply
+# keeps the key out of the last-applied-configuration annotation, and nothing
+# after this needs it.
 printf '%s' "$ANTHROPIC_API_KEY" | kubectl create secret generic "$LLM" -n last-gateway \
-  --from-file=apiKey=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  --from-file=apiKey=/dev/stdin --dry-run=client -o yaml | kubectl apply --server-side -f - >/dev/null
+unset ANTHROPIC_API_KEY
 
 # A namespace for the demo, a Provider that can edit only it, and the model.
 kubectl apply -f - <<EOF
