@@ -16,8 +16,8 @@ func clarifying(answers ...lastv1alpha1.Answer) *lastv1alpha1.Intent {
 		in.Spec.Answers = answers
 		in.Status.Phase = lastv1alpha1.PhaseClarifying
 		in.Status.Questions = []lastv1alpha1.Question{
-			{ID: "q1", Text: "Which tier?", Options: []string{tierInternal, tierPublic}},
-			{ID: "q2", Text: "Which port?"},
+			{ID: "q1", Text: questionTier, Options: []string{tierInternal, tierPublic}},
+			{ID: "q2", Text: questionPort},
 		}
 	})
 }
@@ -52,7 +52,7 @@ func TestAnswerAsksOnlyUnansweredQuestions(t *testing.T) {
 	if err := execute(d, "answer", webName); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.String(), "Which tier?") {
+	if strings.Contains(out.String(), questionTier) {
 		t.Errorf("asked an answered question:\n%s", out)
 	}
 	want := []lastv1alpha1.Answer{{ID: "q1", Value: tierPublic}, {ID: "q2", Value: port80}}
@@ -91,4 +91,8 @@ const (
 	tierInternal = "internal"
 	tierPublic   = "public"
 	port80       = "port 80"
+	nginxName    = "nginx"
+	trueCmd      = "true"
+	questionTier = "Which tier?"
+	questionPort = "Which port?"
 )

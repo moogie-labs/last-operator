@@ -57,11 +57,11 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 			Egress: []string{"10.0.0.1:443"}, Timeout: &metav1.Duration{Duration: 2 * time.Minute}},
 		{ID: "check", Run: lastv1alpha1.CommandRun{Script: "set -e\necho done \x1b[2K"}},
 	}, Resources: []lastv1alpha1.ManagedResourceSpec{{
-		Description: "web",
+		Description: webName,
 		Identity:    &runtime.RawExtension{Raw: []byte(`{"kind":"Deployment"}`)},
-		Probes: []lastv1alpha1.Probe{{ID: "ready", Command: argvCommand(wordKubectl, "get", "deploy", "web"),
+		Probes: []lastv1alpha1.Probe{{ID: "ready", Command: argvCommand(wordKubectl, "get", "deploy", webName),
 			Assert: "result.exitCode == 0"}},
-		Teardown:         []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{wordKubectl, "delete", "deploy", "web"}}}},
+		Teardown:         []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{wordKubectl, "delete", "deploy", webName}}}},
 		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
 		Outputs:          map[string]string{"ip": "${steps.svc.json.spec.clusterIP}"},
 	}}}

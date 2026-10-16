@@ -15,9 +15,9 @@ func TestPlanShowsThePendingCommandOrThePlan(t *testing.T) {
 		in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Reason: seeWhatExists, Command: argvCommand("kubectl", "get", "ns")}
 		setReady(in, "AwaitingDiscoveryApproval", "Waiting for an IntentApproval of discovery command "+h1)
 	})
-	web := testIntent("web", func(in *lastv1alpha1.Intent) {
+	web := testIntent(webName, func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
-		in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: "nginx", Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}}}
+		in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: nginxName, Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}}}
 	})
 	fresh := testIntent("fresh", nil)
 	d, out := depsFor(fakeClient(look, web, fresh), "")
@@ -32,7 +32,7 @@ func TestPlanShowsThePendingCommandOrThePlan(t *testing.T) {
 		}
 	}
 	out.Reset()
-	if err := execute(d, "plan", "web"); err != nil || !strings.Contains(out.String(), "Plan "+h2) {
+	if err := execute(d, "plan", webName); err != nil || !strings.Contains(out.String(), "Plan "+h2) {
 		t.Fatalf("plan web = %v:\n%s", err, out)
 	}
 	out.Reset()

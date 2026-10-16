@@ -23,9 +23,9 @@ func pendingIntent() *lastv1alpha1.Intent {
 }
 
 func plannedIntent() *lastv1alpha1.Intent {
-	return testIntent("web", func(in *lastv1alpha1.Intent) {
+	return testIntent(webName, func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
-		in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: "nginx", Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}}}
+		in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: nginxName, Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}}}
 	})
 }
 
@@ -96,9 +96,9 @@ func TestDenyNeedsAReason(t *testing.T) {
 }
 
 func TestDecisionsNeedSomethingToDecide(t *testing.T) {
-	planning := testIntent("web", func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhasePlanning })
+	planning := testIntent(webName, func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhasePlanning })
 	d, _ := depsFor(fakeClient(planning), "")
-	if err := execute(d, "approve", "web"); err == nil || !strings.Contains(err.Error(), "has nothing to decide (phase Planning)") {
+	if err := execute(d, "approve", webName); err == nil || !strings.Contains(err.Error(), "has nothing to decide (phase Planning)") {
 		t.Fatalf("approve while planning = %v", err)
 	}
 }

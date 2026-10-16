@@ -64,15 +64,27 @@ func pollWait(ctx context.Context) error {
 
 func NewRootCommand(d Deps) *cobra.Command {
 	kf := &KubeFlags{}
+	var cf createFlags
 	root := &cobra.Command{
-		Use:           "kubectl-last",
-		Short:         "Work with last-operator",
+		Use:   `kubectl-last ["REQUEST"]`,
+		Short: "Work with last-operator",
+		Long: "Create an Intent from a request in your own words and follow it, answering its questions and " +
+			"approving its discovery commands and plan as they come, or run one of the commands below.",
+		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			return runCreate(cmd.Context(), d, *kf, cf, args[0])
+		},
 	}
 	root.SetOut(d.Out)
 	root.SetErr(d.Err)
 	kf.addTo(root)
+	root.Flags().StringVar(&cf.name, "name", "", "the Intent's name (default: from the request, with a random suffix)")
+	root.Flags().BoolVar(&cf.noFollow, "no-follow", false, "create the Intent and exit")
 	root.AddCommand(newAuditCommand(d), newPlanCommand(d, kf),
 		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny), newAnswerCommand(d, kf))
 	return root

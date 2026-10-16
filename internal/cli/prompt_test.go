@@ -17,7 +17,7 @@ func newTestPrompter(input string) (*prompter, *bytes.Buffer) {
 }
 
 func TestAskQuestionWithOptions(t *testing.T) {
-	q := lastv1alpha1.Question{ID: "q1", Text: "Which tier?", Options: []string{tierInternal, tierPublic}}
+	q := lastv1alpha1.Question{ID: "q1", Text: questionTier, Options: []string{tierInternal, tierPublic}}
 	p, out := newTestPrompter("9\nfoo\n2\n")
 	got, err := p.askQuestion(context.Background(), q)
 	if err != nil || got != tierPublic {
@@ -37,7 +37,7 @@ func TestAskQuestionWithOptions(t *testing.T) {
 
 func TestAskQuestionFreeText(t *testing.T) {
 	p, out := newTestPrompter("\n  port 80  \n")
-	got, err := p.askQuestion(context.Background(), lastv1alpha1.Question{ID: "q2", Text: "Which port?"})
+	got, err := p.askQuestion(context.Background(), lastv1alpha1.Question{ID: "q2", Text: questionPort})
 	if err != nil || got != port80 {
 		t.Fatalf("askQuestion = %q, %v", got, err)
 	}
