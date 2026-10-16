@@ -158,7 +158,7 @@ func TestDiscoveryApprovalsAreSingleUse(t *testing.T) {
 
 	_, err := env.beginStage(lastv1alpha1.StageDiscovery, subject)
 	env.wantDenied(err, codes.FailedPrecondition)
-	if !strings.Contains(err.Error(), "already opened") {
+	if !strings.Contains(err.Error(), "this discovery command already ran") {
 		t.Fatalf("rerun = %v, want the subject refused as used", err)
 	}
 	// The same command under a new nonce is a new subject; the old approval does not cover it.
@@ -224,4 +224,42 @@ func wantSubjectFromPhaseBegin(t *testing.T, e audit.Entry, nonce string) {
 	if err != nil || h != e.SubjectHash {
 		t.Fatalf("recomputed subject = %s, %v; want %s", h, err, e.SubjectHash)
 	}
+}
+
+func TestDiscoveryRefusalsNameTheDiscoveryCommand(t *testing.T) {
+	c := discoveryCommand()
+	in := intentWithDiscovery(t, c, "n1")
+	subject := in.Status.PendingCommand.Hash
+
+	t.Run("no approval", func(t *testing.T) {
+		env := newProviderEnv(t, in)
+		_, err := env.beginStage(lastv1alpha1.StageDiscovery, subject)
+		env.wantDenied(err, codes.FailedPrecondition)
+		if !strings.Contains(err.Error(), "no IntentApproval approves this discovery command") {
+			t.Fatalf("BeginPhase = %v", err)
+		}
+	})
+	t.Run("a deny wins", func(t *testing.T) {
+		env := newProviderEnv(t, in, discoveryApproval("look", subject, lastv1alpha1.DecisionApprove),
+			discoveryApproval("no", subject, lastv1alpha1.DecisionDeny))
+		_, err := env.beginStage(lastv1alpha1.StageDiscovery, subject)
+		env.wantDenied(err, codes.PermissionDenied)
+		if !strings.Contains(err.Error(), "approval no denies this discovery command") {
+			t.Fatalf("BeginPhase = %v", err)
+		}
+	})
+	t.Run("approval withdrawn while the phase is open", func(t *testing.T) {
+		env := newProviderEnv(t, in, discoveryApproval("look", subject, lastv1alpha1.DecisionApprove))
+		if _, err := env.beginStage(lastv1alpha1.StageDiscovery, subject); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.crd.Create(env.ctx, discoveryApproval("no", subject, lastv1alpha1.DecisionDeny)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.run(subject, c)
+		env.wantDenied(err, codes.PermissionDenied)
+		if !strings.Contains(err.Error(), "approval withdrawn: no denies this discovery command") {
+			t.Fatalf("RunCommand = %v", err)
+		}
+	})
 }

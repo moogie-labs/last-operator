@@ -121,12 +121,12 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
-		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this plan", approval.Name)
+		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this %s", approval.Name, subjectNoun(p.stage))
 	case err != nil:
 		return nil, err
 	case approval == nil:
 		p.failed = true
-		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this plan")
+		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
 	}
 	image, err := g.sandboxImage(ctx)
 	if err != nil {

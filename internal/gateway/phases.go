@@ -327,6 +327,15 @@ func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, can
 	return err
 }
 
+// subjectNoun names a phase's approval subject in refusals that the model and
+// the user read.
+func subjectNoun(stage lastv1alpha1.Stage) string {
+	if stage == lastv1alpha1.StageDiscovery {
+		return "discovery command"
+	}
+	return "plan"
+}
+
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
 	w, release, err := g.beginRPC()
 	if err != nil {
@@ -371,6 +380,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		}
 	}
 	if rec.WasUsed(subject) {
+		if stage == lastv1alpha1.StageDiscovery {
+			return nil, d.deny(codes.FailedPrecondition, "this discovery command already ran, and its approval is used up; ask for it again to run it again")
+		}
 		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
 	}
 	if stage == lastv1alpha1.StageCreate {
@@ -391,11 +403,11 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	approval, err := g.findApproval(ctx, ns, name, stage, subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
-		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", approval.Name)
+		return nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
 	case err != nil:
 		return nil, err
 	case approval == nil:
-		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this plan")
+		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
 	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
 		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
 	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
