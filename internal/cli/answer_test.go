@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -74,6 +76,39 @@ func TestAnswerNeedsOpenQuestions(t *testing.T) {
 	d, _ := depsFor(fakeClient(planning), "")
 	if err := execute(d, "answer", webName); err == nil || !strings.Contains(err.Error(), "has no open questions (phase Planning)") {
 		t.Fatalf("answer while planning = %v", err)
+	}
+}
+
+func TestAnswerNamesTheCommandAtTheEndOfInput(t *testing.T) {
+	c := fakeClient(clarifying())
+	d, _ := depsFor(c, "1\n")
+	err := execute(d, "answer", webName)
+	if !errors.Is(err, errNoInput) || !strings.Contains(err.Error(), "kubectl last answer web -n team-x") {
+		t.Fatalf("answer at the end of input = %v", err)
+	}
+	if got := answersOf(t, c); len(got) != 0 {
+		t.Fatalf("spec.answers = %+v after unfinished answers", got)
+	}
+}
+
+func TestCtrlCStopsAnsweringQuietly(t *testing.T) {
+	c := fakeClient(clarifying())
+	d, out := depsFor(c, "")
+	r, w := io.Pipe()
+	defer func() { _ = w.Close() }()
+	d.In = r
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := NewRootCommand(d)
+	cmd.SetArgs([]string{"answer", webName})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("answer after Ctrl-C = %v", err)
+	}
+	if !strings.Contains(out.String(), "Stopped answering Intent team-x/web") {
+		t.Errorf("output:\n%s", out)
+	}
+	if got := answersOf(t, c); len(got) != 0 {
+		t.Fatalf("spec.answers = %+v after Ctrl-C", got)
 	}
 }
 

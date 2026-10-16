@@ -54,10 +54,8 @@ func (p *prompter) ask(ctx context.Context, prompt string) (string, error) {
 // askQuestion asks one clarifying question: a numbered menu when it has
 // options, otherwise a free-text line. It asks again until the answer is usable.
 func (p *prompter) askQuestion(ctx context.Context, q lastv1alpha1.Question) (string, error) {
-	writef(p.w, "\n%s\n", clean(q.Text))
-	for i, o := range q.Options {
-		writef(p.w, "  %d) %s\n", i+1, clean(o))
-	}
+	writeln(p.w)
+	renderQuestion(p.w, q)
 	prompt := "Answer: "
 	if len(q.Options) > 0 {
 		prompt = fmt.Sprintf("Answer [1-%d]: ", len(q.Options))
@@ -84,11 +82,24 @@ func (p *prompter) askQuestion(ctx context.Context, q lastv1alpha1.Question) (st
 	}
 }
 
+// decisionShowFiles is askDecision's answer when the user asks to see the
+// files' contents before deciding. It never reaches an IntentApproval.
+const decisionShowFiles lastv1alpha1.Decision = "ShowFiles"
+
 // askDecision asks whether to approve what was just shown. It returns
-// DecisionApprove, DecisionDeny with a reason, or "" to leave it pending.
-func (p *prompter) askDecision(ctx context.Context) (lastv1alpha1.Decision, string, error) {
+// DecisionApprove, DecisionDeny with a reason, "" to leave it pending, or, when
+// the subject has files, decisionShowFiles.
+func (p *prompter) askDecision(ctx context.Context, stage lastv1alpha1.Stage, files bool) (lastv1alpha1.Decision, string, error) {
+	prompt, help := "Approve? [y/N/d]: ", "Answer y to approve, n to leave it pending, or d to deny."
+	if files {
+		prompt, help = "Approve? [y/N/d/f]: ", "Answer y to approve, n to leave it pending, d to deny, or f to show the files."
+	}
+	reasonPrompt := "Reason for denying (the model reads it): "
+	if stage == lastv1alpha1.StageCreate {
+		reasonPrompt = "Reason for denying (the model reads it; denying a plan fails the Intent): "
+	}
 	for {
-		line, err := p.ask(ctx, "Approve? [y/N/d]: ")
+		line, err := p.ask(ctx, prompt)
 		if err != nil {
 			return "", "", err
 		}
@@ -97,9 +108,13 @@ func (p *prompter) askDecision(ctx context.Context) (lastv1alpha1.Decision, stri
 			return lastv1alpha1.DecisionApprove, "", nil
 		case "", "n", "no":
 			return "", "", nil
+		case "f", "files":
+			if files {
+				return decisionShowFiles, "", nil
+			}
 		case "d", "deny":
 			for {
-				reason, err := p.ask(ctx, "Reason for denying (the model reads it): ")
+				reason, err := p.ask(ctx, reasonPrompt)
 				if err != nil {
 					return "", "", err
 				}
@@ -109,6 +124,6 @@ func (p *prompter) askDecision(ctx context.Context) (lastv1alpha1.Decision, stri
 				writeln(p.w, "A reason cannot be empty.")
 			}
 		}
-		writeln(p.w, "Answer y to approve, n to leave it pending, or d to deny.")
+		writeln(p.w, help)
 	}
 }

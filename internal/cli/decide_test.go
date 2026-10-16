@@ -13,20 +13,42 @@ import (
 
 const seeWhatExists = "see what exists"
 
-var h3 = "sha256:" + strings.Repeat("3", 64)
+// h3 is the real hash of lookCommand asked again, with a fresh nonce.
+var h3 = func() string {
+	pc := lookCommand()
+	pc.Nonce = "n2"
+	return discoveryHash(pc)
+}()
 
 func pendingIntent() *lastv1alpha1.Intent {
 	return testIntent("look", func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingDiscoveryApproval
-		in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Reason: seeWhatExists, Command: argvCommand("kubectl", "get", "ns")}
+		in.Status.PendingCommand = lookCommand()
 	})
 }
 
 func plannedIntent() *lastv1alpha1.Intent {
 	return testIntent(webName, func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
-		in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: nginxName, Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}}}
+		in.Status.Plan = webPlan()
 	})
+}
+
+// hostile is the command a hostile operator runs under an approval of
+// something benign: it shows benign content under the hash of this.
+const hostile = "rm -rf /"
+
+// forgedIntents show benign content under the hash of other content.
+func forgedIntents() []*lastv1alpha1.Intent {
+	look := pendingIntent()
+	look.Status.PendingCommand.Command.Run.Argv = []string{"sh", "-c", hostile}
+	look.Status.PendingCommand.Hash = discoveryHash(look.Status.PendingCommand)
+	look.Status.PendingCommand.Command = lookCommand().Command
+	web := plannedIntent()
+	web.Status.Plan.Steps[0].Run.Argv = []string{"sh", "-c", hostile}
+	web.Status.Plan.Hash = planHash(web.Status.Plan)
+	web.Status.Plan.Steps = webPlan().Steps
+	return []*lastv1alpha1.Intent{look, web}
 }
 
 func approvalsIn(t *testing.T, c client.Client) []lastv1alpha1.IntentApproval {
@@ -129,6 +151,7 @@ func TestDecideSaysWhenTheSubjectMovedOn(t *testing.T) {
 		if err := cl.Get(ctx, client.ObjectKey{Namespace: testNS, Name: "look"}, &in); err != nil {
 			return err
 		}
+		in.Status.PendingCommand.Nonce = "n2"
 		in.Status.PendingCommand.Hash = h3
 		return cl.Status().Update(ctx, &in)
 	}})
@@ -139,6 +162,32 @@ func TestDecideSaysWhenTheSubjectMovedOn(t *testing.T) {
 	for _, want := range []string{"Approved discovery command " + h1, "now asks about " + h3, "matches nothing"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDecisionsRefuseASubjectThatDoesNotHashToItsStatedHash(t *testing.T) {
+	for _, in := range forgedIntents() {
+		stage, stated, _ := subjectOf(in)
+		for _, args := range [][]string{
+			{"approve", in.Name},
+			{"approve", in.Name, "--hash", stated},
+			{"deny", in.Name, "--reason", "no"},
+		} {
+			c := fakeClient(in.DeepCopy())
+			d, out := depsFor(c, "")
+			err := execute(d, args...)
+			want := "intent team-x/" + in.Name + ": the " + subjectNoun(stage) + " does not hash to its stated hash " + stated +
+				"; refusing to show or decide it"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("kubectl last %q = %v, want %q", args, err, want)
+			}
+			if n := len(approvalsIn(t, c)); n != 0 {
+				t.Fatalf("kubectl last %q created %d IntentApprovals", args, n)
+			}
+			if out.Len() != 0 {
+				t.Errorf("kubectl last %q showed the forged subject:\n%s", args, out)
+			}
 		}
 	}
 }

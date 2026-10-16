@@ -71,12 +71,12 @@ func TestFollowAsksDecidesAndEndsReady(t *testing.T) {
 		{ready: func(in *lastv1alpha1.Intent) bool { return len(in.Spec.Answers) == 1 }, apply: func(in *lastv1alpha1.Intent) {
 			in.Status.Questions = nil
 			in.Status.Phase = lastv1alpha1.PhaseAwaitingDiscoveryApproval
-			in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Reason: "see what exists", Command: argvCommand("kubectl", "get", "ns")}
+			in.Status.PendingCommand = lookCommand()
 		}},
 		{ready: w.decided(h1), apply: func(in *lastv1alpha1.Intent) {
 			in.Status.PendingCommand = nil
 			in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
-			in.Status.Plan = &lastv1alpha1.Plan{Hash: h2, Summary: nginxName, Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}}}
+			in.Status.Plan = webPlan()
 		}},
 		{ready: w.decided(h2), apply: func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhaseExecuting }},
 		{apply: func(in *lastv1alpha1.Intent) {
@@ -135,7 +135,7 @@ func TestFollowAsksAboutEachSubjectOnce(t *testing.T) {
 	w.steps = []step{
 		{apply: func(in *lastv1alpha1.Intent) {
 			in.Status.Phase = lastv1alpha1.PhaseAwaitingDiscoveryApproval
-			in.Status.PendingCommand = &lastv1alpha1.PendingCommand{Hash: h1, Command: argvCommand("kubectl", "get", "ns")}
+			in.Status.PendingCommand = lookCommand()
 		}},
 		{apply: func(*lastv1alpha1.Intent) {}}, // a read later, still waiting for the same decision
 		{apply: func(in *lastv1alpha1.Intent) {
@@ -151,7 +151,9 @@ func TestFollowAsksAboutEachSubjectOnce(t *testing.T) {
 	if n := strings.Count(out.String(), "Approve? [y/N/d]"); n != 1 {
 		t.Errorf("asked %d times:\n%s", n, out)
 	}
-	for _, want := range []string{"Left pending; decide later with kubectl last approve web",
+	for _, want := range []string{"Left pending. Decide on it later:\n",
+		"Approve: kubectl last approve web -n team-x --hash " + h1 + "\n",
+		"Deny:    kubectl last deny web -n team-x --hash " + h1 + " --reason R\n",
 		"Intent team-x/web failed: PlanningFailed: planning exceeded 20 model turns"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -188,5 +190,102 @@ func TestCtrlCStopsFollowingAndLeavesTheIntent(t *testing.T) {
 	}
 	if n := len(intents(t, c)); n != 1 {
 		t.Fatalf("%d Intents after Ctrl-C, want the one created", n)
+	}
+}
+
+func TestFollowWarnsAboutAForgedSubjectOnceAndKeepsFollowing(t *testing.T) {
+	for _, forged := range forgedIntents() {
+		c := fakeClient()
+		d, out := depsFor(c, "y\n")
+		w := &world{t: t, c: c}
+		w.steps = []step{
+			{apply: func(in *lastv1alpha1.Intent) { in.Status = forged.Status }},
+			{apply: func(*lastv1alpha1.Intent) {}}, // a read later, still forged
+			{apply: func(in *lastv1alpha1.Intent) {
+				in.Status.Phase = lastv1alpha1.PhaseFailed
+				setReady(in, "ApprovalDenied", "nobody approved it")
+			}},
+		}
+		d.Wait = w.wait
+		if err := execute(d, "run an nginx web server", "--name", webName); !errors.Is(err, ErrIntentFailed) {
+			t.Fatalf("kubectl last = %v, want ErrIntentFailed\n%s", err, out)
+		}
+		_, stated, _ := subjectOf(forged)
+		if n := strings.Count(out.String(), "Warning: intent team-x/web: the "); n != 1 {
+			t.Errorf("warned %d times, want once:\n%s", n, out)
+		}
+		if !strings.Contains(out.String(), "does not hash to its stated hash "+stated) {
+			t.Errorf("output lacks the warning:\n%s", out)
+		}
+		for _, never := range []string{"Approve?", "kubectl get ns", trueCmd} {
+			if strings.Contains(out.String(), never) {
+				t.Errorf("output shows %q of a forged subject:\n%s", never, out)
+			}
+		}
+		if n := len(approvalsIn(t, c)); n != 0 {
+			t.Errorf("%d IntentApprovals for a forged subject", n)
+		}
+	}
+}
+
+func TestFollowShowsFilesOnRequest(t *testing.T) {
+	c := fakeClient()
+	d, out := depsFor(c, "f\ny\n")
+	p := webPlan()
+	p.Steps[0].Files = map[string]string{webYAML: "kind: Deployment\x1b[2K\n"}
+	p.Hash = planHash(p)
+	w := &world{t: t, c: c}
+	w.steps = []step{
+		{apply: func(in *lastv1alpha1.Intent) {
+			in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
+			in.Status.Plan = p
+		}},
+		{ready: w.decided(p.Hash), apply: func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhaseFailed }},
+	}
+	d.Wait = w.wait
+	if err := execute(d, "run an nginx web server", "--name", webName); !errors.Is(err, ErrIntentFailed) {
+		t.Fatalf("kubectl last = %v\n%s", err, out)
+	}
+	if n := strings.Count(out.String(), "Approve? [y/N/d/f]: "); n != 2 {
+		t.Errorf("asked %d times, want 2:\n%s", n, out)
+	}
+	if n := strings.Count(out.String(), "Plan "+p.Hash); n != 2 {
+		t.Errorf("showed the plan %d times, want 2:\n%s", n, out)
+	}
+	if n := strings.Count(out.String(), "       | kind: Deployment\\u001b[2K\n"); n != 1 {
+		t.Errorf("showed the file content %d times, want once, escaped:\n%s", n, out)
+	}
+	if got := approvalsIn(t, c); len(got) != 1 || got[0].Spec.SubjectHash != p.Hash {
+		t.Fatalf("approvals = %+v", got)
+	}
+}
+
+func TestFollowEndsAtDrifted(t *testing.T) {
+	c := fakeClient()
+	d, out := depsFor(c, "")
+	w := &world{t: t, c: c, steps: []step{{apply: func(in *lastv1alpha1.Intent) {
+		in.Status.Phase = lastv1alpha1.PhaseDrifted
+		setReady(in, "Drifted", "Probes failed on web-0")
+	}}}}
+	d.Wait = w.wait
+	if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
+		t.Fatalf("kubectl last = %v\n%s", err, out)
+	}
+	if !strings.HasSuffix(out.String(), "Intent team-x/web: Drifted (Probes failed on web-0)\n") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+func TestPrintReadyEscapesTheOutputSecretName(t *testing.T) {
+	mr := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: "web-0", Namespace: testNS},
+		Spec: lastv1alpha1.ManagedResourceSpec{IntentRef: &lastv1alpha1.LocalRef{Name: webName}, Description: "web",
+			OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web\x1b[8m"}}}
+	k := &Kube{Client: fakeClient(mr), Namespace: testNS}
+	var b strings.Builder
+	if err := printReady(context.Background(), k, &b, testIntent(webName, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "outputs: Secret web\\u001b[8m\n") {
+		t.Errorf("output:\n%q", b.String())
 	}
 }

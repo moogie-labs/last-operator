@@ -41,25 +41,37 @@ The plugin creates an Intent and follows it, every two seconds:
 
 - **Questions.** Each clarifying question is shown as a numbered menu or a
   free-text prompt.
-- **Discovery commands and the plan.** Each is shown with its commands, files
-  (by path and size), Providers and egress, then the plugin asks
-  `Approve? [y/N/d]`:
+- **Discovery commands and the plan.** The plugin first recomputes each one's
+  hash from the content it is about to show. One that does not hash to the hash
+  the operator states is never shown or decided: the plugin warns once and keeps
+  following. Each verified one is shown with its commands, files (by path and
+  size), Providers and egress, then the plugin asks `Approve? [y/N/d]`, or
+  `Approve? [y/N/d/f]` when it carries files:
   - `y` approves;
-  - `d` denies, after asking for a reason, which the model reads;
-  - `N` or Enter leaves it pending.
-- **Ready.** At Ready it lists the ManagedResources and output Secrets.
+  - `d` denies, after asking for a reason, which the model reads. Denying a plan
+    fails the Intent; denying a discovery command lets the model plan on;
+  - `f` shows it again with the files' contents, then asks again;
+  - `N` or Enter leaves it pending, and prints the `approve` and `deny` commands
+    bound to its hash.
+- **Ready.** At Ready it lists the ManagedResources and output Secrets. Following
+  also ends at Drifted, after the status line.
 
 Ctrl-C stops following; the Intent carries on. Pick it up again with:
 
 ```bash
-kubectl last plan NAME                  # what the Intent is waiting for (read-only)
+kubectl last plan NAME [--files]        # what the Intent is waiting for (read-only)
 kubectl last answer NAME                # answer its open questions
-kubectl last approve NAME [--hash H]    # approve exactly what plan shows
-kubectl last deny NAME --reason R
+kubectl last approve NAME --hash H      # approve exactly what plan showed
+kubectl last deny NAME --hash H --reason R
 ```
 
-Every decision is an `IntentApproval` that you create under your own identity,
-for the hash you were shown.
+`plan` prints the open questions, or the pending discovery command or plan with
+the `approve` and `deny` commands bound to its hash; `--files` adds the files'
+contents. Without `--hash`, `approve` and `deny` decide on whatever the Intent
+asks about when they run, and show it first. Every decision is an
+`IntentApproval` that you create under your own identity, for the hash you were
+shown, and the plugin never shows or decides content that does not hash to its
+stated hash.
 
 ## Demo against Claude (opt-in)
 

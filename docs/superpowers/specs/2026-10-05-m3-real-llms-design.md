@@ -215,24 +215,30 @@ Every command acts as the user, with their kubeconfig identity. The CLI never ta
   - Creates an Intent. The default name is a DNS-safe slug of the first words of the request plus a 4-character random suffix.
   - Then follows it, reading the Intent every 2 seconds:
     - **Clarifying:** prints each question; a numbered menu when it has `options`, otherwise a free-text line. Then patches `spec.answers`.
-    - **AwaitingDiscoveryApproval:** prints the command (argv or script, files listed by path with their size, Providers, egress, the model's reason) and asks `Approve? [y/N/d]`. `y` approves, `d` denies after asking for a reason, and `N` or Enter leaves it pending and keeps following. Each command and plan is put to the user once; one left pending is decided later with `approve` or `deny`.
-    - **AwaitingApproval:** prints the plan summary, each step (reason, argv or script, files by path, Providers, egress) and each resource with its probes and outputs, then asks the same prompt.
+    - **AwaitingDiscoveryApproval:** prints the command (argv or script, files listed by path with their size, Providers, egress, the model's reason) and asks `Approve? [y/N/d]`, or `Approve? [y/N/d/f]` when it carries files. `y` approves, `d` denies after asking for a reason, `f` prints it again with the files' contents and asks again, and `N` or Enter leaves it pending and keeps following. Each command and plan is put to the user once; one left pending is decided later with the `approve` and `deny` commands the CLI then prints, bound to its hash with `--hash`.
+    - **AwaitingApproval:** prints the plan summary, each step (reason, argv or script, files by path and size, Providers, egress) and each resource with its probes and outputs, then asks the same prompt. The deny prompt says that denying a plan fails the Intent.
+    - **A subject that does not verify** (below) is never put to the user: the CLI prints a warning once per stated hash and keeps following.
     - **Executing and Verifying:** prints phase changes.
     - **Ready:** prints the ManagedResources and output Secret names, then exits 0.
+    - **Drifted:** prints the status line, then exits 0.
     - **Failed:** prints the reason and message, then exits 1.
   - Ctrl-C stops following; it never cancels the Intent. `--no-follow` prints the Intent's name and exits.
-  - A request with no space in it is refused as a mistyped command, so `kubectl last aprove web` never creates an Intent.
+  - A request with no space in it, or more than one argument, is refused as a mistyped command that asks to quote a request, so `kubectl last aprove web` never creates an Intent.
   - If input ends at a prompt, the CLI stops and names the commands to continue with.
   - Model-written text (summaries, reasons, commands, file paths, questions) is shown with control characters and bidirectional overrides escaped, so nothing can hide or reorder what an approver reads.
-- **`kubectl last answer NAME`** prompts for the open questions.
-- **`kubectl last plan NAME`** prints the pending command or the plan, read-only.
-- **`kubectl last approve NAME`** and **`kubectl last deny NAME --reason R`** approve or deny exactly what `plan` shows.
+- **`kubectl last answer NAME`** prompts for the open questions. If input ends, it names the command to continue with; Ctrl-C stops it without an error.
+- **`kubectl last plan NAME [--files]`** is read-only. In Clarifying it prints the open questions and the `answer` command. Otherwise it prints the pending command or the plan; when that is what the Intent asks the user to decide, it then prints `approve NAME -n NS --hash H` and `deny NAME -n NS --hash H --reason R` for exactly what it showed.
+- **`kubectl last approve NAME --hash H`** and **`kubectl last deny NAME --hash H --reason R`** approve or deny exactly what `plan` showed.
+
+**File contents on request.** Approvers see files by path and size, and their contents on request: `plan --files`, or `f` at the prompt. Each line of a file is escaped like the rest of the model's text and prefixed with `| `, as script lines are.
+
+**Verified subjects.** The operator is untrusted (main spec §3), so the CLI never relies on the hash it states. Before showing a discovery command or plan as decidable, the CLI recomputes its hash from the content it shows, as the gateway does: `plan.DiscoveryHash(command, nonce)` for a pending command and `plan.Hash(plan.FromStatus(plan))` for a plan. If that differs from the stated hash, or cannot be computed, the CLI never shows or decides the subject. `approve` and `deny` refuse with an error and record nothing; `plan` and the follow loop print a warning instead of the content. The hash the CLI prints and approves is always the one it recomputed.
 
 **How approvals are made.** `approve` and `deny` create an `IntentApproval` for **the hash they displayed**: the `pendingCommand` hash with stage Discovery, or the plan hash with stage Create.
 - `approvedBy` is the user's name from a `SelfSubjectReview`.
 - If the subject changed after it was displayed, the approval matches nothing and the CLI says so.
 - They print the hash they acted on.
-- `approve` and `deny` take `--hash H` and decide only if the Intent still asks about H, for scripts that showed the subject earlier.
+- `approve` and `deny` take `--hash H` and decide only if the Intent still asks about H. The commands `plan` and the follow loop print carry it, so a decision made later covers exactly what was shown. Without it, `approve` and `deny` show the current subject and decide on it.
 
 **Output** is plain text, with no TUI library. The prompts read lines from stdin, so the scripted e2e can drive them.
 

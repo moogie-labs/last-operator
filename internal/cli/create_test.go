@@ -50,9 +50,15 @@ func TestCreateWithoutFollowing(t *testing.T) {
 func TestCreateRefusesAOneWordRequest(t *testing.T) {
 	c := fakeClient()
 	d, _ := depsFor(c, "")
-	for _, args := range [][]string{{"aprove"}, {"aprove", webName}, {"  "}} {
-		if err := execute(d, args...); err == nil {
+	for _, args := range [][]string{{"aprove"}, {"aprove", webName}, {"run", "nginx", "now"}, {"  "}} {
+		err := execute(d, args...)
+		if err == nil {
 			t.Errorf("kubectl last %q succeeded", args)
+			continue
+		}
+		if len(strings.TrimSpace(args[0])) > 0 && (!strings.Contains(err.Error(), "unknown command "+`"`+args[0]+`"`) ||
+			!strings.Contains(err.Error(), "quote a request in your own words")) {
+			t.Errorf("kubectl last %q = %v", args, err)
 		}
 	}
 	if n := len(intents(t, c)); n != 0 {

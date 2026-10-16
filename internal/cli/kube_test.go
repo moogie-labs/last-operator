@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 const (
@@ -19,10 +20,43 @@ const (
 	testUser = "alice"
 )
 
+// h1 and h2 are the real hashes of lookCommand and webPlan.
 var (
-	h1 = "sha256:" + strings.Repeat("1", 64)
-	h2 = "sha256:" + strings.Repeat("2", 64)
+	h1 = lookCommand().Hash
+	h2 = webPlan().Hash
 )
+
+// lookCommand is a discovery command as the operator writes it, under its real hash.
+func lookCommand() *lastv1alpha1.PendingCommand {
+	c := argvCommand("kubectl", "get", "ns")
+	c.ID = plan.DiscoveryStepID
+	pc := &lastv1alpha1.PendingCommand{Nonce: "n1", Reason: seeWhatExists, Command: c}
+	pc.Hash = discoveryHash(pc)
+	return pc
+}
+
+// webPlan is a plan as the operator writes it, under its real hash.
+func webPlan() *lastv1alpha1.Plan {
+	p := &lastv1alpha1.Plan{Summary: nginxName, Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}}}
+	p.Hash = planHash(p)
+	return p
+}
+
+func planHash(p *lastv1alpha1.Plan) string {
+	h, err := plan.Hash(plan.FromStatus(p))
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
+func discoveryHash(pc *lastv1alpha1.PendingCommand) string {
+	h, _, err := plan.DiscoveryHash(pc.Command, pc.Nonce)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
 
 // fakeClient is an API server holding objs. Intent status is a subresource, as
 // in the real CRD, so a spec update never touches it.

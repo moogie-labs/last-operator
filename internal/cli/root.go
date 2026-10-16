@@ -70,7 +70,12 @@ func NewRootCommand(d Deps) *cobra.Command {
 		Short: "Work with last-operator",
 		Long: "Create an Intent from a request in your own words and follow it, answering its questions and " +
 			"approving its discovery commands and plan as they come, or run one of the commands below.",
-		Args:          cobra.MaximumNArgs(1),
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return unknownCommand(args[0])
+			}
+			return nil
+		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

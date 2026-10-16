@@ -30,11 +30,12 @@ func answered(in *lastv1alpha1.Intent) bool {
 
 // follow reads the Intent every Wait and acts on what it waits for (M3 spec
 // §5): it asks the open questions, and puts each discovery command and plan to
-// the user once. It returns at Ready, fails at Failed, and on Ctrl-C stops
-// following without touching the Intent.
+// the user once. It returns at Ready or Drifted, fails at Failed, and on Ctrl-C
+// stops following without touching the Intent.
 func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 	p := newPrompter(d.In, d.Out)
-	asked := map[string]bool{} // subjects already put to the user, decided or left pending
+	asked := map[string]bool{}  // subjects already put to the user, decided or left pending
+	warned := map[string]bool{} // stated hashes whose content did not hash to them
 	var last lastv1alpha1.Phase
 	for {
 		var in lastv1alpha1.Intent
@@ -55,12 +56,22 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 				err = answerQuestions(ctx, k, p, &in)
 			}
 		case lastv1alpha1.PhaseAwaitingDiscoveryApproval, lastv1alpha1.PhaseAwaitingApproval:
-			if stage, subject, ok := subjectOf(&in); ok && !asked[subject] {
+			stage, subject, ok, verr := verifiedSubject(&in)
+			switch {
+			case !ok:
+			case verr != nil:
+				if !warned[subject] {
+					warned[subject] = true
+					writef(d.Out, "Warning: %s\n", verr)
+				}
+			case !asked[subject]:
 				asked[subject] = true
 				err = putToUser(ctx, k, p, &in, stage, subject)
 			}
 		case lastv1alpha1.PhaseReady:
 			return printReady(ctx, k, d.Out, &in)
+		case lastv1alpha1.PhaseDrifted:
+			return nil // the status line says why; the operator probes the resources
 		case lastv1alpha1.PhaseFailed:
 			return failed(d.Out, &in)
 		}
@@ -68,8 +79,8 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 		case ctx.Err() != nil:
 			return stopped(d.Out, key)
 		case errors.Is(err, errNoInput):
-			return fmt.Errorf("%w while Intent %s/%s waited for you; see where it is with kubectl last plan %s, "+
-				"then use kubectl last answer, approve or deny", err, key.Namespace, key.Name, key.Name)
+			return fmt.Errorf("%w while Intent %s/%s waited for you; see where it is with kubectl last plan %s -n %s, "+
+				"then use kubectl last answer, approve or deny", err, key.Namespace, key.Name, key.Name, key.Namespace)
 		case err != nil:
 			return err
 		}
@@ -82,19 +93,28 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 	}
 }
 
-// putToUser shows a discovery command or plan and records the user's decision on it.
+// putToUser shows a verified discovery command or plan, with its files'
+// contents if asked, and records the user's decision on it.
 func putToUser(ctx context.Context, k *Kube, p *prompter, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) error {
+	files := hasFiles(in, stage)
 	writeln(p.w)
-	renderSubject(p.w, in, stage)
-	decision, reason, err := p.askDecision(ctx)
-	if err != nil {
-		return err
+	renderSubject(p.w, in, stage, subject, false)
+	for {
+		decision, reason, err := p.askDecision(ctx, stage, files)
+		switch {
+		case err != nil:
+			return err
+		case decision == decisionShowFiles:
+			writeln(p.w)
+			renderSubject(p.w, in, stage, subject, true)
+			continue
+		case decision == "":
+			writeln(p.w, "Left pending. Decide on it later:")
+			printDecisionCommands(p.w, in, subject)
+			return nil
+		}
+		return decide(ctx, k, p.w, in, stage, subject, decision, reason)
 	}
-	if decision == "" {
-		writef(p.w, "Left pending; decide later with kubectl last approve %s or kubectl last deny %s --reason R\n", in.Name, in.Name)
-		return nil
-	}
-	return decide(ctx, k, p.w, in, stage, subject, decision, reason)
 }
 
 // printReady lists what the Intent provisioned: its ManagedResources and their output Secrets.
@@ -111,7 +131,7 @@ func printReady(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Inte
 		}
 		writef(w, "  ManagedResource %s: %s\n", mr.Name, clean(mr.Spec.Description))
 		if mr.Spec.OutputsSecretRef != nil {
-			writef(w, "    outputs: Secret %s\n", mr.Spec.OutputsSecretRef.Name)
+			writef(w, "    outputs: Secret %s\n", clean(mr.Spec.OutputsSecretRef.Name))
 		}
 	}
 	return nil
@@ -127,7 +147,7 @@ func failed(w io.Writer, in *lastv1alpha1.Intent) error {
 }
 
 func stopped(w io.Writer, key client.ObjectKey) error {
-	writef(w, "\nStopped following Intent %s/%s; it carries on. See where it is with kubectl last plan %s.\n",
-		key.Namespace, key.Name, key.Name)
+	writef(w, "\nStopped following Intent %s/%s; it carries on. See where it is with kubectl last plan %s -n %s.\n",
+		key.Namespace, key.Name, key.Name, key.Namespace)
 	return nil
 }

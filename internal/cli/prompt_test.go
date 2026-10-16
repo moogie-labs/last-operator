@@ -55,16 +55,40 @@ func TestAskDecision(t *testing.T) {
 		"YES\n":                   {lastv1alpha1.DecisionApprove, ""},
 		"\n":                      {"", ""},
 		"n\n":                     {"", ""},
+		"f\nn\n":                  {"", ""},
 		"maybe\nd\n\ntoo broad\n": {lastv1alpha1.DecisionDeny, "too broad"},
 	} {
 		p, out := newTestPrompter(input)
-		decision, reason, err := p.askDecision(context.Background())
+		decision, reason, err := p.askDecision(context.Background(), lastv1alpha1.StageDiscovery, false)
 		if err != nil || decision != want.decision || reason != want.reason {
 			t.Errorf("input %q: askDecision = %q, %q, %v", input, decision, reason, err)
 		}
+		if strings.Contains(out.String(), "f to show") || strings.Contains(out.String(), "/f]") {
+			t.Errorf("input %q offers files for a subject without any:\n%s", input, out)
+		}
 		if input == "maybe\nd\n\ntoo broad\n" &&
-			(!strings.Contains(out.String(), "Answer y to approve") || !strings.Contains(out.String(), "A reason cannot be empty.")) {
+			(!strings.Contains(out.String(), "Approve? [y/N/d]: ") || !strings.Contains(out.String(), "Answer y to approve") ||
+				!strings.Contains(out.String(), "Reason for denying (the model reads it): ") ||
+				!strings.Contains(out.String(), "A reason cannot be empty.")) {
 			t.Errorf("re-asks:\n%s", out)
+		}
+	}
+}
+
+func TestAskDecisionOffersFilesAndSaysDenyingAPlanFailsTheIntent(t *testing.T) {
+	p, out := newTestPrompter("f\nx\nd\nno\n")
+	decision, _, err := p.askDecision(context.Background(), lastv1alpha1.StageCreate, true)
+	if err != nil || decision != decisionShowFiles {
+		t.Fatalf("askDecision = %q, %v, want to show the files", decision, err)
+	}
+	decision, reason, err := p.askDecision(context.Background(), lastv1alpha1.StageCreate, true)
+	if err != nil || decision != lastv1alpha1.DecisionDeny || reason != "no" {
+		t.Fatalf("askDecision = %q, %q, %v", decision, reason, err)
+	}
+	for _, want := range []string{"Approve? [y/N/d/f]: ", "Answer y to approve, n to leave it pending, d to deny, or f to show the files.",
+		"Reason for denying (the model reads it; denying a plan fails the Intent): "} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
 }

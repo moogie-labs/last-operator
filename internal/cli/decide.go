@@ -12,10 +12,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
-// subjectOf returns what the Intent asks its user to decide: the pending
-// discovery command in AwaitingDiscoveryApproval, the plan in AwaitingApproval.
+// subjectOf returns what the Intent asks its user to decide, with the hash
+// the operator states for it: the pending discovery command in
+// AwaitingDiscoveryApproval, the plan in AwaitingApproval. Only verifiedSubject
+// makes it something to show or decide.
 func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	switch {
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
@@ -24,6 +27,48 @@ func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 		return lastv1alpha1.StageCreate, in.Status.Plan.Hash, true
 	}
 	return "", "", false
+}
+
+// verifiedSubject returns what the Intent asks its user to decide, like
+// subjectOf, with the hash recomputed from the content the CLI shows. The
+// operator is untrusted (main spec §3): it could show one plan under the hash
+// of another and have the user approve the other. So a subject whose content
+// does not hash to its stated hash is never shown or decided: err says so,
+// and hash is then the stated one.
+func verifiedSubject(in *lastv1alpha1.Intent) (stage lastv1alpha1.Stage, hash string, ok bool, err error) {
+	stage, stated, ok := subjectOf(in)
+	if !ok {
+		return "", "", false, nil
+	}
+	hash, err = verifyHash(in, stage)
+	if err != nil {
+		return stage, stated, true, err
+	}
+	return stage, hash, true, nil
+}
+
+// verifyHash recomputes the hash of stage's subject, the pending command or
+// the plan, as the gateway does, and returns it if it is the stated one.
+func verifyHash(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) (string, error) {
+	var got, stated string
+	var err error
+	if stage == lastv1alpha1.StageDiscovery {
+		pc := in.Status.PendingCommand
+		stated = pc.Hash
+		got, _, err = plan.DiscoveryHash(pc.Command, pc.Nonce)
+	} else {
+		stated = in.Status.Plan.Hash
+		got, err = plan.Hash(plan.FromStatus(in.Status.Plan))
+	}
+	if err == nil && got == stated {
+		return got, nil
+	}
+	problem := "does not hash to its stated hash " + clean(stated)
+	if err != nil {
+		problem = "cannot be hashed (" + clean(err.Error()) + ")"
+	}
+	return "", fmt.Errorf("intent %s/%s: the %s %s; refusing to show or decide it (is kubectl-last as new as the operator?)",
+		in.Namespace, in.Name, subjectNoun(stage), problem)
 }
 
 func subjectNoun(stage lastv1alpha1.Stage) string {
@@ -62,7 +107,7 @@ func decide(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, 
 	}
 	if _, now, ok := subjectOf(&cur); ok && now != subject {
 		writef(w, "The Intent changed while you decided: it now asks about %s, so this decision matches nothing. "+
-			"See it with kubectl last plan %s.\n", now, in.Name)
+			"See it with kubectl last plan %s -n %s.\n", clean(now), in.Name, in.Namespace)
 	}
 	return nil
 }
@@ -87,14 +132,17 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 			if err != nil {
 				return err
 			}
-			stage, subject, ok := subjectOf(in)
+			stage, subject, ok, err := verifiedSubject(in)
+			if err != nil {
+				return err
+			}
 			if !ok {
 				return fmt.Errorf("intent %s/%s has nothing to decide (phase %s)", in.Namespace, in.Name, phaseOf(in))
 			}
 			if hash != "" && hash != subject {
 				return fmt.Errorf("intent %s/%s asks about %s, not %s; nothing was recorded", in.Namespace, in.Name, subject, hash)
 			}
-			renderSubject(d.Out, in, stage)
+			renderSubject(d.Out, in, stage, subject, false)
 			return decide(cmd.Context(), k, d.Out, in, stage, subject, decision, reason)
 		},
 	}
@@ -102,7 +150,7 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 	if decision == lastv1alpha1.DecisionDeny {
 		cmd.Use = "deny NAME --reason REASON"
 		cmd.Short = "Deny the plan or discovery command that kubectl last plan shows"
-		cmd.Flags().StringVar(&reason, "reason", "", "why (required; the model reads it)")
+		cmd.Flags().StringVar(&reason, "reason", "", "why (required; the model reads it, and denying a plan fails the Intent)")
 	}
 	return cmd
 }

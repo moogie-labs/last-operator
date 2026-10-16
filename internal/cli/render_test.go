@@ -66,7 +66,7 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 		Outputs:          map[string]string{"ip": "${steps.svc.json.spec.clusterIP}"},
 	}}}
 	var b strings.Builder
-	renderPlan(&b, p)
+	renderPlan(&b, p, h2, false)
 	got := b.String()
 	for _, want := range []string{
 		"Plan " + h2 + " (stage Create)\n",
@@ -104,7 +104,7 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 
 func TestRenderPendingShowsTheCommandAndItsReason(t *testing.T) {
 	var b strings.Builder
-	renderPending(&b, &lastv1alpha1.PendingCommand{Hash: h1, Reason: seeWhatExists, Command: argvCommand(wordKubectl, "get", "ns")})
+	renderPending(&b, &lastv1alpha1.PendingCommand{Hash: "sha256:stated", Reason: seeWhatExists, Command: argvCommand(wordKubectl, "get", "ns")}, h1, false)
 	want := "Discovery command " + h1 + " (stage Discovery)\nReason: see what exists\n  run:       kubectl get ns\n"
 	if b.String() != want {
 		t.Fatalf("pending command =\n%s\nwant\n%s", b.String(), want)
@@ -114,7 +114,7 @@ func TestRenderPendingShowsTheCommandAndItsReason(t *testing.T) {
 func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 	c := argvCommand(wordKubectl, "get")
 	c.ID = "id\x1b[1m"
-	c.Files = map[string]string{"/f\x1b[2K\nx": "data"}
+	c.Files = map[string]string{"/f\x1b[2K\nx": "da\x1b[8mta\u202e"}
 	c.Providers = []string{"prov\x1bp"}
 	c.Egress = []string{"1.2.3.4:1\nbad"}
 	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{}, {}}}
@@ -123,13 +123,14 @@ func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 		Probes:      []lastv1alpha1.Probe{{ID: "pr\x1bobe", Command: argvCommand(wordKubectl), Assert: "a\nb"}},
 	}}}
 	var b strings.Builder
-	renderPlan(&b, p)
+	renderPlan(&b, p, h2, true)
 	got := b.String()
 	if strings.ContainsRune(got, '\x1b') {
 		t.Errorf("an escape sequence reached the output:\n%q", got)
 	}
 	for _, want := range []string{`/f\u001b[2K\u000ax`, `prov\u001bp`, `1.2.3.4:1\u000abad`, `res\u001b[8m\u000adesc`,
-		`probe pr\u001bobe, assert a\u000ab`, `id\u001b[1m`, "image:     2 install commands\n"} {
+		`probe pr\u001bobe, assert a\u000ab`, `id\u001b[1m`, "image:     2 install commands\n",
+		"  | da\\u001b[8mta\\u202e\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan lacks %q:\n%s", want, got)
 		}

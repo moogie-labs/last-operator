@@ -28,8 +28,7 @@ func runCreate(ctx context.Context, d Deps, kf KubeFlags, cf createFlags, reques
 		return errors.New("the request is empty")
 	}
 	if !strings.ContainsFunc(request, unicode.IsSpace) {
-		return fmt.Errorf("unknown command %q; to create an Intent, quote a request in your own words, "+
-			`e.g. kubectl last "run an nginx web server"`, request)
+		return unknownCommand(request)
 	}
 	k, err := d.Kube(kf)
 	if err != nil {
@@ -49,6 +48,13 @@ func runCreate(ctx context.Context, d Deps, kf KubeFlags, cf createFlags, reques
 		return nil
 	}
 	return follow(ctx, d, k, client.ObjectKeyFromObject(in))
+}
+
+// unknownCommand refuses what looks like a mistyped command rather than a
+// request, so kubectl last aprove web never creates an Intent.
+func unknownCommand(word string) error {
+	return fmt.Errorf("unknown command %q; to create an Intent, quote a request in your own words, "+
+		`e.g. kubectl last "run an nginx web server"`, word)
 }
 
 // intentName is a DNS-safe slug of the request's first words, plus suffix.

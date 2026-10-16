@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -81,7 +82,17 @@ func newAnswerCommand(d Deps, kf *KubeFlags) *cobra.Command {
 			if in.Status.Phase != lastv1alpha1.PhaseClarifying || len(in.Status.Questions) == 0 {
 				return fmt.Errorf("intent %s/%s has no open questions (phase %s)", in.Namespace, in.Name, phaseOf(in))
 			}
-			return answerQuestions(cmd.Context(), k, newPrompter(d.In, d.Out), in)
+			err = answerQuestions(cmd.Context(), k, newPrompter(d.In, d.Out), in)
+			switch {
+			case err != nil && cmd.Context().Err() != nil:
+				writef(d.Out, "Stopped answering Intent %s/%s. See where it is with kubectl last plan %s -n %s.\n",
+					in.Namespace, in.Name, in.Name, in.Namespace)
+				return nil
+			case errors.Is(err, errNoInput):
+				return fmt.Errorf("%w while Intent %s/%s waited for your answers; answer them later with kubectl last answer %s -n %s",
+					err, in.Namespace, in.Name, in.Name, in.Namespace)
+			}
+			return err
 		},
 	}
 }
