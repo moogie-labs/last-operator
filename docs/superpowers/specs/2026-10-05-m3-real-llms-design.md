@@ -22,7 +22,7 @@ M3 makes last-operator work against a real model. It adds:
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | **Structured turns.** Every model answer is one JSON object, `{"kind": "plan" \| "questions" \| "command", …}`, enforced by a JSON Schema the operator sends through `CallLLM` and validated again by `agent.Parse`. | It is the smallest change to the M2 code and is provider-neutral, and the scripted provider keeps working. Native tool use would need provider-neutral tool-call blocks in `CallLLM`, the audit payloads, the scripted provider and every adapter. Claude Opus 5.5 also rejects forced `tool_choice`, so plain-text answers would need handling anyway. |
+| D1 | **Structured turns.** Every model answer is one JSON object, `{"kind": "plan" \| "questions" \| "command", …}`, enforced by a JSON Schema the operator sends through `CallLLM` and validated again by `agent.ParseTurn`. | It is the smallest change to the M2 code and is provider-neutral, and the scripted provider keeps working. Native tool use would need provider-neutral tool-call blocks in `CallLLM`, the audit payloads, the scripted provider and every adapter. Claude Opus 5.5 also rejects forced `tool_choice`, so plain-text answers would need handling anyway. |
 | D2 | **The agent loop stays in the operator.** | The trust boundary (main spec §3): the LLM is on the untrusted side, so prompt-injected output can only propose. Running the loop in the gateway was rejected. |
 | D3 | **A discovery command is a one-step phase.** `BeginPhase(stage Discovery)` → `RunCommand` → `EndPhase`, reusing the M2b approval, policy, audit and sandbox enforcement. | No new execution path. |
 | D4 | **Discovery stays Manual in M3.** Auto modes stay in M5 and allow rules in M6. `kubectl last` prompts for each discovery command inline. | It keeps the main spec's milestone order, and the inline prompt keeps the demo to one interactive session. |
@@ -130,7 +130,7 @@ message QueryAuditResponse {
 
 ### 4.1 Turn protocol
 
-The planner's system prompt and `agent.Parse` move from "answer with a plan" to "answer with one turn object":
+The planner's system prompt and `agent.ParseTurn` move from "answer with a plan" to "answer with one turn object":
 
 ```json
 {"kind": "plan",      "summary": "…", "steps": [ … ], "resources": [ … ]}
@@ -149,7 +149,8 @@ The planner's system prompt and `agent.Parse` move from "answer with a plan" to 
     - the free-form `identity` and `desired` are JSON objects written as strings;
     - `outputsSecretRef` is the string `outputsSecret`.
   - **Lenient parsing.** The parser accepts omitted fields and `null`, for models that do not enforce the schema.
-- **Malformed answers.** They remain correction turns, at most 3 in a row (`agent.MaxTurns` becomes the per-answer correction budget).
+- **Malformed answers.** They remain correction turns: at most 3 answers per turn (2 corrections), `agent.MaxAttempts`.
+- **Call bound.** The operator bounds each `CallLLM` at 30 minutes (`agent.CallTimeout`), sized for a streamed 64000-token answer with thinking. A call that runs out of time is transient: the turn is retried with backoff.
 
 ### 4.2 Planning session
 
@@ -164,12 +165,13 @@ A **planning session** is one conversation. It starts on a new Intent, on a `spe
 4. On `command`, picks a random 128-bit nonce, writes `status.pendingCommand` `{hash, command, reason, nonce}` with `stage: Discovery`, and moves to **AwaitingDiscoveryApproval**. Then:
    - **Approve** (matching subject, stage Discovery): the operator runs the one-step phase (§3.4). It uses the same `Executed`-condition checkpoints as M2 (never resume; abandon a lost phase). It appends the result as a user turn (exit code, stdout and stderr clipped to 16 KiB each, with truncation flagged), clears `pendingCommand`, and returns to Planning.
    - **Deny:** the operator appends "The command was denied: <reason>" and returns to Planning. The model may try something else or ask a question (main spec §5.2).
-5. **Caps.** On the 21st model turn or the 11th discovery command in one session, the Intent fails with `PlanningFailed` ("planning exceeded N turns").
+5. **Caps.** On the 21st model turn or the 11th discovery command in one session, the Intent fails with `PlanningFailed` ("planning exceeded 20 model turns" or "planning exceeded 10 discovery commands").
 
 **Between turns.**
 - **Owed turns.** Returning to Planning keeps `status.questions` or `status.pendingCommand` until the model's next turn replaces them. How a discovery command ended is recorded in the `Executed` condition: `DiscoveryRan`, `DiscoveryDenied` or `DiscoveryFailed`. A restart can then re-derive the user turn the model is owed (§4.3).
 - **Reused question ids.** A question whose `id` is already in `spec.answers` is refused with a correction, because its old answer would answer it at once.
-- **Lost discovery phases.** A Discovery phase found open after a restart is ended as failed and reported to the model as lost.
+- **Lost discovery phases.** A Discovery phase found open after a restart is ended as failed and reported to the model as "The command may have run, but its result was lost: …". So is a `RunCommand` call that fails in transit or times out, since the command may have run.
+- **Spec edits.** A spec edit while a command waits discards it and starts a new session. If the command was approved, the operator first ends its Discovery phase as failed, because an earlier attempt may have opened it without recording so, and the gateway opens no other phase for the Intent while it is open.
 - **Refusals.** A gateway refusal of an approved command is reported as "The command did not run: …".
 
 ### 4.3 Conversation memory and reload
@@ -238,9 +240,9 @@ Every command acts as the user, with their kubeconfig identity. The CLI never ta
 |---|---|
 | Model API transient error (429, 5xx, network, after the SDK's retries) | `Unavailable`. The operator retries with backoff, and the Intent stays in Planning. |
 | Bad key, unknown model, refusal | `FailedPrecondition`. The Intent fails with `PlanningFailed` and the adapter's message (never the key). |
-| Malformed turn | A correction turn, at most 3 in a row. |
+| Malformed turn | A correction turn: at most 3 answers per turn (2 corrections). |
 | Discovery command exits non-zero | The phase ends `succeeded=false`. The result is fed to the model, and the Intent stays in Planning. |
-| Discovery phase refused (policy, approval withdrawn) | The phase ends failed. The refusal is fed to the model as a denial. |
+| Discovery phase refused (policy, approval withdrawn) | No phase is opened. The refusal is reported to the model as "The command did not run: …". |
 | Turn or command cap reached | The Intent fails with `PlanningFailed`. |
 | `QueryAudit` reload incomplete | A new session starts, noted in the transcript. |
 

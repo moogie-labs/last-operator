@@ -518,7 +518,7 @@ Pending → Clarifying ⇄ (user answers)
   - **Turns.** Every model answer is one JSON turn: a plan, questions,
     or a discovery command. It is checked against a JSON Schema sent
     with `CallLLM`, and again by the operator. A malformed answer gets a
-    correction, at most 3 in a row.
+    correction: at most 3 answers per turn (2 corrections).
   - **Discovery commands** inspect the world. Each one is a
     single-command approval subject: stage `Discovery`, subject
     `sha256(canonical {command, nonce})`, so each approval is
