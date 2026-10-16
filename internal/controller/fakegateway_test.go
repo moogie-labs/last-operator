@@ -76,13 +76,15 @@ type fakeGateway struct {
 	outputs  map[types.NamespacedName]map[string]map[string]string // ManagedResource → values sent
 	open     map[types.NamespacedName]string                       // subject of the open phase
 	executed map[types.NamespacedName]string                       // hash of the last executed plan
+	seq      uint64                                                // the last audit sequence number, across Intents
+	audit    map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
 }
 
 func newFakeGateway(c client.Client) *fakeGateway {
 	return &fakeGateway{c: c, scripts: map[types.NamespacedName]*script{}, log: map[types.NamespacedName][]string{},
 		llmReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{}, argv: map[types.NamespacedName]map[string][]string{},
 		outputs: map[types.NamespacedName]map[string]map[string]string{}, open: map[types.NamespacedName]string{},
-		executed: map[types.NamespacedName]string{}}
+		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
 }
 
 func keyOf(ref *gatewayv1.IntentRef) types.NamespacedName {
@@ -114,21 +116,64 @@ func (f *fakeGateway) record(key types.NamespacedName, call string) {
 	f.log[key] = append(f.log[key], call)
 }
 
+// fakeMessage is a message as the gateway's llm.request payload holds it.
+type fakeMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 func (f *fakeGateway) CallLLM(_ context.Context, in *gatewayv1.CallLLMRequest, _ ...grpc.CallOption) (*gatewayv1.CallLLMResponse, error) {
 	key := keyOf(in.GetIntent())
+	msgs := make([]fakeMessage, 0, len(in.GetMessages()))
+	for _, m := range in.GetMessages() {
+		msgs = append(msgs, fakeMessage{Role: m.GetRole(), Content: m.GetContent()})
+	}
 	f.mu.Lock()
 	f.record(key, callLLM)
 	f.llmReqs[key] = append(f.llmReqs[key], in)
+	seq := f.appendAudit(key, "llm.request", "", "", map[string]any{"messages": msgs})
 	llm := f.scriptFor(key).llm
 	f.mu.Unlock()
-	if llm == nil {
-		return nil, status.Error(codes.FailedPrecondition, "llm: no script for this intent")
+	content, err := "", status.Error(codes.FailedPrecondition, "llm: no script for this intent")
+	if llm != nil {
+		content, err = llm(in)
 	}
-	content, err := llm(in)
+	payload := map[string]any{"requestSeq": seq, "content": content}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	f.mu.Lock()
+	f.appendAudit(key, "llm.response", "", "", payload)
+	f.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return &gatewayv1.CallLLMResponse{Content: content}, nil
+	return &gatewayv1.CallLLMResponse{Content: content, RequestSeq: seq}, nil
+}
+
+// appendAudit adds an entry to the Intent's audit index, as the gateway would,
+// and returns its sequence number. f.mu must be held.
+func (f *fakeGateway) appendAudit(key types.NamespacedName, typ, stage, subject string, payload any) uint64 {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	f.seq++
+	f.audit[key] = append(f.audit[key], &gatewayv1.AuditEntry{Seq: f.seq, Type: typ, Stage: stage, SubjectHash: subject, Payload: b})
+	return f.seq
+}
+
+// auditOf returns the Intent's audit entries of one type, oldest first.
+func (f *fakeGateway) auditOf(key types.NamespacedName, typ string) []*gatewayv1.AuditEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*gatewayv1.AuditEntry
+	for _, e := range f.audit[key] {
+		if e.GetType() == typ {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // approved reports whether an IntentApproval approves subject for the Intent's

@@ -19,7 +19,7 @@ var _ = Describe("Intent verification", func() {
 	probe := func(id string) lastv1alpha1.Probe {
 		return lastv1alpha1.Probe{ID: id, Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}, Assert: trueCmd}
 	}
-	resource := lastv1alpha1.ManagedResourceSpec{Description: "web", Probes: []lastv1alpha1.Probe{probe("p1"), probe("p2")}}
+	resource := lastv1alpha1.ManagedResourceSpec{Description: intentName, Probes: []lastv1alpha1.Probe{probe("p1"), probe("p2")}}
 	steps := []lastv1alpha1.Command{argvStep("s1", trueCmd)}
 
 	BeforeEach(func() {

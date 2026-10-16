@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -32,6 +33,9 @@ type IntentReconciler struct {
 	Reader client.Reader
 	// RetryDelay is the pause between retries of a gateway call within one reconcile.
 	RetryDelay time.Duration
+
+	// sessions holds planning conversations in memory (M3 spec §4.3).
+	sessions sessionStore
 }
 
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents,verbs=get;list;watch
@@ -49,6 +53,9 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// phase change over a newer status.
 	var in lastv1alpha1.Intent
 	if err := r.Reader.Get(ctx, req.NamespacedName, &in); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.sessions.drop(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !in.DeletionTimestamp.IsZero() {
@@ -59,6 +66,8 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.startPlanning(ctx, &in, "")
 	case lastv1alpha1.PhasePlanning:
 		return r.plan(ctx, &in)
+	case lastv1alpha1.PhaseClarifying:
+		return r.clarify(ctx, &in)
 	case lastv1alpha1.PhaseAwaitingApproval:
 		return r.awaitApproval(ctx, &in)
 	case lastv1alpha1.PhaseExecuting:

@@ -29,17 +29,19 @@ const (
 
 // Ready reasons.
 const (
-	ReasonPlanning           = "Planning"
-	ReasonAwaitingApproval   = "AwaitingApproval"
-	ReasonExecuting          = "Executing"
-	ReasonVerifying          = "Verifying"
-	ReasonReady              = "Ready"
-	ReasonDrifted            = "Drifted"
-	ReasonPlanningFailed     = "PlanningFailed"
-	ReasonApprovalDenied     = "ApprovalDenied"
-	ReasonExecutionFailed    = "ExecutionFailed"
-	ReasonInterrupted        = "ExecutionInterrupted"
-	ReasonVerificationFailed = "VerificationFailed"
+	ReasonPlanning                  = "Planning"
+	ReasonClarifying                = "Clarifying"
+	ReasonAwaitingDiscoveryApproval = "AwaitingDiscoveryApproval"
+	ReasonAwaitingApproval          = "AwaitingApproval"
+	ReasonExecuting                 = "Executing"
+	ReasonVerifying                 = "Verifying"
+	ReasonReady                     = "Ready"
+	ReasonDrifted                   = "Drifted"
+	ReasonPlanningFailed            = "PlanningFailed"
+	ReasonApprovalDenied            = "ApprovalDenied"
+	ReasonExecutionFailed           = "ExecutionFailed"
+	ReasonInterrupted               = "ExecutionInterrupted"
+	ReasonVerificationFailed        = "VerificationFailed"
 )
 
 // Planned reasons.
@@ -127,8 +129,10 @@ func (r *IntentReconciler) update(ctx context.Context, in *lastv1alpha1.Intent, 
 	return nil
 }
 
-// fail moves the Intent to Failed; a spec edit retries it (spec §7).
+// fail moves the Intent to Failed; a spec edit retries it (spec §7). A failure
+// ends the planning session.
 func (r *IntentReconciler) fail(ctx context.Context, in *lastv1alpha1.Intent, reason, msg string) error {
 	logf.FromContext(ctx).Info("Intent failed", "reason", reason, "message", clip(msg))
+	r.sessions.drop(client.ObjectKeyFromObject(in))
 	return r.update(ctx, in, func(in *lastv1alpha1.Intent) { setPhase(in, lastv1alpha1.PhaseFailed, reason, msg) })
 }

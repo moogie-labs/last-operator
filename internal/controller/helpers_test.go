@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"strings"
 
 	. "github.com/onsi/gomega"
@@ -13,11 +12,19 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 const intentName = "web"
+
+// Strings the specs repeat; goconst counts them package-wide.
+const (
+	roleUser       = "user"
+	namespacesArg  = "namespaces"
+	whichNamespace = "Which namespace?"
+)
 
 func newNamespace() string {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "t-"}}
@@ -78,9 +85,55 @@ func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject 
 
 // answer is a model answer holding a plan.
 func answer(steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResourceSpec) string {
-	b, err := json.Marshal(map[string]any{"summary": "test plan", "steps": steps, "resources": resources})
+	return encodeTurn(agent.Turn{Kind: agent.KindPlan,
+		Plan: &lastv1alpha1.Plan{Summary: "test plan", Steps: steps, Resources: resources}})
+}
+
+// questionsTurn is a model answer asking questions.
+func questionsTurn(qs ...lastv1alpha1.Question) string {
+	return encodeTurn(agent.Turn{Kind: agent.KindQuestions, Questions: qs})
+}
+
+// commandTurn is a model answer asking to run a discovery command.
+func commandTurn(reason string, c lastv1alpha1.Command) string {
+	return encodeTurn(agent.Turn{Kind: agent.KindCommand, Command: &c, Reason: reason})
+}
+
+func encodeTurn(t agent.Turn) string {
+	s, err := agent.Encode(t)
 	Expect(err).NotTo(HaveOccurred())
-	return string(b)
+	return s
+}
+
+// answerQuestions sets spec.answers, as the requester does.
+func answerQuestions(key types.NamespacedName, answers ...lastv1alpha1.Answer) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var in lastv1alpha1.Intent
+		if err := k8sClient.Get(ctx, key, &in); err != nil {
+			return err
+		}
+		in.Spec.Answers = answers
+		return k8sClient.Update(ctx, &in)
+	})).To(Succeed())
+}
+
+// roles lists a conversation's message roles.
+func roles(msgs []*gatewayv1.Message) []string {
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, m.GetRole())
+	}
+	return out
+}
+
+// lastUserMessage returns the last message of the Intent's last CallLLM, which
+// is always the user's.
+func lastUserMessage(key types.NamespacedName) string {
+	msgs := gw.lastRequest(key).GetMessages()
+	Expect(msgs).NotTo(BeEmpty())
+	last := msgs[len(msgs)-1]
+	Expect(last.GetRole()).To(Equal(roleUser))
+	return last.GetContent()
 }
 
 func argvStep(id string, argv ...string) lastv1alpha1.Command {
@@ -97,7 +150,7 @@ func hashOf(steps []lastv1alpha1.Command, resources ...lastv1alpha1.ManagedResou
 // requestText returns the first user message of a conversation: the request prompt.
 func requestText(req *gatewayv1.CallLLMRequest) string {
 	for _, m := range req.GetMessages() {
-		if m.GetRole() == "user" {
+		if m.GetRole() == roleUser {
 			return m.GetContent()
 		}
 	}

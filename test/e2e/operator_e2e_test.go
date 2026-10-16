@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gateway/llm"
 	"github.com/moogie-labs/last-operator/internal/plan"
@@ -224,11 +225,12 @@ spec:
 		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
 		Outputs:          map[string]string{"clusterIP": "${steps.svc.json.spec.clusterIP}"},
 	}}
-	answer, err := json.Marshal(map[string]any{"summary": "nginx Deployment and Service web in " + ns, "steps": steps, "resources": resources})
+	answer, err := agent.Encode(agent.Turn{Kind: agent.KindPlan, Plan: &lastv1alpha1.Plan{
+		Summary: "nginx Deployment and Service web in " + ns, Steps: steps, Resources: resources}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, err := json.Marshal([]string{string(answer)})
+	script, err := json.Marshal([]string{answer})
 	if err != nil {
 		t.Fatal(err)
 	}

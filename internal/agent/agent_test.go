@@ -37,65 +37,6 @@ func (f *fakeLLM) CallLLM(_ context.Context, in *gatewayv1.CallLLMRequest, _ ...
 	return &gatewayv1.CallLLMResponse{Content: f.answers[n], RequestSeq: seq}, nil
 }
 
-var req = Request{Namespace: teamNamespace, Name: webName, Text: nginxRequest,
-	Answers: []lastv1alpha1.Answer{{ID: "q1", Value: "internal only"}}}
-
-func TestPlannerRetriesUntilTheAnswerIsAPlan(t *testing.T) {
-	llm := &fakeLLM{answers: []string{nginxReply, validAnswer}}
-	p, err := (&Planner{LLM: llm}).Plan(context.Background(), req)
-	if err != nil || p.Hash == "" {
-		t.Fatalf("Plan = %+v, %v", p, err)
-	}
-	if len(llm.reqs) != 2 {
-		t.Fatalf("CallLLM called %d times, want 2", len(llm.reqs))
-	}
-	first, second := llm.reqs[0], llm.reqs[1]
-	if first.GetIntent().GetNamespace() != teamNamespace || first.GetIntent().GetName() != webName || first.GetMaxTokens() <= 0 {
-		t.Fatalf("request = %+v", first)
-	}
-	roles := make([]string, 0, len(second.GetMessages()))
-	for _, m := range second.GetMessages() {
-		roles = append(roles, m.GetRole())
-	}
-	if strings.Join(roles, ",") != "system,user,assistant,user" {
-		t.Fatalf("second conversation roles = %v", roles)
-	}
-	if second.GetMessages()[2].GetContent() != nginxReply ||
-		!strings.Contains(second.GetMessages()[3].GetContent(), "not a valid plan") {
-		t.Fatalf("correction turn = %+v", second.GetMessages()[2:])
-	}
-}
-
-func TestPlannerGivesUpAfterMaxTurns(t *testing.T) {
-	llm := &fakeLLM{answers: []string{"no"}}
-	_, err := (&Planner{LLM: llm}).Plan(context.Background(), req)
-	if !errors.Is(err, ErrNoPlan) || len(llm.reqs) != MaxTurns {
-		t.Fatalf("Plan = %v after %d calls, want ErrNoPlan after %d", err, len(llm.reqs), MaxTurns)
-	}
-}
-
-func TestPlannerReturnsGatewayErrorsUnchanged(t *testing.T) {
-	llm := &fakeLLM{err: status.Error(codes.Unavailable, "audit down")}
-	_, err := (&Planner{LLM: llm}).Plan(context.Background(), req)
-	if status.Code(err) != codes.Unavailable || len(llm.reqs) != 1 {
-		t.Fatalf("Plan = %v after %d calls", err, len(llm.reqs))
-	}
-}
-
-func TestUserPromptCarriesTheRequestAnswersAndFeedback(t *testing.T) {
-	r := req
-	r.Feedback = boomFeedback
-	got := userPrompt(r)
-	for _, want := range []string{"team-x/web", nginxRequest, "q1: internal only", boomFeedback} {
-		if !strings.Contains(got, want) {
-			t.Errorf("user prompt lacks %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(userPrompt(req), "previous plan failed") {
-		t.Error("the prompt mentions a failure that did not happen")
-	}
-}
-
 const (
 	questionsAnswer = `{"kind":"questions","questions":[{"id":"q1","text":"Which namespace?"}]}`
 	commandAnswer   = `{"kind":"command","reason":"look","command":{"argv":["kubectl","get","ns"]}}`

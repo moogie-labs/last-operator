@@ -16,25 +16,7 @@ import (
 // bounds (512 KiB per plan, about 900 KiB per record) and the Intent object size.
 const MaxPlanBytes = 256 << 10
 
-// answer is the JSON object the model must answer with (see SystemPrompt).
-type answer struct {
-	Summary   string                             `json:"summary"`
-	Steps     []lastv1alpha1.Command             `json:"steps"`
-	Resources []lastv1alpha1.ManagedResourceSpec `json:"resources,omitempty"`
-}
-
 var fence = regexp.MustCompile("(?s)^\\s*```(?:json)?[ \\t]*\\n(.*?)\\n?```\\s*$")
-
-// Parse reads a model answer: one JSON object, optionally inside a ```json
-// fence. It checks everything the gateway and the CRD schema would refuse, so a
-// bad answer becomes a correction turn rather than a rejected status write.
-func Parse(content string) (*lastv1alpha1.Plan, error) {
-	var a answer
-	if err := decodeOne(content, &a, "plan"); err != nil {
-		return nil, err
-	}
-	return checkPlan(a.Summary, a.Steps, a.Resources)
-}
 
 // decodeOne reads content as exactly one JSON object, optionally inside a
 // ```json fence, refusing unknown fields. what names the object in errors.
