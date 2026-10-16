@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -104,6 +105,18 @@ func runLast(e env, args ...string) (string, error) {
 	for k, v := range e {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runLastInput runs kubectl last as the current kubeconfig user, typing input
+// at its prompts, and returns its combined output.
+func runLastInput(t *testing.T, timeout time.Duration, input string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, kubectlLast, args...)
+	cmd.Stdin = strings.NewReader(input)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
