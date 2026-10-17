@@ -119,12 +119,29 @@ spec:
                 description: ImagesConfig configures automatic image builds.
                 properties:
                   buildEgress:
+                    description: BuildEgress lists the IP and CIDR entries a build
+                      pod may reach. Hostnames are refused.
                     items:
                       type: string
                     type: array
+                  buildTimeout:
+                    description: BuildTimeout bounds one build. Defaults to 15m; at
+                      most 30m.
+                    type: string
+                  maxConcurrentBuilds:
+                    default: 2
+                    description: MaxConcurrentBuilds caps builds running at once.
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
                   unusedRetention:
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: buildTimeout must be at most 30m
+                  rule: '!has(self.buildTimeout) || duration(self.buildTimeout) <=
+                    duration(''30m'')'
               llmProviderRef:
                 description: LocalRef names an object in the same namespace (or a
                   cluster-scoped object).

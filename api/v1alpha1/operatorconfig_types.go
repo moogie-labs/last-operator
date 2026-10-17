@@ -44,11 +44,22 @@ type RegistryConfig struct {
 }
 
 // ImagesConfig configures automatic image builds.
+// +kubebuilder:validation:XValidation:rule="!has(self.buildTimeout) || duration(self.buildTimeout) <= duration('30m')",message="buildTimeout must be at most 30m"
 type ImagesConfig struct {
+	// BuildEgress lists the IP and CIDR entries a build pod may reach. Hostnames are refused.
 	// +optional
 	BuildEgress []string `json:"buildEgress,omitempty"`
 	// +optional
 	UnusedRetention *metav1.Duration `json:"unusedRetention,omitempty"`
+	// BuildTimeout bounds one build. Defaults to 15m; at most 30m.
+	// +optional
+	BuildTimeout *metav1.Duration `json:"buildTimeout,omitempty"`
+	// MaxConcurrentBuilds caps builds running at once.
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	// +optional
+	MaxConcurrentBuilds int32 `json:"maxConcurrentBuilds,omitempty"`
 }
 
 // ProbeLimits bounds probe intervals cluster-wide.

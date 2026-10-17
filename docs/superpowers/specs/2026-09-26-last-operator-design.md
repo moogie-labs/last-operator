@@ -416,7 +416,9 @@ spec:
       pushSecretRef: { name: registry-push }     # in last-gateway
       pullSecretRef: { name: registry-pull }     # copied into last-sandbox for pods
   images:
-    buildEgress: ["pypi.org:443", "files.pythonhosted.org:443", "registry.npmjs.org:443", "github.com:443", "objects.githubusercontent.com:443"]
+    buildEgress: []             # IP and CIDR entries only (no hostnames); empty by default
+    buildTimeout: 15m           # per build; at most 30m
+    maxConcurrentBuilds: 2      # 1 to 8
     unusedRetention: 30d        # delete images not referenced by any live plan for this long
   probes:
     minInterval: 1m             # floor; no layer may go below it
@@ -491,6 +493,9 @@ phase. The operator resolves it too, but only for display in status.
 | Sandbox concurrency | 20 pods cluster-wide |
 | Registry | Bundled (Distribution v3 + nginx front proxy + node-local pull proxy) |
 | Unused image retention | 30 days |
+| Build egress | None beyond the registry and DNS; `images.buildEgress` takes IP and CIDR entries only, and is empty by default |
+| Build timeout | 15 minutes, at most 30 minutes |
+| Concurrent builds | 2 (1 to 8) |
 
 ## 7. Intent lifecycle
 
