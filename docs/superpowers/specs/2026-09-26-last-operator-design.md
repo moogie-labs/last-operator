@@ -1026,7 +1026,8 @@ is deleted.
 - **Pull proxy allowlist.** The pull proxy forwards only `GET` and
   `HEAD` (nginx `limit_except GET` allows both), and only on `/v2/`,
   on manifests and blobs of `last/images` and `last/base` addressed by
-  `sha256` digest, and on a local `/healthz`. Everything else gets 403:
+  `sha256` digest (`^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z`),
+  and on a local `/healthz`. Everything else gets 403:
   tag lists, `_catalog`, other repositories, tags and write methods.
 - **IPv4 only.** The hostPort listens on IPv4 only, so `[::1]:5000`
   does not connect. Image references use `localhost`, which containerd

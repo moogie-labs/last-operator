@@ -295,6 +295,10 @@ helm-crds: manifests ## Copy generated CRDs into the Helm chart.
 	rm -f charts/last-operator/crds/*.yaml
 	cp config/crd/bases/*.yaml charts/last-operator/crds/
 
+.PHONY: nginx-check
+nginx-check: ## Run nginx -t (in Docker) on the front proxy and pull proxy configs the chart renders.
+	hack/nginx-check.sh
+
 .PHONY: helm-lint
 helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external modes.
 	helm lint --strict charts/last-operator
@@ -352,8 +356,8 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	@# The node-local pull proxy and the build namespace.
 	helm template last charts/last-operator -n last-system | grep -q 'hostPort: 5000'
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-build-default-deny'
-	helm template last charts/last-operator -n last-system | grep -qF '^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}$$'
-	helm template last charts/last-operator -n last-system | grep -q 'return 403'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ConfigMap\n/ && doc ~ /\nmetadata:\n  name: last-registry-pull-proxy\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -qF 'location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ConfigMap\n/ && doc ~ /\nmetadata:\n  name: last-registry-pull-proxy\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'location / { return 403; }'
 	helm template last charts/last-operator -n last-system | awk '/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -q 'resources: \[configmaps\]'
 	helm template last charts/last-operator -n last-system | awk '/kind: Role$$/{r=1} r&&/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[configmaps\]' | grep -q 'verbs: \[create, list, delete\]'
 	@# Without the bundled registry there is no pull proxy, but the build namespace and the gateway's Role remain.

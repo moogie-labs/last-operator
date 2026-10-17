@@ -228,8 +228,9 @@ data:
         proxy_pass http://last-registry-front.{{ $reg }}.svc:5000;
         proxy_set_header Host $http_host;
       }
+      # Quoted, because nginx ends a token at a brace. \z, not $, which also matches before a trailing newline.
       # No URI part on proxy_pass, so the original URI passes through.
-      location ~ ^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}$ {
+      location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {
         limit_except GET { deny all; }
         proxy_pass http://last-registry-front.{{ $reg }}.svc:5000;
         proxy_set_header Host $http_host;
