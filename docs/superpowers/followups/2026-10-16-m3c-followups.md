@@ -5,12 +5,7 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 ## Before M3 is done
 
 - **Run the kind e2e.** Done on 2026-10-16 at 48cd4cf: `KIND_CLUSTER=last-e2e-m2a hack/e2e.sh` passed every test, with `ok test/e2e 376s`. `TestOperatorWebServer` passed in 124s. It drove `kubectl last` through a question, a discovery command and the plan to Ready, and verified the audit chain.
-- **Run the demo.** `ANTHROPIC_API_KEY=… make demo 2>&1 | tee demo.log` runs the M3 done-criterion against Claude. It also confirms three things nothing else has checked:
-  - that Anthropic structured outputs accept the turn schema (M3b follow-ups);
-  - that fallback text is joined correctly (M3a follow-ups);
-  - that 64000 `max_tokens` and the 30-minute per-call bound hold up.
-
-  Record the transcript here.
+- **Run the demo.** Done on 2026-10-17 at 72ad33b: M3's done-criterion passed against `claude-opus-5-5`. See "Demo result (2026-10-17)" below.
 
 ## Demo result (2026-10-16): blocked by the turn schema, then fixed
 
@@ -26,7 +21,60 @@ On 2026-10-17, `hack/schemaprobe` tested five variants against the real API:
 | `$defs`, without the union | 2041 bytes | accepted |
 | Without resources | 1722 bytes | accepted |
 
-The cause was writing the command object out in full four times, not the union. `agent.Schema()` now defines the command, probe and resource objects once in `$defs` and references them. It is byte-for-byte the accepted variant. `TestSchemaDefinesEachSharedObjectOnce` pins this, and `go run ./hack/schemaprobe` checks the schema against the real API. Next: rerun `make demo`.
+The cause was writing the command object out in full four times, not the union. `agent.Schema()` now defines the command, probe and resource objects once in `$defs` and references them. It is byte-for-byte the accepted variant. `TestSchemaDefinesEachSharedObjectOnce` pins this, and `go run ./hack/schemaprobe` checks the schema against the real API. The rerun passed (below).
+
+## Demo result (2026-10-17): passed
+
+`ANTHROPIC_API_KEY=… make demo` on the reused `last-demo` cluster, at 72ad33b, with `claude-opus-5-5` at effort high. The CLI part of the transcript, with the plan's resources shortened:
+
+```
+Creating an Intent in namespace demo from: run an nginx web server serving a hello page
+Created Intent demo/run-an-nginx-web-server-wrqq
+Intent demo/run-an-nginx-web-server-wrqq: Pending
+Intent demo/run-an-nginx-web-server-wrqq: Planning (Asking the LLM for a plan)
+Intent demo/run-an-nginx-web-server-wrqq: AwaitingApproval (Waiting for an IntentApproval of plan sha256:4f0ed9ba… for stage Create)
+
+Plan sha256:4f0ed9ba… (stage Create)
+Summary: Deploy nginx (nginx:1.27-alpine) in namespace demo serving a hello page from a ConfigMap, exposed by ClusterIP Service hello-nginx on port 80
+Steps:
+  1. s1: Create the hello page ConfigMap, the nginx Deployment serving it, and a ClusterIP Service
+     run:       kubectl apply -n demo -f /work/hello-nginx.yaml
+     file:      /work/hello-nginx.yaml (1277 bytes)
+     providers: demo-kubernetes
+     timeout:   2m0s
+  2. s2: Wait until the nginx Deployment is rolled out and ready
+     run:       kubectl rollout status deployment/hello-nginx -n demo --timeout=180s
+     providers: demo-kubernetes
+     timeout:   4m0s
+Resources:
+  - ConfigMap demo/hello-nginx-html holding the hello page            (probe: kubectl get configmap …)
+  - nginx Deployment demo/hello-nginx                                  (probe: readyReplicas >= 1)
+  - ClusterIP Service demo/hello-nginx on port 80                      (probe: endpoints have addresses)
+Approve? [y/N/d/f]: Approved plan sha256:4f0ed9ba… as kubernetes-admin (IntentApproval run-an-nginx-web-server-wrqq-create-65ckd)
+Intent demo/run-an-nginx-web-server-wrqq: Executing (Running plan sha256:4f0ed9ba…)
+Intent demo/run-an-nginx-web-server-wrqq: Verifying (Running every probe once)
+Intent demo/run-an-nginx-web-server-wrqq: Ready (Every probe passed)
+Intent demo/run-an-nginx-web-server-wrqq is Ready.
+  ManagedResource run-an-nginx-web-server-wrqq-0: ConfigMap demo/hello-nginx-html holding the hello page
+  ManagedResource run-an-nginx-web-server-wrqq-1: nginx Deployment demo/hello-nginx
+  ManagedResource run-an-nginx-web-server-wrqq-2: ClusterIP Service demo/hello-nginx on port 80
+
+Verifying the audit chain
+OK: verified 24 entries (seq 0..23), head sha256:884e8be0…
+```
+
+What the audit chain shows, and the three open checks:
+
+- **The model planned in one turn.** It asked no questions and ran no discovery command, so the real model did not exercise Clarifying or Discovery; the kind e2e covers both with the scripted model. Entries 6 and 7 are the only `llm.request` and `llm.response`, with no correction turn: the first answer parsed and passed the plan checks.
+- **The turn schema.** Anthropic accepted the `$defs` schema.
+- **`max_tokens` 64000.** Accepted; the request records `maxTokens: 64000`.
+- **The 30-minute call bound.** Not approached: the call took 19.8 seconds. It is still untested against a long turn.
+- **Fallback text joining.** Not exercised: no fallback happens unless the requested model declines, and a benign request won't make it. `TestAnthropicJoinsTheTextOnEitherSideOfAFallback` now pins the join instead.
+- **Execution and probes.** Two steps ran with one short-lived credential and egress grant each, both revoked on completion; all three probes passed.
+
+`planningSessionSeq` reads 6 because it is the audit sequence number of the session's first `llm.request`, not a count of sessions. The approval came about six hours after the plan; the operator waited in AwaitingApproval without re-planning.
+
+The script printed `Terminated: 15` when its EXIT trap killed the port-forward. The trap now reaps it with `wait`.
 
 ## Approver display
 
