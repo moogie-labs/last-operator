@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,7 +89,10 @@ func (x *imageIndex) loadLocked(ctx context.Context) error {
 	entries := map[string]imageEntry{}
 	if raw := cm.Data[imageIndexKey]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-			return fmt.Errorf("gateway: image index %s is corrupt: %w", cm.Name, err)
+			// The index is only a cache: treat it as lost, keep the ConfigMap for its
+			// resourceVersion, and let the next save overwrite it.
+			slog.Error("Image index ConfigMap is corrupt; treating it as empty", "name", cm.Name, "err", err)
+			entries = map[string]imageEntry{}
 		}
 	}
 	x.cm, x.entries, x.flushed = cm, entries, make(map[string]time.Time, len(entries))
@@ -96,6 +100,18 @@ func (x *imageIndex) loadLocked(ctx context.Context) error {
 		x.flushed[k] = e.LastUsed
 	}
 	return nil
+}
+
+func (x *imageIndex) isVerified(key string) bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.verified[key]
+}
+
+func (x *imageIndex) markVerified(key string) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.verified[key] = true
 }
 
 func (x *imageIndex) get(specHash string) (imageEntry, bool) {
@@ -219,10 +235,7 @@ func (x *imageIndex) saveLocked(ctx context.Context) error {
 // drops the entry and rebuilds. A pass is cached for the life of the process.
 func (g *Gateway) verifyBuild(ctx context.Context, specHash string, e imageEntry) error {
 	key := specHash + "|" + e.Digest + "|" + strconv.FormatUint(e.BuildSeq, 10)
-	g.images.mu.Lock()
-	ok := g.images.verified[key]
-	g.images.mu.Unlock()
-	if ok {
+	if g.images.isVerified(key) {
 		return nil
 	}
 	if e.Digest == "" {
@@ -252,8 +265,6 @@ func (g *Gateway) verifyBuild(ctx context.Context, specHash string, e imageEntry
 	if r.Outcome != buildSucceeded || r.SpecHash != specHash || r.Digest != e.Digest {
 		return fmt.Errorf("audit entry %d does not record a successful build of %s as %s", e.BuildSeq, specHash, e.Digest)
 	}
-	g.images.mu.Lock()
-	g.images.verified[key] = true
-	g.images.mu.Unlock()
+	g.images.markVerified(key)
 	return nil
 }

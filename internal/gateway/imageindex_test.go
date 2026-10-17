@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
@@ -119,6 +121,31 @@ func TestImageIndexFlushesLastUsedAtMostHourly(t *testing.T) {
 	}
 	if got, _ := fresh.get(testSpecHash); !got.LastUsed.Equal(t0.Add(125 * time.Minute)) {
 		t.Fatalf("persisted lastUsed = %v", got.LastUsed)
+	}
+}
+
+func TestImageIndexTreatsACorruptConfigMapAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	kube := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: imageIndexName, Namespace: ns},
+		Data:       map[string]string{imageIndexKey: "not json"},
+	})
+	x := newImageIndex(kube, ns)
+	if err := x.load(ctx); err != nil {
+		t.Fatalf("load of a corrupt index: %v", err)
+	}
+	if _, ok := x.get(testSpecHash); ok {
+		t.Fatal("a corrupt index returned an entry")
+	}
+	if err := x.put(ctx, testSpecHash, imageEntry{Digest: testDigest, BuildSeq: 1}); err != nil {
+		t.Fatalf("put over a corrupt index: %v", err)
+	}
+	fresh := newImageIndex(kube, ns)
+	if err := fresh.load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fresh.get(testSpecHash); !ok || got.Digest != testDigest {
+		t.Fatalf("get = %v, %v", got, ok)
 	}
 }
 
