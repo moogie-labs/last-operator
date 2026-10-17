@@ -137,7 +137,7 @@ Cluster admins are trusted (see §17.2 for what that implies).
 |---|---|---|---|
 | `last-system` | Operator; cluster-scoped rule suggestions | none beyond its CRs | none |
 | `last-gateway` | Gateway, credential Secrets, signing key, Kubernetes provider ServiceAccounts | **none** | full within ns (incl. `serviceaccounts/token`) |
-| `last-sandbox` | Sandbox and build pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
+| `last-sandbox` | Sandbox pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
 | `last-build` | Build pods, privileged PSA, written only by the gateway | **none** | create/delete Pods, NetworkPolicies, Secrets, ConfigMaps |
 | `last-audit` | Bundled RustFS + root credentials | **none** | **none** (S3 API only) |
 | `last-registry` | Bundled Distribution registry + GC sidecar, nginx front proxy, node-local pull proxy DaemonSet, registry credentials | **none** | **none** (registry API only) |
@@ -1342,11 +1342,14 @@ The CRs emit standard Kubernetes Events for phase transitions.
   a malicious admin would require external anchoring, which is out of
   scope.
 - **Preloaded images are trusted only until pulled under another name.**
-  Kubelet (1.35+, `KubeletEnsureSecretPulledImages`) trusts a preloaded
-  image only until it pulls the same image ID under another name, after
-  which it re-verifies access for the preloaded name. Installs must
-  reference the base image by one name (the pinned digest), as the e2e
-  now does.
+  Observed with kubelet v1.37.0 (kind v0.33.0),
+  `KubeletEnsureSecretPulledImages` with the default
+  `imagePullCredentialsVerificationPolicy: NeverVerifyPreloadedImages`:
+  kubelet trusts a preloaded image only until it pulls the same image ID
+  under another name, after which it re-verifies access for the preloaded
+  name. This bites only when a preloaded image's name isn't pullable by the
+  node (kind-loaded or air-gapped preloads), so such installs must reference
+  the base image by one name (the pinned digest), as the e2e now does.
 - **Operator-wide credentials.** Every namespace allowed to use a
   Provider shares its full permissions.
 - **Auto-mode discovery runs before any plan exists.** With

@@ -148,7 +148,11 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	// would be pulled from ghcr and refused.
 	image := sandboxImageE2E
 	var opCfg lastv1alpha1.OperatorConfig
-	if err := ctrl.Get(ctx, client.ObjectKey{Name: "default"}, &opCfg); err == nil && opCfg.Spec.Sandbox != nil && opCfg.Spec.Sandbox.BaseImage != "" {
+	if err := ctrl.Get(ctx, client.ObjectKey{Name: "default"}, &opCfg); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+	} else if opCfg.Spec.Sandbox != nil && opCfg.Spec.Sandbox.BaseImage != "" {
 		image = opCfg.Spec.Sandbox.BaseImage
 	}
 	getProvider := func(ctx context.Context, name string) (*lastv1alpha1.Provider, error) {

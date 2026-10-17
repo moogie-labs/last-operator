@@ -1,3 +1,45 @@
+{{- define "last.registry.frontConf" -}}
+# GET/HEAD anonymous; DELETE admin only; every other method pusher only.
+map $request_method $realm { GET off; HEAD off; default "last-registry"; }
+map $request_method $users { DELETE /etc/nginx/auth/admin; default /etc/nginx/auth/pusher; }
+server {
+  listen 5000;
+  client_max_body_size 0;
+  location /v2/ {
+    auth_basic $realm;
+    auth_basic_user_file $users;
+    proxy_pass http://last-registry.{{ .Values.namespaces.registry }}.svc:5000;
+    proxy_set_header Host $http_host;
+    proxy_set_header Authorization "";
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 900;
+    proxy_request_buffering off;
+  }
+}
+{{- end }}
+{{- define "last.registry.pullConf" -}}
+# Kubelet needs /v2/ plus manifests and blobs by digest, over GET and HEAD
+# (limit_except GET also allows HEAD). Tag lists, _catalog, other
+# repositories, tags and every write method get 403.
+server {
+  listen 5000;
+  location = /healthz { access_log off; return 200; }
+  location = /v2/ {
+    limit_except GET { deny all; }
+    proxy_pass http://last-registry-front.{{ .Values.namespaces.registry }}.svc:5000;
+    proxy_set_header Host $http_host;
+  }
+  # Quoted, because nginx ends a token at a brace. \z, not $, which also matches before a trailing newline.
+  # No URI part on proxy_pass, so the original URI passes through.
+  location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {
+    limit_except GET { deny all; }
+    proxy_pass http://last-registry-front.{{ .Values.namespaces.registry }}.svc:5000;
+    proxy_set_header Host $http_host;
+    proxy_buffering off;
+  }
+  location / { return 403; }
+}
+{{- end }}
 {{- if .Values.registry.bundled.enabled }}
 {{- $reg := .Values.namespaces.registry }}
 apiVersion: v1
@@ -88,22 +130,7 @@ metadata:
   labels: {{- include "last.labels" . | nindent 4 }}
 data:
   default.conf: |
-    # GET/HEAD anonymous; DELETE admin only; every other method pusher only.
-    map $request_method $realm { GET off; HEAD off; default "last-registry"; }
-    map $request_method $users { DELETE /etc/nginx/auth/admin; default /etc/nginx/auth/pusher; }
-    server {
-      listen 5000;
-      client_max_body_size 0;
-      location /v2/ {
-        auth_basic $realm;
-        auth_basic_user_file $users;
-        proxy_pass http://last-registry.{{ $reg }}.svc:5000;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 900;
-        proxy_request_buffering off;
-      }
-    }
+    {{- include "last.registry.frontConf" . | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -122,6 +149,7 @@ spec:
         app.kubernetes.io/name: last-registry-front
         {{- include "last.labels" . | nindent 8 }}
       annotations:
+        checksum/config: {{ include "last.registry.frontConf" . | sha256sum }}
         checksum/auth: {{ include (print $.Template.BasePath "/registry-secrets.yaml") . | sha256sum }}
     spec:
       securityContext:
@@ -140,6 +168,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.registry.bundled.frontResources | nindent 12 }}
           volumeMounts:
             - {name: conf, mountPath: /etc/nginx/conf.d/default.conf, subPath: default.conf, readOnly: true}
             - {name: auth, mountPath: /etc/nginx/auth, readOnly: true}
@@ -218,27 +247,7 @@ metadata:
   labels: {{- include "last.labels" . | nindent 4 }}
 data:
   default.conf: |
-    # Kubelet needs /v2/ plus manifests and blobs by digest, over GET and HEAD
-    # (limit_except GET also allows HEAD). Tag lists, _catalog, other
-    # repositories, tags and every write method get 403.
-    server {
-      listen 5000;
-      location = /healthz { access_log off; return 200; }
-      location = /v2/ {
-        limit_except GET { deny all; }
-        proxy_pass http://last-registry-front.{{ $reg }}.svc:5000;
-        proxy_set_header Host $http_host;
-      }
-      # Quoted, because nginx ends a token at a brace. \z, not $, which also matches before a trailing newline.
-      # No URI part on proxy_pass, so the original URI passes through.
-      location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {
-        limit_except GET { deny all; }
-        proxy_pass http://last-registry-front.{{ $reg }}.svc:5000;
-        proxy_set_header Host $http_host;
-        proxy_buffering off;
-      }
-      location / { return 403; }
-    }
+    {{- include "last.registry.pullConf" . | nindent 4 }}
 ---
 # No NetworkPolicy: kubelet reaches this pod from the node through the hostPort
 # DNAT, and how CNIs treat that traffic differs. The allowlist above is the control.
@@ -257,6 +266,8 @@ spec:
       labels:
         app.kubernetes.io/name: last-registry-pull-proxy
         {{- include "last.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "last.registry.pullConf" . | sha256sum }}
     spec:
       tolerations:
         - operator: Exists
@@ -279,6 +290,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.registry.bundled.pullProxyResources | nindent 12 }}
           volumeMounts:
             - {name: conf, mountPath: /etc/nginx/conf.d/default.conf, subPath: default.conf, readOnly: true}
       volumes:

@@ -105,7 +105,16 @@ unset PUSHER_PASSWORD ADMIN_PASSWORD
 pass "push $DIGEST"
 
 # --- 2. Pull on every node -------------------------------------------------
-kc create namespace "$CHECK_NS" >/dev/null 2>&1 || true
+# A namespace left by a killed run could hold stale pods: remove it and wait until it is gone.
+if kc get namespace "$CHECK_NS" >/dev/null 2>&1; then
+  kc delete namespace "$CHECK_NS" --wait=false --ignore-not-found >/dev/null || die "could not delete leftover namespace $CHECK_NS"
+  for _ in $(seq 1 60); do
+    kc get namespace "$CHECK_NS" >/dev/null 2>&1 || break
+    sleep 2
+  done
+  if kc get namespace "$CHECK_NS" >/dev/null 2>&1; then die "leftover namespace $CHECK_NS still exists after 120s"; fi
+fi
+kc create namespace "$CHECK_NS" >/dev/null || die "could not create namespace $CHECK_NS"
 POD_NAMES=()
 for i in "${!NODES[@]}"; do
   node="${NODES[$i]}"

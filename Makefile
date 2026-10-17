@@ -353,6 +353,9 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	@# helm re-salts the htpasswd lines on every render, so the front proxy must restart when last-registry-auth changes.
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry-front\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'checksum/auth:'
 	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'namespace: last-registry'
+	@# Config lives in a subPath mount, so each proxy pod template must carry a config checksum to roll on a ConfigMap change.
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry-front\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'checksum/config:'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: DaemonSet\n/ && doc ~ /\nmetadata:\n  name: last-registry-pull-proxy\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'checksum/config:'
 	@# The node-local pull proxy and the build namespace.
 	helm template last charts/last-operator -n last-system | grep -q 'hostPort: 5000'
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-build-default-deny'

@@ -4,7 +4,10 @@ image:
   pullPolicy: IfNotPresent
 
 namespaces:
-  create: true          # set false to pre-create the gateway, audit and sandbox namespaces yourself (see audit.external.existingSecret)
+  create: true          # set false to pre-create the namespaces yourself: gateway, sandbox and build always,
+                        # audit with the bundled store (see audit.external.existingSecret), registry with
+                        # registry.bundled.enabled. The registry namespace (hostPort DaemonSet) and the build
+                        # namespace need the label pod-security.kubernetes.io/enforce=privileged.
   gateway: last-gateway
   audit: last-audit
   sandbox: last-sandbox
@@ -42,6 +45,12 @@ registry:
     resources:
       requests: {cpu: 50m, memory: 64Mi}
       limits: {memory: 512Mi}
+    frontResources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {memory: 128Mi}
+    pullProxyResources:
+      requests: {cpu: 10m, memory: 16Mi}
+      limits: {memory: 64Mi}
 
 gateway:
   drainTimeoutSeconds: 300   # in-flight RPC drain on shutdown; the pod grace period is this plus 30

@@ -125,8 +125,10 @@ not every platform allows. On a new platform, run `hack/registry-check.sh
 every node through `localhost:5000`, and checks that the pull proxy and the front
 proxy refuse everything they should. It prints one `PASS` or `FAIL` line per
 check and exits non-zero if any fail. By default it pushes busybox from Docker
-Hub; pass `--image-tar FILE` (a `docker save` archive) on a cluster that cannot
-reach it.
+Hub on the machine running the script (not in the cluster); pass `--image-tar FILE`
+(a `docker save` archive) if that machine cannot reach it. The script needs a
+repo checkout, Go, kubectl and curl, plus Docker only if you `docker save` the
+archive yourself.
 
 ## Production audit storage
 
@@ -147,11 +149,20 @@ also run it with admin credentials (`LAST_ADMIN_ACCESS_KEY` /
 
 The writer credentials must be in a Secret in the `last-gateway` namespace
 before install, so pre-create that namespace yourself and turn off
-`namespaces.create` (the bundled `last-audit` namespace isn't used in external
-mode, so it doesn't need to be pre-created):
+`namespaces.create`. With it off, the chart doesn't create any namespace, so
+also pre-create `last-sandbox`, `last-build` and `last-registry`. The registry
+namespace (hostPort DaemonSet) and the build namespace must carry the
+`pod-security.kubernetes.io/enforce: privileged` label, or the pull proxy is
+rejected and `helm --wait` hangs. `--set registry.bundled.enabled=false` skips
+`last-registry` entirely. The bundled `last-audit` namespace isn't used in
+external mode, so it doesn't need to be pre-created:
 
 ```bash
 kubectl create namespace last-gateway
+kubectl create namespace last-sandbox
+kubectl create namespace last-registry
+kubectl create namespace last-build
+kubectl label namespace last-registry last-build pod-security.kubernetes.io/enforce=privileged
 
 kubectl create secret generic last-audit-writer -n last-gateway \
   --from-literal=accessKey=<your-access-key> \
