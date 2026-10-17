@@ -138,6 +138,7 @@ Cluster admins are trusted (see §17.2 for what that implies).
 | `last-system` | Operator; cluster-scoped rule suggestions | none beyond its CRs | none |
 | `last-gateway` | Gateway, credential Secrets, signing key, Kubernetes provider ServiceAccounts | **none** | full within ns (incl. `serviceaccounts/token`) |
 | `last-sandbox` | Sandbox and build pods, per-execution NetworkPolicies and credential Secrets | **none** | create/delete Pods, NetworkPolicies, Secrets |
+| `last-build` | Build pods, privileged PSA, written only by the gateway | **none** | create/delete Pods, NetworkPolicies, Secrets, ConfigMaps |
 | `last-audit` | Bundled RustFS + root credentials | **none** | **none** (S3 API only) |
 | `last-registry` | Bundled Distribution registry + GC sidecar, nginx front proxy, node-local pull proxy DaemonSet, registry credentials | **none** | **none** (registry API only) |
 
@@ -1022,6 +1023,18 @@ is deleted.
   containerd configuration (the classic `kube-registry-proxy`
   pattern). Anonymous pulls are acceptable because images never
   contain credentials: builds never receive any.
+- **Pull proxy allowlist.** The pull proxy forwards only `GET` and
+  `HEAD` (nginx `limit_except GET` allows both), and only on `/v2/`,
+  on manifests and blobs of `last/images` and `last/base` addressed by
+  `sha256` digest, and on a local `/healthz`. Everything else gets 403:
+  tag lists, `_catalog`, other repositories, tags and write methods.
+- **IPv4 only.** The hostPort listens on IPv4 only, so `[::1]:5000`
+  does not connect. Image references use `localhost`, which containerd
+  tries over IPv4 and over HTTPS before falling back to HTTP.
+- **No NetworkPolicy on the pull proxy.** Kubelet reaches it from the
+  node through the hostPort DNAT, and CNIs differ in how they treat
+  that traffic, so a policy could block pulls on some clusters. The
+  allowlist is its control, and the front proxy's policy admits it.
 - **Tags don't matter for integrity.** Anyone holding the pusher
   credential (i.e. a build pod) could push arbitrary content under
   any tag. That cannot affect what runs, because the gateway only ever

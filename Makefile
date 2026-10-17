@@ -349,3 +349,13 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	@# helm re-salts the htpasswd lines on every render, so the front proxy must restart when last-registry-auth changes.
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry-front\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'checksum/auth:'
 	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'namespace: last-registry'
+	@# The node-local pull proxy and the build namespace.
+	helm template last charts/last-operator -n last-system | grep -q 'hostPort: 5000'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-build-default-deny'
+	helm template last charts/last-operator -n last-system | grep -qF '^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}$$'
+	helm template last charts/last-operator -n last-system | grep -q 'return 403'
+	helm template last charts/last-operator -n last-system | awk '/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -q 'resources: \[configmaps\]'
+	helm template last charts/last-operator -n last-system | awk '/kind: Role$$/{r=1} r&&/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[configmaps\]' | grep -q 'verbs: \[create, list, delete\]'
+	@# Without the bundled registry there is no pull proxy, but the build namespace and the gateway's Role remain.
+	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'hostPort'
+	helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'name: last-gateway-build'

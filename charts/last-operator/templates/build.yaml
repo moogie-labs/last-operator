@@ -1,0 +1,44 @@
+# Build pods run here. Only the gateway writes to this namespace; they get no network access
+# beyond what the gateway grants per build.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: last-build-default-deny
+  namespace: {{ .Values.namespaces.build }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: last-gateway-build
+  namespace: {{ .Values.namespaces.build }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, list, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create, list, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: last-gateway-build
+  namespace: {{ .Values.namespaces.build }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-gateway-build}
+subjects:
+  - {kind: ServiceAccount, name: last-gateway, namespace: {{ .Values.namespaces.gateway }}}
