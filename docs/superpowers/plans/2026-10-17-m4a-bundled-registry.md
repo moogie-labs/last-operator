@@ -308,7 +308,7 @@ A tool the scripts use to push an image through the front proxy. It is the clien
       listen 5000;
       location = /healthz { access_log off; return 200; }
       location = /v2/ { limit_except GET { deny all; } proxy_pass http://last-registry-front.<ns>.svc:5000; }
-      location ~ ^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}$ {
+      location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {   # quoted: nginx ends a token at `{`; \z, unlike $, will not match before a trailing newline
         limit_except GET { deny all; }
         proxy_pass http://last-registry-front.<ns>.svc:5000;
         proxy_set_header Host $http_host;
@@ -474,6 +474,7 @@ A tool the scripts use to push an image through the front proxy. It is the clien
      - `GET /v2/last/images/tags/list`;
      - `GET /v2/other/manifests/<digest>`;
      - `GET /v2/last/images/manifests/registry-check` (a tag).
+     - `GET /v2/last/images/manifests/<digest>%0a` (a trailing newline after the digest).
 
      `GET /v2/last/images/manifests/<digest>` must answer 200.
   5. **The front proxy's method matrix** on 15000, with the manifest Accept header for GETs:
