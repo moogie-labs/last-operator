@@ -149,6 +149,29 @@ func TestAnthropicReportsARefusal(t *testing.T) {
 	}
 }
 
+// A server-side fallback marks where the declining model's output ends with a
+// fallback block (a start and stop, no deltas); the fallback model's text follows.
+func TestAnthropicJoinsTheTextOnEitherSideOfAFallback(t *testing.T) {
+	text := func(i int, s string) string {
+		return sse(
+			"content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, i),
+			"content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%q}}`, i, s),
+			"content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, i))
+	}
+	stream := sse("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}`) +
+		text(0, `{"kind":"comm`) +
+		sse("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"fallback","from":{"model":"claude-opus-5-5"},"to":{"model":"claude-sonnet-5-5"},"trigger":{"type":"refusal","category":"cyber"}}}`,
+			"content_block_stop", `{"type":"content_block_stop","index":1}`) +
+		text(2, `and"}`) +
+		sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}`,
+			"message_stop", `{"type":"message_stop"}`)
+	srv, _ := fakeAnthropic(t, http.StatusOK, stream)
+	resp, err := anthropicFor(srv, "").Complete(context.Background(), conversation)
+	if err != nil || resp.Content != `{"kind":"command"}` {
+		t.Fatalf("Complete = %+v, %v; want the two texts joined in order and no error", resp, err)
+	}
+}
+
 func TestAnthropicMapsHTTPErrors(t *testing.T) {
 	errBody := `{"type":"error","error":{"type":"x","message":"nope"}}`
 	cases := map[int]error{401: ErrAuth, 403: ErrAuth, 404: ErrModel, 400: ErrBadRequest, 408: ErrTransient, 429: ErrTransient, 500: ErrTransient, 529: ErrTransient}

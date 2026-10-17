@@ -84,7 +84,8 @@ echo "Verifying the audit chain"
 PUB="$(mktemp)"
 kubectl port-forward -n last-audit svc/last-rustfs 19000:9000 >/dev/null 2>&1 &
 PF=$!
-trap 'kill "$PF" 2>/dev/null || true; rm -f "$PUB"' EXIT
+# wait reaps the port-forward, so bash does not report it as Terminated.
+trap '{ kill "$PF" && wait "$PF"; } 2>/dev/null || true; rm -f "$PUB"' EXIT
 kubectl get cm -n last-gateway last-audit-pubkey -o jsonpath='{.data.ed25519\.pub}' > "$PUB"
 echo >> "$PUB"
 for _ in $(seq 30); do
