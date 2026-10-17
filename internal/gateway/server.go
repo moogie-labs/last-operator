@@ -46,6 +46,7 @@ type Gateway struct {
 	phases  phaseTable
 	probing sync.Map // intent key -> in-flight probe run
 	index   auditIndex
+	images  *imageIndex // built-image digest cache
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -54,7 +55,8 @@ type Gateway struct {
 
 func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Sink, signer *audit.Signer) *Gateway {
 	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
-		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace)}
+		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace),
+		images: newImageIndex(kube, cfg.Namespace)}
 	g.execCfg = sandbox.ExecutorConfig{
 		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
 		ProviderNamespace: cfg.Namespace,
