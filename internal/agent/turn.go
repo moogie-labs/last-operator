@@ -407,30 +407,37 @@ func Schema() []byte { return slices.Clone(schemaJSON) }
 
 var schemaJSON = buildSchema()
 
+// buildSchema defines each shared object (command, probe, resource) once in
+// $defs and references it. Written out in full at every use, the command alone
+// appeared four times, and Anthropic refused the schema: "The compiled grammar
+// is too large" (hack/schemaprobe compares the shapes).
 func buildSchema() []byte {
+	const cmd = "command" // the $defs name of a command, and the field naming one
 	str := map[string]any{keywordType: "string"}
 	strs := array(str)
+	ref := func(name string) map[string]any { return map[string]any{"$ref": "#/$defs/" + name} }
 	command := object(map[string]any{
 		"id": str, "reason": str, "argv": strs, "script": str,
 		"files":     array(object(map[string]any{"path": str, "content": str})),
 		"providers": strs, "egress": strs, "timeout": str,
 	})
-	probe := object(map[string]any{"id": str, "command": command, "assert": str})
+	probe := object(map[string]any{"id": str, cmd: ref(cmd), "assert": str})
 	resource := object(map[string]any{
-		"description": str, "identity": str, "desired": str, "probes": array(probe), "outputsSecret": str,
+		"description": str, "identity": str, "desired": str, "probes": array(ref("probe")), "outputsSecret": str,
 		"outputs":  array(object(map[string]any{"key": str, "value": str})),
-		"teardown": array(command),
+		"teardown": array(ref(cmd)),
 	})
 	question := object(map[string]any{"id": str, "text": str, "options": strs})
 	turn := object(map[string]any{
 		"kind":      map[string]any{keywordType: "string", "enum": []Kind{KindPlan, KindQuestions, KindCommand}},
 		"summary":   str,
-		"steps":     array(command),
-		"resources": array(resource),
+		"steps":     array(ref(cmd)),
+		"resources": array(ref("resource")),
 		"questions": array(question),
 		"reason":    str,
-		"command":   map[string]any{"anyOf": []any{command, map[string]any{keywordType: "null"}}},
+		cmd:         map[string]any{"anyOf": []any{ref(cmd), map[string]any{keywordType: "null"}}},
 	})
+	turn["$defs"] = map[string]any{cmd: command, "probe": probe, "resource": resource}
 	b, err := json.Marshal(turn)
 	if err != nil {
 		panic(err)

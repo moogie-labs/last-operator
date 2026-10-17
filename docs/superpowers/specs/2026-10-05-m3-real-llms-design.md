@@ -143,6 +143,7 @@ The planner's system prompt and `agent.ParseTurn` move from "answer with a plan"
 - **`command`** must pass `checkCommand`, and argv commands may not use `${steps…}` references. It gets `id: "discovery"` before hashing.
 - **The schema.** The operator builds the JSON Schema for this union once and sends it as `response_schema`.
   - **One closed object.** OpenAI strict mode needs an object root with every property required, and both providers need closed objects. So the schema is one closed object: `kind` plus every field of every kind. The fields a kind does not use are left empty, and `command` is null.
+  - **Shared objects defined once.** The command, probe and resource objects are defined once in `$defs` and referenced with `$ref`. Written out in full at every use, the command appeared four times, and Anthropic refused the schema: "The compiled grammar is too large". `go run ./hack/schemaprobe` checks the current schema against the real API.
   - **A wire format of its own.** The JSON the model writes differs from the CRD's:
     - `run` is flattened to `argv` and `script`;
     - the maps `files` and `outputs` are arrays of `{path, content}` and `{key, value}`;

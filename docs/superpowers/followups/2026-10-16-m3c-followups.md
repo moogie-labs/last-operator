@@ -12,14 +12,21 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
   Record the transcript here.
 
-## Demo result (2026-10-16): blocked by the turn schema
+## Demo result (2026-10-16): blocked by the turn schema, then fixed
 
-The first `make demo` failed on its first turn. Anthropic answered HTTP 400: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." The Intent failed with `PlanningFailed`. The cluster, chart, key Secret and LLMProvider all worked. Next step: make `agent.Schema()` smaller, then rerun the demo. Options:
-- define the command object once in `$defs` and reference it with `$ref`, instead of inlining it 4 times;
-- drop `teardown` from the wire format until M5;
-- make fewer fields required for Anthropic.
+The first `make demo` failed on its first turn. Anthropic answered HTTP 400: "The compiled grammar is too large, which would cause performance issues." The cluster, chart, key Secret and LLMProvider all worked.
 
-Any change must keep OpenAI strict compatibility. M3's done-criterion is not met until the demo passes.
+On 2026-10-17, `hack/schemaprobe` tested five variants against the real API:
+
+| Variant | Size | Result |
+|---|---|---|
+| Today's schema | 3621 bytes | rejected |
+| `command` as a plain object, not "object or null" | 3593 bytes | rejected |
+| Shared objects in `$defs` | 2069 bytes | accepted |
+| `$defs`, without the union | 2041 bytes | accepted |
+| Without resources | 1722 bytes | accepted |
+
+The cause was writing the command object out in full four times, not the union. `agent.Schema()` now defines the command, probe and resource objects once in `$defs` and references them. It is byte-for-byte the accepted variant. `TestSchemaDefinesEachSharedObjectOnce` pins this, and `go run ./hack/schemaprobe` checks the schema against the real API. Next: rerun `make demo`.
 
 ## Approver display
 

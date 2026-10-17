@@ -185,7 +185,9 @@ func TestSchemaIsStrictAndMatchesTheWireFormat(t *testing.T) {
 	if err := json.Unmarshal(Schema(), &root); err != nil {
 		t.Fatal(err)
 	}
-	checkSchema(t, "turn", root, reflect.TypeFor[wireTurn]())
+	defs, _ := root["$defs"].(map[string]any)
+	delete(root, "$defs")
+	checkSchema(t, "turn", root, reflect.TypeFor[wireTurn](), defs)
 	if kinds := root["properties"].(map[string]any)["kind"].(map[string]any)["enum"]; !reflect.DeepEqual(kinds,
 		[]any{"plan", "questions", "command"}) {
 		t.Errorf("kind enum = %v", kinds)
@@ -197,9 +199,24 @@ func TestSchemaIsStrictAndMatchesTheWireFormat(t *testing.T) {
 	}
 }
 
-var allowedKeywords = []string{"type", "properties", "required", "additionalProperties", "items", "enum", "anyOf"}
+// Anthropic refuses a schema whose compiled grammar is too large, and the
+// command object written out four times was too large (HTTP 400 "The compiled
+// grammar is too large"; hack/schemaprobe). Each shared object is defined once
+// in $defs and referenced.
+func TestSchemaDefinesEachSharedObjectOnce(t *testing.T) {
+	s := string(Schema())
+	for _, field := range []string{"argv", "assert", "outputsSecret"} {
+		if n := strings.Count(s, `"`+field+`":{`); n != 1 {
+			t.Errorf("property %q is defined %d times in the schema, want once", field, n)
+		}
+	}
+}
 
-func checkSchema(t *testing.T, path string, node map[string]any, typ reflect.Type) {
+var allowedKeywords = []string{"type", "properties", "required", "additionalProperties", "items", "enum", "anyOf", "$ref"}
+
+// checkSchema walks node against the wire type typ, resolving "#/$defs/<name>"
+// references in defs.
+func checkSchema(t *testing.T, path string, node map[string]any, typ reflect.Type, defs map[string]any) {
 	t.Helper()
 	for k := range node {
 		if !slices.Contains(allowedKeywords, k) {
@@ -209,11 +226,19 @@ func checkSchema(t *testing.T, path string, node map[string]any, typ reflect.Typ
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
+	if ref, ok := node["$ref"].(string); ok {
+		def, ok := defs[strings.TrimPrefix(ref, "#/$defs/")].(map[string]any)
+		if !ok || len(node) != 1 {
+			t.Fatalf("%s: $ref %q does not resolve, or has siblings", path, ref)
+		}
+		checkSchema(t, path, def, typ, defs)
+		return
+	}
 	if anyOf, ok := node["anyOf"].([]any); ok {
 		if len(anyOf) != 2 || anyOf[1].(map[string]any)["type"] != "null" {
 			t.Fatalf("%s: anyOf is not <type> or null", path)
 		}
-		checkSchema(t, path, anyOf[0].(map[string]any), typ)
+		checkSchema(t, path, anyOf[0].(map[string]any), typ, defs)
 		return
 	}
 	switch node["type"] {
@@ -233,14 +258,14 @@ func checkSchema(t *testing.T, path string, node map[string]any, typ reflect.Typ
 				t.Errorf("%s: property %q is missing or not required", path, name)
 				continue
 			}
-			checkSchema(t, path+"."+name, p, field.Type)
+			checkSchema(t, path+"."+name, p, field.Type, defs)
 		}
 	case "array":
 		if typ.Kind() != reflect.Slice {
 			t.Errorf("%s: array for %s", path, typ)
 			return
 		}
-		checkSchema(t, path+"[]", node["items"].(map[string]any), typ.Elem())
+		checkSchema(t, path+"[]", node["items"].(map[string]any), typ.Elem(), defs)
 	case "string":
 		if typ.Kind() != reflect.String {
 			t.Errorf("%s: string for %s", path, typ)
