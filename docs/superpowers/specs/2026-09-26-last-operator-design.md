@@ -1341,6 +1341,12 @@ The CRs emit standard Kubernetes Events for phase transitions.
   stay protected by compliance mode. Protecting future entries against
   a malicious admin would require external anchoring, which is out of
   scope.
+- **Preloaded images are trusted only until pulled under another name.**
+  Kubelet (1.35+, `KubeletEnsureSecretPulledImages`) trusts a preloaded
+  image only until it pulls the same image ID under another name, after
+  which it re-verifies access for the preloaded name. Installs must
+  reference the base image by one name (the pinned digest), as the e2e
+  now does.
 - **Operator-wide credentials.** Every namespace allowed to use a
   Provider shares its full permissions.
 - **Auto-mode discovery runs before any plan exists.** With

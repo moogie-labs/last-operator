@@ -49,6 +49,7 @@ type sandboxEnv struct {
 	signer   *audit.Signer
 	targetIP string
 	canaries []string
+	image    string
 }
 
 func setupSandbox(t *testing.T) *sandboxEnv {
@@ -140,16 +141,26 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Use the one name the cluster uses for the base image. Kubelet's
+	// pull-credential verification stops trusting a preloaded image once the
+	// same image ID was pulled under another name (the operator's sandbox pods
+	// pull the pinned digest through the pull proxy), so the kind-loaded tag
+	// would be pulled from ghcr and refused.
+	image := sandboxImageE2E
+	var opCfg lastv1alpha1.OperatorConfig
+	if err := ctrl.Get(ctx, client.ObjectKey{Name: "default"}, &opCfg); err == nil && opCfg.Spec.Sandbox != nil && opCfg.Spec.Sandbox.BaseImage != "" {
+		image = opCfg.Spec.Sandbox.BaseImage
+	}
 	getProvider := func(ctx context.Context, name string) (*lastv1alpha1.Provider, error) {
 		var p lastv1alpha1.Provider
 		return &p, ctrl.Get(ctx, client.ObjectKey{Name: name}, &p)
 	}
 	exec := sandbox.NewExecutor(kube, getProvider, w, sandbox.NewScheduler(4), sandbox.KubeLogReader(kube), sandbox.ExecutorConfig{
-		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
+		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: image, ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}},
 		ProviderNamespace: "last-gateway", EgressCanaries: canaries,
 	})
-	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canaries: canaries}
+	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canaries: canaries, image: image}
 }
 
 func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult {
@@ -174,13 +185,13 @@ func requireDenied(t *testing.T, r runnerapi.Result) {
 
 // openPodCurl runs curl from a plain pod in the target namespace (no NetworkPolicy
 // there) and returns the HTTP code, "000" when the connection failed.
-func openPodCurl(t *testing.T, kube kubernetes.Interface, name, url string) string {
+func openPodCurl(t *testing.T, kube kubernetes.Interface, name, image, url string) string {
 	t.Helper()
 	ctx := context.Background()
 	zero := int64(0)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: targetNS},
 		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, TerminationGracePeriodSeconds: &zero,
-			Containers: []corev1.Container{{Name: "runner", Image: sandboxImageE2E, ImagePullPolicy: corev1.PullIfNotPresent,
+			Containers: []corev1.Container{{Name: "runner", Image: image, ImagePullPolicy: corev1.PullIfNotPresent,
 				Command: []string{"sh", "-c", "curl -sk -o /dev/null -w '%{http_code}' --max-time 5 " + url}}}}}
 	if _, err := kube.CoreV1().Pods(targetNS).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
@@ -214,7 +225,7 @@ func TestSandboxExecution(t *testing.T) {
 			if i == 1 {
 				scheme = "https://" // kubelet; any TCP connect counts, including a 401
 			}
-			if code := openPodCurl(t, s.kube, "canary-check-"+strconv.Itoa(i), scheme+c+"/"); code == "000" || code == "" {
+			if code := openPodCurl(t, s.kube, "canary-check-"+strconv.Itoa(i), s.image, scheme+c+"/"); code == "000" || code == "" {
 				t.Fatalf("canary %s is unreachable from an unrestricted pod (curl code %q)", c, code)
 			}
 		}
