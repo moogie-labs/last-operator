@@ -12,6 +12,15 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
   Record the transcript here.
 
+## Demo result (2026-10-16): blocked by the turn schema
+
+The first `make demo` failed on its first turn. Anthropic answered HTTP 400: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." The Intent failed with `PlanningFailed`. The cluster, chart, key Secret and LLMProvider all worked. Next step: make `agent.Schema()` smaller, then rerun the demo. Options:
+- define the command object once in `$defs` and reference it with `$ref`, instead of inlining it 4 times;
+- drop `teardown` from the wire format until M5;
+- make fewer fields required for Anthropic.
+
+Any change must keep OpenAI strict compatibility. M3's done-criterion is not met until the demo passes.
+
 ## Approver display
 
 - **Unhashed prose.** `Plan.Summary` and `PendingCommand.Reason` are shown, but they sit outside the hashed body (main spec §8.2). The operator can therefore change them; the commands and resources an approval covers it cannot. Label that prose as not covered by the hash. Also tighten the wording in M3 spec §5 and the README: the CLI recomputes the hash "from the commands and resources it shows", not from everything it shows.
