@@ -340,3 +340,12 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -A1 'kubernetes.io/metadata.name: last-system' | grep -q '^          podSelector:'
 	@# The operator never gets Secrets or ManagedResource deletes (spec §4.1; test/admission checks the full list).
 	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|delete)' charts/last-operator/files/operator-clusterrole.yaml
+	@# The bundled registry: namespaces, credentials, and a front proxy that picks the realm and user file per method.
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-front'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-auth'
+	helm template last charts/last-operator -n last-system | grep -q 'pod-security.kubernetes.io/enforce: privileged'
+	helm template last charts/last-operator -n last-system | grep -q 'map $$request_method $$realm'
+	helm template last charts/last-operator -n last-system | grep -q 'DELETE /etc/nginx/auth/admin'
+	@# helm re-salts the htpasswd lines on every render, so the front proxy must restart when last-registry-auth changes.
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry-front\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'checksum/auth:'
+	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'namespace: last-registry'

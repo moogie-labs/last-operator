@@ -1005,7 +1005,14 @@ is deleted.
   - `DELETE` requires the **admin** credential, held only by the
     gateway.
 
-  Both credentials are generated at install time. The operator has no
+  The front proxy chooses the realm and the credential file by
+  request method: `GET` and `HEAD` need no credential, `DELETE`
+  accepts only the admin credential, and every other method accepts
+  only the pusher credential. A pusher cannot delete, and the admin
+  credential cannot push.
+
+  Both credentials are generated at install time and stored as bcrypt
+  htpasswd lines. The passwords survive upgrades. The operator has no
   access to either.
 - **Node-local pull proxy.** A DaemonSet on `hostPort` 5000 that
   forwards only `GET`/`HEAD` to the front proxy. Images are referenced

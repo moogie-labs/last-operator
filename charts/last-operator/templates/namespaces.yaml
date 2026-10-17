@@ -18,6 +18,29 @@ metadata:
     # Deleting this namespace would delete the audit store's volume.
     helm.sh/resource-policy: keep
 {{- end }}
+{{- if .Values.registry.bundled.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaces.registry }}
+  labels:
+    {{- include "last.labels" . | nindent 4 }}
+    # The pull proxy uses a hostPort, which the baseline level forbids.
+    pod-security.kubernetes.io/enforce: privileged
+  annotations:
+    # Deleting this namespace would delete the registry's volume.
+    helm.sh/resource-policy: keep
+{{- end }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaces.build }}
+  labels:
+    {{- include "last.labels" . | nindent 4 }}
+    # Build pods run rootless BuildKit with an Unconfined seccomp profile, which baseline forbids.
+    pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1
 kind: Namespace

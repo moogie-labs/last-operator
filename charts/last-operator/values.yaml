@@ -8,6 +8,8 @@ namespaces:
   gateway: last-gateway
   audit: last-audit
   sandbox: last-sandbox
+  registry: last-registry
+  build: last-build
 
 audit:
   bucket: last-audit
@@ -28,6 +30,18 @@ audit:
                             # Since the chart normally owns and can delete that namespace,
                             # external mode typically pairs with namespaces.create=false,
                             # with the gateway namespace (and this Secret in it) pre-created.
+
+registry:
+  bundled:
+    enabled: true
+    image: registry:3.0.0
+    proxyImage: nginxinc/nginx-unprivileged:1.27.5-alpine
+    storageClassName: ""   # "" = cluster default
+    size: 20Gi
+    hostPort: 5000
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {memory: 512Mi}
 
 gateway:
   drainTimeoutSeconds: 300   # in-flight RPC drain on shutdown; the pod grace period is this plus 30

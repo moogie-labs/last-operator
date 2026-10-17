@@ -1,0 +1,211 @@
+{{- if .Values.registry.bundled.enabled }}
+{{- $reg := .Values.namespaces.registry }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: last-registry-data
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+  annotations: {helm.sh/resource-policy: keep}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.registry.bundled.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.registry.bundled.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: last-registry
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: last-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: last-registry
+        {{- include "last.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: registry
+          image: {{ .Values.registry.bundled.image }}
+          env:
+            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
+          ports:
+            - {name: registry, containerPort: 5000}
+          readinessProbe:
+            httpGet: {path: /v2/, port: registry}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /v2/, port: registry}
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.registry.bundled.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/registry}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: last-registry-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: last-registry
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: last-registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: last-registry-front
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    # GET/HEAD anonymous; DELETE admin only; every other method pusher only.
+    map $request_method $realm { GET off; HEAD off; default "last-registry"; }
+    map $request_method $users { DELETE /etc/nginx/auth/admin; default /etc/nginx/auth/pusher; }
+    server {
+      listen 5000;
+      client_max_body_size 0;
+      location /v2/ {
+        auth_basic $realm;
+        auth_basic_user_file $users;
+        proxy_pass http://last-registry.{{ $reg }}.svc:5000;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 900;
+        proxy_request_buffering off;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: last-registry-front
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: last-registry-front
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: last-registry-front
+        {{- include "last.labels" . | nindent 8 }}
+      annotations:
+        checksum/auth: {{ include (print $.Template.BasePath "/registry-secrets.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: nginx
+          image: {{ .Values.registry.bundled.proxyImage }}
+          ports:
+            - {name: registry, containerPort: 5000}
+          readinessProbe:
+            httpGet: {path: /v2/, port: registry}
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: conf, mountPath: /etc/nginx/conf.d/default.conf, subPath: default.conf, readOnly: true}
+            - {name: auth, mountPath: /etc/nginx/auth, readOnly: true}
+      volumes:
+        - name: conf
+          configMap: {name: last-registry-front}
+        - name: auth
+          secret: {secretName: last-registry-auth}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: last-registry-front
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: last-registry-front
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: last-registry
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: last-registry
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: last-registry-front
+      ports:
+        - {port: 5000, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: last-registry-front
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: last-registry-front
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: last-registry-pull-proxy
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespaces.build }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespaces.gateway }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: last-gateway
+      ports:
+        - {port: 5000, protocol: TCP}
+{{- end }}
