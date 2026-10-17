@@ -124,6 +124,10 @@ func newExec(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader) 
 }
 
 func newExecWith(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader, ps ...*lastv1alpha1.Provider) *sandbox.Executor {
+	return newExecPullGrace(20*time.Millisecond, kube, aud, logs, ps...)
+}
+
+func newExecPullGrace(pullGrace time.Duration, kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogReader, ps ...*lastv1alpha1.Provider) *sandbox.Executor {
 	return sandbox.NewExecutor(kube, providers(ps...), aud, sandbox.NewScheduler(2), logs,
 		sandbox.ExecutorConfig{
 			Pod:               sandbox.PodConfig{Namespace: "last-sandbox", Image: probeImage},
@@ -131,6 +135,7 @@ func newExecWith(kube *fake.Clientset, aud sandbox.Auditor, logs sandbox.LogRead
 			PollInterval:      time.Millisecond,
 			DeadlineOverhead:  time.Millisecond,
 			StartupGrace:      50 * time.Millisecond,
+			PullGrace:         pullGrace,
 			CleanupTimeout:    time.Second,
 			NewRunID:          func() string { return runID },
 		})
@@ -682,8 +687,7 @@ func TestRunFailsFastOnImagePullBackOff(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodPending)
 	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		pod := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runner",
-			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
+		pod.Status.ContainerStatuses = waiting("ImagePullBackOff")
 		return false, nil, nil
 	})
 	aud, sink := newAudit(t)
@@ -699,6 +703,87 @@ func TestRunFailsFastOnImagePullBackOff(t *testing.T) {
 	}
 	if r := resultPayload(t, sink); !strings.Contains(r.Error, "ImagePullBackOff") {
 		t.Fatalf("command.result error = %q", r.Error)
+	}
+	assertCleaned(t, kube)
+}
+
+func waiting(reason string) []corev1.ContainerStatus {
+	return []corev1.ContainerStatus{{Name: "runner",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}}}
+}
+
+func TestRunWaitsOutAPullBackOffWithinTheGrace(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodSucceeded)
+	gets := 0
+	kube.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if gets > 5 {
+			return false, nil, nil
+		}
+		obj, err := kube.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), a.GetNamespace(), a.(k8stesting.GetAction).GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		pod := obj.(*corev1.Pod).DeepCopy()
+		pod.Status.Phase = corev1.PodPending
+		pod.Status.ContainerStatuses = waiting("ImagePullBackOff")
+		return true, pod, nil
+	})
+	aud, _ := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	res, err := newExecPullGrace(5*time.Second, kube, aud, envelopeLogs(runnerapi.Result{ID: "c1", Stdout: "pulled\n"}), envProvider(), k8sProvider(clusterName)).
+		Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Result.Stdout != "pulled\n" {
+		t.Fatalf("result = %+v", res.Result)
+	}
+	if gets <= 5 {
+		t.Fatalf("pod fetched %d times, want more than 5", gets)
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunFailsAPullBackOffThatOutlastsTheGrace(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending)
+	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Status.ContainerStatuses = waiting("ImagePullBackOff")
+		return false, nil, nil
+	})
+	aud, _ := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	start := time.Now()
+	_, err := newExecPullGrace(200*time.Millisecond, kube, aud, envelopeLogs(), envProvider(), k8sProvider(clusterName)).
+		Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
+	if err == nil || !strings.Contains(err.Error(), "ImagePullBackOff") {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(start); d < 200*time.Millisecond || d > 5*time.Second {
+		t.Fatalf("failed after %s, want within [200ms, 5s)", d)
+	}
+	assertCleaned(t, kube)
+}
+
+func TestRunFailsFastOnInvalidImageNameDespiteTheGrace(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending)
+	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Status.ContainerStatuses = waiting("InvalidImageName")
+		return false, nil, nil
+	})
+	aud, _ := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	start := time.Now()
+	_, err := newExecPullGrace(time.Minute, kube, aud, envelopeLogs(), envProvider(), k8sProvider(clusterName)).
+		Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
+	if err == nil || !strings.Contains(err.Error(), "InvalidImageName") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("did not fail fast: %s", time.Since(start))
 	}
 	assertCleaned(t, kube)
 }

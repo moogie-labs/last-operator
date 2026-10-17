@@ -61,6 +61,7 @@ type ExecutorConfig struct {
 	// default 60s. It also covers the runner's egress gate (at most 30s).
 	DeadlineOverhead time.Duration
 	StartupGrace     time.Duration // extra wait for scheduling and image pull; default 2m
+	PullGrace        time.Duration // how long ErrImagePull/ImagePullBackOff may last before the run fails; default 60s
 	CleanupTimeout   time.Duration // default 30s
 	NewRunID         func() string // default: 32 random hex characters
 }
@@ -74,6 +75,9 @@ func (c ExecutorConfig) withDefaults() ExecutorConfig {
 	}
 	if c.StartupGrace <= 0 {
 		c.StartupGrace = 2 * time.Minute
+	}
+	if c.PullGrace <= 0 {
+		c.PullGrace = 60 * time.Second
 	}
 	if c.CleanupTimeout <= 0 {
 		c.CleanupTimeout = 30 * time.Second
@@ -358,7 +362,11 @@ func (e *Executor) launch(ctx context.Context, runID string, p prepared, hooks l
 }
 
 // failFastReasons are container waiting reasons that cannot progress without intervention.
-var failFastReasons = []string{"ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError"}
+var failFastReasons = []string{"InvalidImageName", "CreateContainerConfigError", "CreateContainerError"}
+
+// pullReasons are waiting reasons kubelet recovers from by itself (a node's pull proxy
+// may be restarting), so they fail the run only after ExecutorConfig.PullGrace.
+var pullReasons = []string{"ErrImagePull", "ImagePullBackOff"}
 
 // await polls the pod until it finishes or limit passes, then parses its envelope.
 func (e *Executor) await(ctx context.Context, name string, limit time.Duration) ([]runnerapi.Result, error) {
@@ -368,6 +376,7 @@ func (e *Executor) await(ctx context.Context, name string, limit time.Duration) 
 	ticker := time.NewTicker(e.cfg.PollInterval)
 	defer ticker.Stop()
 	var last *corev1.Pod
+	var pullingSince time.Time // when a pull failure was first seen; zero while none is
 	for {
 		pod, err := e.kube.CoreV1().Pods(ns).Get(waitCtx, name, metav1.GetOptions{})
 		switch {
@@ -376,10 +385,24 @@ func (e *Executor) await(ctx context.Context, name string, limit time.Duration) 
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 				return e.collect(ctx, pod)
 			}
+			pulling := false
 			for _, cs := range pod.Status.ContainerStatuses {
-				if w := cs.State.Waiting; w != nil && slices.Contains(failFastReasons, w.Reason) {
+				w := cs.State.Waiting
+				if w == nil {
+					continue
+				}
+				if slices.Contains(failFastReasons, w.Reason) {
 					return nil, fmt.Errorf("sandbox: pod %s cannot start (%s)", name, describePod(pod))
 				}
+				pulling = pulling || slices.Contains(pullReasons, w.Reason)
+			}
+			switch {
+			case !pulling:
+				pullingSince = time.Time{}
+			case pullingSince.IsZero():
+				pullingSince = time.Now()
+			case time.Since(pullingSince) >= e.cfg.PullGrace:
+				return nil, fmt.Errorf("sandbox: pod %s cannot start (%s)", name, describePod(pod))
 			}
 		case apierrors.IsNotFound(err):
 			return nil, fmt.Errorf("sandbox: pod %s was deleted externally", name)

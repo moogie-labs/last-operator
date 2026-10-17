@@ -879,7 +879,9 @@ Every command runs in a sandbox pod:
   (`OperatorConfig.sandbox.baseImage`, which contains common basics:
   `sh`, `curl`, `kubectl`, `jq`, `git`, `python3`) or a built image for
   the command's image spec (§11.2). Images are always referenced by
-  digest. Nothing is installed at runtime.
+  digest. Nothing is installed at runtime. kubelet's image pull failures
+  are retried for 60 s before the command fails (a node's pull proxy may
+  be restarting).
 - **Pod.** Created by the gateway in `last-sandbox`, with no
   ServiceAccount token mounted, non-root, a read-only root filesystem
   except for a writable `emptyDir` at `/work`, CPU and memory limits,
