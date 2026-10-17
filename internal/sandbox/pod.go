@@ -165,7 +165,7 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
-				Name:            "runner",
+				Name:            RunnerContainer,
 				Image:           cfg.Image,
 				ImagePullPolicy: cfg.ImagePullPolicy,
 				Env:             env,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/moogie-labs/last-operator/internal/images"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
@@ -67,6 +70,23 @@ func leftovers(t *testing.T, kube *fake.Clientset) int {
 	return len(pods.Items) + len(secrets.Items) + len(nps.Items)
 }
 
+func assertClean(t *testing.T, kube *fake.Clientset) {
+	t.Helper()
+	if n := leftovers(t, kube); n != 0 {
+		t.Fatalf("%d build objects left behind", n)
+	}
+}
+
+func TestBuildPodMainContainerIsTheRunnerContainer(t *testing.T) {
+	_, _, pod, err := images.BuildObjects(testCfg(), testBuild(), time.Unix(2000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != sandbox.RunnerContainer {
+		t.Fatalf("containers = %+v, want one named %q", pod.Spec.Containers, sandbox.RunnerContainer)
+	}
+}
+
 func TestBuildReturnsTheDigestFromTheMetadata(t *testing.T) {
 	reg, digest := pushed(t)
 	kube := buildKube(corev1.PodSucceeded)
@@ -109,6 +129,7 @@ func TestBuildFailsOnANonZeroExit(t *testing.T) {
 	if out.Err == nil || !strings.Contains(out.Err.Error(), "build exited 1") || out.Log != "boom: no such package\n" {
 		t.Fatalf("outcome = %+v", out)
 	}
+	assertClean(t, kube)
 }
 
 func TestBuildFailsWithoutAnEnvelope(t *testing.T) {
@@ -138,6 +159,7 @@ func TestBuildFailsOnMalformedMetadata(t *testing.T) {
 			if err != nil || out.Err == nil || out.Digest != "" {
 				t.Fatalf("Build = %+v, %v; want a failed outcome", out, err)
 			}
+			assertClean(t, kube)
 		})
 	}
 }
@@ -161,6 +183,7 @@ func TestBuildRedactsThePushCredential(t *testing.T) {
 	if out.Err == nil || strings.Contains(out.Err.Error(), b.PushPassword) {
 		t.Fatalf("Err = %v, want one without the password", out.Err)
 	}
+	assertClean(t, kube)
 }
 
 func TestReapOrphansDeletesExpiredBuildObjects(t *testing.T) {
@@ -202,4 +225,89 @@ func TestReapOrphansDeletesExpiredBuildObjects(t *testing.T) {
 	if len(pods.Items) != 1 {
 		t.Fatalf("unlabelled pods = %d, want 1 untouched", len(pods.Items))
 	}
+}
+
+func TestBuildReturnsAnErrorWhenCancelledDuringTheWait(t *testing.T) {
+	reg, _ := pushed(t)
+	kube := buildKube(corev1.PodRunning)
+	b := images.NewBuilder(kube, fixedLogs(nil), reg, testCfg())
+	b.Tune(5*time.Millisecond, time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	out, err := b.Build(ctx, testBuild())
+	if err == nil || out.Err != nil {
+		t.Fatalf("Build = %+v, %v; want a returned error", out, err)
+	}
+	assertClean(t, kube)
+}
+
+func TestBuildCleansUpWhenALaterCreateFails(t *testing.T) {
+	reg, _ := pushed(t)
+	kube := fake.NewClientset()
+	kube.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("pod rejected")
+	})
+	out, err := images.NewBuilder(kube, fixedLogs(nil), reg, testCfg()).Build(context.Background(), testBuild())
+	if err == nil || out.Err != nil {
+		t.Fatalf("Build = %+v, %v; want a returned error", out, err)
+	}
+	assertClean(t, kube)
+}
+
+func TestBuildFailsWhenThePodCannotStart(t *testing.T) {
+	reg, _ := pushed(t)
+	kube := fake.NewClientset()
+	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		pod := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy()
+		pod.Status.Phase = corev1.PodPending
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: "runner", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "InvalidImageName"}},
+		}}
+		_ = kube.Tracker().Add(pod)
+		return true, pod, nil
+	})
+	out, err := images.NewBuilder(kube, fixedLogs(nil), reg, testCfg()).Build(context.Background(), testBuild())
+	if err != nil || out.Err == nil {
+		t.Fatalf("Build = %+v, %v; want a failed outcome and nil error", out, err)
+	}
+	assertClean(t, kube)
+}
+
+func TestBuildFailsWhenTheWaitLimitIsReached(t *testing.T) {
+	reg, _ := pushed(t)
+	kube := buildKube(corev1.PodRunning)
+	cfg := testCfg()
+	cfg.Timeout = time.Millisecond
+	b := images.NewBuilder(kube, fixedLogs(nil), reg, cfg)
+	b.Tune(5*time.Millisecond, 50*time.Millisecond)
+	out, err := b.Build(context.Background(), testBuild())
+	if err != nil || out.Err == nil {
+		t.Fatalf("Build = %+v, %v; want a failed outcome and nil error", out, err)
+	}
+	assertClean(t, kube)
+}
+
+func TestBuildReturnsAnErrorWhenTheRegistryIsUnreachable(t *testing.T) {
+	_, digest := pushed(t)
+	srv := httptest.NewServer(nil)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	kube := buildKube(corev1.PodSucceeded)
+	log := envelopeLog(runnerapi.Result{Stdout: meta(digest)})
+	out, err := images.NewBuilder(kube, fixedLogs(log), images.NewClient(host, nil, true), testCfg()).Build(context.Background(), testBuild())
+	if err == nil || out.Err != nil {
+		t.Fatalf("Build = %+v, %v; want a returned error", out, err)
+	}
+	assertClean(t, kube)
+}
+
+func TestBuildReturnsAnErrorWhenASucceededPodsLogIsUnreadable(t *testing.T) {
+	reg, _ := pushed(t)
+	kube := buildKube(corev1.PodSucceeded)
+	logs := func(context.Context, string, string) ([]byte, error) { return nil, errors.New("log gone") }
+	out, err := images.NewBuilder(kube, logs, reg, testCfg()).Build(context.Background(), testBuild())
+	if err == nil || out.Err != nil {
+		t.Fatalf("Build = %+v, %v; want a returned error", out, err)
+	}
+	assertClean(t, kube)
 }

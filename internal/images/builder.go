@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -48,17 +49,18 @@ type BuildOutcome struct {
 
 // Builder runs build pods.
 type Builder struct {
-	kube     kubernetes.Interface
-	logs     sandbox.LogReader
-	registry *Client
-	cfg      BuildPodConfig
-	poll     time.Duration
-	now      func() time.Time
+	kube      kubernetes.Interface
+	logs      sandbox.LogReader
+	registry  *Client
+	cfg       BuildPodConfig
+	poll      time.Duration
+	waitSlack time.Duration
+	now       func() time.Time
 }
 
 // NewBuilder returns a Builder. registry is used for anonymous manifest HEADs.
 func NewBuilder(kube kubernetes.Interface, logs sandbox.LogReader, registry *Client, cfg BuildPodConfig) *Builder {
-	return &Builder{kube: kube, logs: logs, registry: registry, cfg: cfg, poll: time.Second, now: time.Now}
+	return &Builder{kube: kube, logs: logs, registry: registry, cfg: cfg, poll: time.Second, waitSlack: buildWaitSlack, now: time.Now}
 }
 
 // Build creates the objects, waits for the pod, reads the runner envelope and confirms the
@@ -68,7 +70,7 @@ func NewBuilder(kube kubernetes.Interface, logs sandbox.LogReader, registry *Cli
 // result envelope.
 func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) {
 	start := b.now()
-	wait := b.cfg.Timeout + buildWaitSlack
+	wait := b.cfg.Timeout + b.waitSlack
 	// expires covers the whole wait, so a live build is never mistaken for an orphan.
 	secret, np, pod, err := BuildObjects(b.cfg, s, start.Add(wait+cleanupTimeout))
 	if err != nil {
@@ -85,13 +87,19 @@ func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) 
 	if _, err := b.kube.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return BuildOutcome{}, fmt.Errorf("images: create build pod: %w", err)
 	}
-	done, err := sandbox.WaitForPod(ctx, b.kube, ns, pod.Name, wait, b.poll, buildPullGrace)
-	if err != nil {
-		return BuildOutcome{}, fmt.Errorf("images: build %s: %w", s.ID, err)
-	}
-
 	r := newBuildRedactor(s.PushUser, s.PushPassword)
 	out := BuildOutcome{}
+	done, err := sandbox.WaitForPod(ctx, b.kube, ns, pod.Name, wait, b.poll, buildPullGrace)
+	if err != nil {
+		if ctx.Err() != nil {
+			return BuildOutcome{}, fmt.Errorf("images: build %s: %w", s.ID, err)
+		}
+		// A pod that cannot start or never finishes is a failed build, not an
+		// infrastructure error: retrying would loop on a broken BuildKit image.
+		out.Err = errors.New(r.redact(err.Error()))
+		out.Duration = b.now().Sub(start)
+		return out, nil
+	}
 	fail := func(format string, args ...any) (BuildOutcome, error) {
 		out.Err = errors.New(r.redact(fmt.Sprintf(format, args...)))
 		out.Duration = b.now().Sub(start)
@@ -156,7 +164,10 @@ func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) 
 func (b *Builder) cleanup(ctx context.Context, id string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
-	_ = b.deleteBuilds(cctx, LabelBuild+"="+id)
+	if err := b.deleteBuilds(cctx, LabelBuild+"="+id); err != nil {
+		// The reaper is the backstop for objects left behind.
+		slog.Error("Could not delete build objects", "build", id, "error", err.Error())
+	}
 }
 
 func (b *Builder) deleteBuilds(ctx context.Context, selector string) error {

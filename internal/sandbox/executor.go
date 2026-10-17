@@ -30,13 +30,17 @@ type Auditor interface {
 		after func(before audit.Entry, result any, actionErr error) audit.Draft) error
 }
 
+// RunnerContainer is the name of the container that runs the sandbox runner, in sandbox
+// and build pods alike; its log carries the result envelope.
+const RunnerContainer = "runner"
+
 // LogReader returns the runner container's log.
 type LogReader func(ctx context.Context, namespace, pod string) ([]byte, error)
 
 // KubeLogReader reads pod logs through the API server.
 func KubeLogReader(kube kubernetes.Interface) LogReader {
 	return func(ctx context.Context, namespace, pod string) ([]byte, error) {
-		return kube.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: "runner"}).DoRaw(ctx)
+		return kube.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: RunnerContainer}).DoRaw(ctx)
 	}
 }
 

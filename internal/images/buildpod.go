@@ -212,7 +212,7 @@ func buildPod(cfg BuildPodConfig, name, id, secretName string, timeoutSeconds in
 				},
 			}},
 			Containers: []corev1.Container{{
-				Name:    "build",
+				Name:    sandbox.RunnerContainer,
 				Image:   cfg.BuildKitImage,
 				Command: []string{"/last-bin/sandbox-runner"},
 				Env: []corev1.EnvVar{
