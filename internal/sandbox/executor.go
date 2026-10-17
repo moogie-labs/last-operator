@@ -370,20 +370,30 @@ var pullReasons = []string{"ErrImagePull", "ImagePullBackOff"}
 
 // await polls the pod until it finishes or limit passes, then parses its envelope.
 func (e *Executor) await(ctx context.Context, name string, limit time.Duration) ([]runnerapi.Result, error) {
-	ns := e.cfg.Pod.Namespace
+	pod, err := WaitForPod(ctx, e.kube, e.cfg.Pod.Namespace, name, limit, e.cfg.PollInterval, e.cfg.PullGrace)
+	if err != nil {
+		return nil, err
+	}
+	return e.collect(ctx, pod)
+}
+
+// WaitForPod polls until the pod finishes (Succeeded or Failed), fails fast, or limit
+// passes, and returns the finished pod. Pull failures (ErrImagePull, ImagePullBackOff)
+// fail it only after pullGrace.
+func WaitForPod(ctx context.Context, kube kubernetes.Interface, ns, name string, limit, poll, pullGrace time.Duration) (*corev1.Pod, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	ticker := time.NewTicker(e.cfg.PollInterval)
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	var last *corev1.Pod
 	var pullingSince time.Time // when a pull failure was first seen; zero while none is
 	for {
-		pod, err := e.kube.CoreV1().Pods(ns).Get(waitCtx, name, metav1.GetOptions{})
+		pod, err := kube.CoreV1().Pods(ns).Get(waitCtx, name, metav1.GetOptions{})
 		switch {
 		case err == nil:
 			last = pod
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-				return e.collect(ctx, pod)
+				return pod, nil
 			}
 			pulling := false
 			for _, cs := range pod.Status.ContainerStatuses {
@@ -401,7 +411,7 @@ func (e *Executor) await(ctx context.Context, name string, limit time.Duration) 
 				pullingSince = time.Time{}
 			case pullingSince.IsZero():
 				pullingSince = time.Now()
-			case time.Since(pullingSince) >= e.cfg.PullGrace:
+			case time.Since(pullingSince) >= pullGrace:
 				return nil, fmt.Errorf("sandbox: pod %s cannot start (%s)", name, describePod(pod))
 			}
 		case apierrors.IsNotFound(err):
