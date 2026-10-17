@@ -1387,6 +1387,13 @@ The CRs emit standard Kubernetes Events for phase transitions.
 - **Build pods are less isolated than sandboxes.** Rootless BuildKit
   needs relaxed seccomp/AppArmor profiles and user namespaces. This is
   mitigated by giving builds no credentials and limited egress.
+- **Install steps can read the pusher credential.** Build pods run
+  with no process sandbox, so an image install step can read the
+  credential used to push the built image. That lets it push arbitrary
+  content under any tag, which costs only registry storage. It cannot
+  change what runs, since only digests named by an audited build result
+  are ever run, and it cannot delete anything, since the pusher has no
+  DELETE permission.
 - **Bundled registry node pulls** rely on `hostPort` and containerd's
   plain-HTTP allowance for `localhost`. Platforms that forbid either
   must use an external registry.

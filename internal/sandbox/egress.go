@@ -76,12 +76,23 @@ func EgressPolicy(namespace, runID string, rules []EgressRule) *networkingv1.Net
 }
 
 // APIServerEgress returns the in-cluster API server's ClusterIP and egress rules for
-// both the ClusterIP and its endpoint addresses: depending on the CNI, NetworkPolicy
-// is evaluated before or after service DNAT, so both must be allowed.
+// both the ClusterIP and its endpoint addresses (see ServiceEgress).
 func APIServerEgress(ctx context.Context, kube kubernetes.Interface) (string, []EgressRule, error) {
-	svc, err := kube.CoreV1().Services(metav1.NamespaceDefault).Get(ctx, "kubernetes", metav1.GetOptions{})
+	return serviceEgress(ctx, kube, metav1.NamespaceDefault, "kubernetes")
+}
+
+// ServiceEgress returns egress rules for a Service's ClusterIP and its EndpointSlice
+// addresses on each port: depending on the CNI, NetworkPolicy is evaluated before or
+// after service DNAT, so both must be allowed.
+func ServiceEgress(ctx context.Context, kube kubernetes.Interface, namespace, name string) ([]EgressRule, error) {
+	_, rules, err := serviceEgress(ctx, kube, namespace, name)
+	return rules, err
+}
+
+func serviceEgress(ctx context.Context, kube kubernetes.Interface, namespace, name string) (string, []EgressRule, error) {
+	svc, err := kube.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return "", nil, fmt.Errorf("sandbox: read kubernetes service: %w", err)
+		return "", nil, fmt.Errorf("sandbox: read service %s/%s: %w", namespace, name, err)
 	}
 	seen := map[string]bool{}
 	var rules []EgressRule
@@ -96,16 +107,18 @@ func APIServerEgress(ctx context.Context, kube kubernetes.Interface) (string, []
 		}
 		return nil
 	}
-	for _, p := range svc.Spec.Ports {
-		if err := add(svc.Spec.ClusterIP, p.Port); err != nil {
-			return "", nil, err
+	if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != corev1.ClusterIPNone {
+		for _, p := range svc.Spec.Ports {
+			if err := add(svc.Spec.ClusterIP, p.Port); err != nil {
+				return "", nil, err
+			}
 		}
 	}
-	slices, err := kube.DiscoveryV1().EndpointSlices(metav1.NamespaceDefault).List(ctx, metav1.ListOptions{
-		LabelSelector: discoveryv1.LabelServiceName + "=kubernetes",
+	slices, err := kube.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: discoveryv1.LabelServiceName + "=" + name,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("sandbox: list kubernetes endpoints: %w", err)
+		return "", nil, fmt.Errorf("sandbox: list endpoints of service %s/%s: %w", namespace, name, err)
 	}
 	for _, s := range slices.Items {
 		for _, ep := range s.Endpoints {

@@ -1,0 +1,320 @@
+package images_test
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/images"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
+)
+
+const (
+	testFront  = "last-registry-front.last-registry.svc:5000"
+	testDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testNS     = "last-build"
+	testPusher = "pusher"
+	testHash   = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func testCfg() images.BuildPodConfig {
+	return images.BuildPodConfig{
+		Namespace: testNS, BuildKitImage: "moby/buildkit:v0.26.2-rootless",
+		RunnerImage: "sandbox@" + testDigest, FrontHost: testFront,
+		Timeout: 15 * time.Minute, Canaries: []string{"10.0.0.1:443"},
+	}
+}
+
+func testBuild() images.BuildSpec {
+	return images.BuildSpec{
+		ID: "b1", SpecHash: testHash, Base: "localhost:5000/last/base@" + testDigest,
+		Install:  []lastv1alpha1.ArgvCommand{{Argv: []string{"apt-get", "install", "-y", "jq"}}},
+		PushUser: testPusher, PushPassword: "s3cret",
+		Egress: []sandbox.EgressRule{{CIDR: "10.96.5.5/32", Port: 5000}},
+	}
+}
+
+func buildSpec(t *testing.T, cfg images.BuildPodConfig, b images.BuildSpec) runnerapi.Spec {
+	t.Helper()
+	sec, _, _, err := images.BuildObjects(cfg, b, time.Unix(2000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := runnerapi.DecodeSpec(bytes.NewReader(sec.Data["spec.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec
+}
+
+func TestBuildObjectsRunTheRunnerUnderBuildKit(t *testing.T) {
+	cfg := testCfg()
+	sec, np, pod, err := images.BuildObjects(cfg, testBuild(), time.Unix(2000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []map[string]string{sec.Labels, np.Labels, pod.Labels} {
+		if m[sandbox.LabelManagedBy] != sandbox.ManagedByValue || m[images.LabelBuild] != "b1" ||
+			m[sandbox.LabelName] != "last-build" || m[sandbox.LabelExpiresAt] != "2000" {
+			t.Fatalf("labels = %v", m)
+		}
+	}
+	if pod.Name != "last-build-b1" || np.Name != "last-build-b1" || sec.Name != "last-build-b1-spec" || pod.Namespace != testNS {
+		t.Fatalf("names: %s %s %s", pod.Name, np.Name, sec.Name)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("init containers = %d", len(pod.Spec.InitContainers))
+	}
+	init := pod.Spec.InitContainers[0]
+	if init.Image != cfg.RunnerImage || !slices.Equal(init.Command, []string{"cp", "/last/sandbox-runner", "/last-bin/sandbox-runner"}) ||
+		*init.SecurityContext.RunAsUser != 1000 || init.VolumeMounts[0].Name != "last-bin" {
+		t.Fatalf("init = %+v", init)
+	}
+	c := pod.Spec.Containers[0]
+	if c.Image != cfg.BuildKitImage || !slices.Equal(c.Command, []string{"/last-bin/sandbox-runner"}) {
+		t.Fatalf("container = %s %v", c.Image, c.Command)
+	}
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	if env["BUILDKITD_FLAGS"] != "--oci-worker-no-process-sandbox --config /work/buildkitd.toml" ||
+		env["DOCKER_CONFIG"] != "/work/.docker" || env["HOME"] != "/home/user" {
+		t.Fatalf("env = %v", env)
+	}
+	for _, e := range c.Env {
+		if strings.Contains(e.Value, "s3cret") {
+			t.Fatal("password in env")
+		}
+	}
+	checkBuildSecurity(t, pod, c)
+	checkBuildVolumes(t, sec.Name, pod, c)
+}
+
+func checkBuildSecurity(t *testing.T, pod *corev1.Pod, c corev1.Container) {
+	t.Helper()
+	sc := c.SecurityContext
+	if *sc.RunAsUser != 1000 || *sc.RunAsGroup != 1000 ||
+		sc.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined || sc.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Fatalf("securityContext = %+v", sc)
+	}
+	psc := pod.Spec.SecurityContext
+	if *psc.RunAsUser != 1000 || *psc.RunAsGroup != 1000 || *psc.FSGroup != 1000 ||
+		psc.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined || psc.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Fatalf("pod securityContext = %+v", psc)
+	}
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		t.Fatal("service account token must not be mounted")
+	}
+	lim := c.Resources.Limits
+	if lim.Cpu().String() != "2" || lim.Memory().String() != "4Gi" || lim.StorageEphemeral().String() != "10Gi" {
+		t.Fatalf("limits = %v", lim)
+	}
+	if *pod.Spec.ActiveDeadlineSeconds != int64((15*time.Minute+3*time.Minute)/time.Second) {
+		t.Fatalf("deadline = %d", *pod.Spec.ActiveDeadlineSeconds)
+	}
+	if c.SecurityContext.AllowPrivilegeEscalation != nil && !*c.SecurityContext.AllowPrivilegeEscalation {
+		// no_new_privs breaks rootlesskit: "newuidmap: Could not set caps".
+		t.Fatal("BuildKit container must not set allowPrivilegeEscalation=false")
+	}
+	init := pod.Spec.InitContainers[0]
+	is := init.SecurityContext
+	if is.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || is.AppArmorProfile.Type != corev1.AppArmorProfileTypeRuntimeDefault ||
+		is.AllowPrivilegeEscalation == nil || *is.AllowPrivilegeEscalation || *is.RunAsGroup != 1000 ||
+		len(is.Capabilities.Drop) != 1 || is.Capabilities.Drop[0] != "ALL" ||
+		init.Resources.Requests.Cpu().String() != "10m" || init.Resources.Requests.Memory().String() != "16Mi" || init.Resources.Limits.Memory().String() != "32Mi" {
+		t.Fatalf("init securityContext/resources = %+v %+v", is, init.Resources)
+	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("restart = %s", pod.Spec.RestartPolicy)
+	}
+}
+
+func checkBuildVolumes(t *testing.T, secretName string, pod *corev1.Pod, c corev1.Container) {
+	t.Helper()
+	mounts := map[string]string{}
+	for _, m := range c.VolumeMounts {
+		mounts[m.MountPath] = m.Name
+	}
+	for _, p := range []string{"/last/spec", "/work", "/last-bin", "/home/user/.local/share/buildkit"} {
+		if mounts[p] == "" {
+			t.Fatalf("missing mount %s: %v", p, mounts)
+		}
+	}
+	vols := map[string]corev1.VolumeSource{}
+	for _, v := range pod.Spec.Volumes {
+		vols[v.Name] = v.VolumeSource
+	}
+	if vols[mounts["/last/spec"]].Secret == nil || vols[mounts["/last/spec"]].Secret.SecretName != secretName {
+		t.Fatalf("spec volume = %+v", vols[mounts["/last/spec"]])
+	}
+	for _, p := range []string{"/work", "/last-bin", "/home/user/.local/share/buildkit"} {
+		if vols[mounts[p]].EmptyDir == nil {
+			t.Fatalf("%s is not an emptyDir", p)
+		}
+	}
+	if vols["last-bin"].EmptyDir == nil {
+		t.Fatal("last-bin volume missing")
+	}
+}
+
+func TestBuildObjectsCarryTheBuildInTheRunnerSpec(t *testing.T) {
+	cfg, b := testCfg(), testBuild()
+	spec := buildSpec(t, cfg, b)
+	if len(spec.Commands) != 1 || spec.Commands[0].Script == "" || len(spec.Commands[0].Argv) != 0 {
+		t.Fatalf("commands = %+v", spec.Commands)
+	}
+	cmd := spec.Commands[0]
+	want := "buildctl-daemonless.sh build --frontend dockerfile.v0 --local context=/work/ctx --local dockerfile=/work/ctx " +
+		"--output type=image,name=" + testFront + "/last/images:" + images.Tag(testHash) + ",push=true,registry.insecure=true " +
+		"--metadata-file /work/meta.json --opt filename=Containerfile >/work/build.log 2>&1\n"
+	// The flags in order, then the log tail on stderr, buildctl's exit code kept, and
+	// only meta.json on stdout.
+	wantScript := want + "rc=$?\ntail -c 1000000 /work/build.log >&2\n[ \"$rc\" -eq 0 ] || exit \"$rc\"\ncat /work/meta.json\n"
+	if cmd.Script != wantScript || strings.Contains(cmd.Script, "set -e") {
+		t.Fatalf("script = %q", cmd.Script)
+	}
+	if cmd.TimeoutSeconds != int64(cfg.Timeout/time.Second) {
+		t.Fatalf("timeout = %d", cmd.TimeoutSeconds)
+	}
+	rewritten := testFront + "/last/base@" + testDigest
+	wantCF, err := images.Containerfile(rewritten, b.Install)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Files["/work/ctx/Containerfile"] != wantCF {
+		t.Fatalf("Containerfile = %q", cmd.Files["/work/ctx/Containerfile"])
+	}
+	toml := cmd.Files["/work/buildkitd.toml"]
+	if !strings.Contains(toml, `[registry."`+testFront+`"]`) || !strings.Contains(toml, "http = true") {
+		t.Fatalf("buildkitd.toml = %q", toml)
+	}
+	var dc struct {
+		Auths map[string]struct{ Auth string } `json:"auths"`
+	}
+	if err := json.Unmarshal([]byte(cmd.Files["/work/.docker/config.json"]), &dc); err != nil {
+		t.Fatal(err)
+	}
+	if dc.Auths[testFront].Auth != base64.StdEncoding.EncodeToString([]byte(testPusher+":s3cret")) {
+		t.Fatalf("auths = %+v", dc.Auths)
+	}
+	if !slices.Equal(spec.EgressCanaries, cfg.Canaries) {
+		t.Fatalf("canaries = %v", spec.EgressCanaries)
+	}
+}
+
+func TestBuildObjectsRewriteABundledBase(t *testing.T) {
+	spec := buildSpec(t, testCfg(), testBuild())
+	if !strings.HasPrefix(spec.Commands[0].Files["/work/ctx/Containerfile"], "FROM "+testFront+"/last/base@"+testDigest+"\n") {
+		t.Fatalf("Containerfile = %q", spec.Commands[0].Files["/work/ctx/Containerfile"])
+	}
+	b := testBuild()
+	b.Base = "ghcr.io/acme/base@" + testDigest
+	spec = buildSpec(t, testCfg(), b)
+	if !strings.HasPrefix(spec.Commands[0].Files["/work/ctx/Containerfile"], "FROM ghcr.io/acme/base@"+testDigest+"\n") {
+		t.Fatalf("Containerfile = %q", spec.Commands[0].Files["/work/ctx/Containerfile"])
+	}
+}
+
+func TestBuildObjectsRewriteWithACustomPullHost(t *testing.T) {
+	cfg := testCfg()
+	cfg.PullHost = "pull.example:5001"
+	b := testBuild()
+	b.Base = "pull.example:5001/last/base@" + testDigest
+	spec := buildSpec(t, cfg, b)
+	if !strings.HasPrefix(spec.Commands[0].Files["/work/ctx/Containerfile"], "FROM "+testFront+"/last/base@"+testDigest+"\n") {
+		t.Fatalf("Containerfile = %q", spec.Commands[0].Files["/work/ctx/Containerfile"])
+	}
+	// The default host is no longer special.
+	b.Base = "localhost:5000/last/base@" + testDigest
+	spec = buildSpec(t, cfg, b)
+	if !strings.HasPrefix(spec.Commands[0].Files["/work/ctx/Containerfile"], "FROM localhost:5000/") {
+		t.Fatalf("Containerfile = %q", spec.Commands[0].Files["/work/ctx/Containerfile"])
+	}
+}
+
+func TestBuildObjectsKeepTheCredentialInTheSpecSecretOnly(t *testing.T) {
+	sec, np, pod, err := images.BuildObjects(testCfg(), testBuild(), time.Unix(2000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := []string{"s3cret", base64.StdEncoding.EncodeToString([]byte(testPusher + ":s3cret"))}
+	spec := buildSpec(t, testCfg(), testBuild())
+	var haystack []string
+	haystack = append(haystack, spec.Commands[0].Script)
+	for _, c := range append(slices.Clone(pod.Spec.InitContainers), pod.Spec.Containers...) {
+		haystack = append(haystack, c.Command...)
+		haystack = append(haystack, c.Args...)
+		for _, e := range c.Env {
+			haystack = append(haystack, e.Name, e.Value)
+		}
+	}
+	for _, m := range []map[string]string{sec.Labels, sec.Annotations, np.Labels, np.Annotations, pod.Labels, pod.Annotations} {
+		for k, v := range m {
+			haystack = append(haystack, k, v)
+		}
+	}
+	npJSON, err := json.Marshal(np)
+	if err != nil {
+		t.Fatal(err)
+	}
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	haystack = append(haystack, string(npJSON), string(podJSON))
+	for _, h := range haystack {
+		for _, s := range secrets {
+			if strings.Contains(h, s) {
+				t.Fatalf("credential %q found in %q", s, h)
+			}
+		}
+	}
+	if !strings.Contains(spec.Commands[0].Files["/work/.docker/config.json"], secrets[1]) {
+		t.Fatal("credential missing from the spec Secret's config.json")
+	}
+}
+
+func TestBuildPolicyAllowsOnlyTheGrantsAndDNS(t *testing.T) {
+	b := testBuild()
+	b.Egress = append(b.Egress, sandbox.EgressRule{CIDR: "203.0.113.0/24", Port: 443})
+	_, np, _, err := images.BuildObjects(testCfg(), b, time.Unix(2000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if np.Spec.PodSelector.MatchLabels[images.LabelBuild] != "b1" || len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != "Egress" || len(np.Spec.Ingress) != 0 {
+		t.Fatalf("policy = %+v", np.Spec)
+	}
+	if len(np.Spec.Egress) != 3 {
+		t.Fatalf("egress = %+v", np.Spec.Egress)
+	}
+	for i, r := range b.Egress {
+		e := np.Spec.Egress[i]
+		if e.To[0].IPBlock.CIDR != r.CIDR || len(e.Ports) != 1 || *e.Ports[0].Protocol != corev1.ProtocolTCP || e.Ports[0].Port.IntVal != r.Port {
+			t.Fatalf("rule %d = %+v", i, e)
+		}
+	}
+	dns := np.Spec.Egress[2]
+	if len(dns.To) != 1 || dns.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" ||
+		dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" || len(dns.Ports) != 2 {
+		t.Fatalf("dns rule = %+v", dns)
+	}
+	protos := map[corev1.Protocol]bool{}
+	for _, p := range dns.Ports {
+		if p.Port.IntVal != 53 {
+			t.Fatalf("dns port = %v", p.Port)
+		}
+		protos[*p.Protocol] = true
+	}
+	if !protos[corev1.ProtocolUDP] || !protos[corev1.ProtocolTCP] {
+		t.Fatalf("dns protocols = %v", protos)
+	}
+}
