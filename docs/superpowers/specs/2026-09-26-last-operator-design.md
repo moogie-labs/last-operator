@@ -1059,9 +1059,10 @@ is deleted.
 
   Pulls continue throughout. A build waiting during GC is delayed, not
   failed.
-- **Validation required:** the pull-proxy pattern must be tested early
-  (M4) on kind, k3s, EKS, and GKE Standard. Platforms that forbid
-  `hostPort` (e.g. GKE Autopilot) must use an external registry.
+- **Validation required:** run `hack/registry-check.sh` against the
+  platform; kind and k3s pass (spike, 2026-10-17); EKS and GKE Standard
+  are pending a run. Platforms that forbid `hostPort` (e.g. GKE
+  Autopilot) must use an external registry.
 
 **External (optional).** `registry.mode: external` points at a
 repository in ECR, GHCR, Harbor, or similar. The gateway uses

@@ -117,6 +117,17 @@ If the gateway refuses to start because chain verification failed, do not
 delete anything. Run `kubectl last audit verify` to find the first bad seq, and
 treat it as a security incident.
 
+## Checking the bundled registry
+
+The bundled registry relies on the node-local pull proxy using a `hostPort`, which
+not every platform allows. On a new platform, run `hack/registry-check.sh
+[--context CTX]` after installing the chart. It pushes a fresh image, pulls it on
+every node through `localhost:5000`, and checks that the pull proxy and the front
+proxy refuse everything they should. It prints one `PASS` or `FAIL` line per
+check and exits non-zero if any fail. By default it pushes busybox from Docker
+Hub; pass `--image-tar FILE` (a `docker save` archive) on a cluster that cannot
+reach it.
+
 ## Production audit storage
 
 The bundled RustFS store is the easy default. For production compliance use,
