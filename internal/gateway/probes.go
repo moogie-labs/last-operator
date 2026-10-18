@@ -18,6 +18,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
 func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest) (*gatewayv1.RunProbesResponse, error) {
@@ -97,7 +98,11 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	if err != nil {
 		return nil, err
 	}
-	outs, err := g.executor(w, image).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: actor, Intent: key, Probes: probes})
+	outs, err := g.runProbeImages(ctx, w, image, imageRequest{Intent: key, Stage: rec.Executed.Stage,
+		Subject: rec.Executed.PlanHash, Actor: actor, Policy: eff}, probes)
+	if _, isStatus := status.FromError(err); isStatus && err != nil { // an image resolve refusal
+		return nil, err
+	}
 	if err != nil {
 		if errors.Is(err, audit.ErrAuditUnavailable) {
 			return nil, status.Errorf(codes.Unavailable, "probe run: %v", err)
@@ -119,4 +124,54 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		resp.Outcomes = append(resp.Outcomes, &gatewayv1.ProbeOutcome{Id: o.ID, Passed: o.Passed, Result: toProtoResult("", o.Result), Error: o.Error})
 	}
 	return resp, nil
+}
+
+// runProbeImages resolves each distinct image spec of probes once, before any probe
+// runs, then runs the probes on their images. A failed build fails its probes and the
+// rest still run; any other resolve error fails the call. Outcomes follow probe order.
+func (g *Gateway) runProbeImages(ctx context.Context, w *audit.Writer, base string, req imageRequest, probes []lastv1alpha1.Probe) ([]sandbox.ProbeOutcome, error) {
+	refs := map[string]string{}
+	buildFailed := map[string]errImageBuildFailed{}
+	for _, p := range probes {
+		k := sandbox.ImageKey(p.Command)
+		_, resolved := refs[k]
+		_, failed := buildFailed[k]
+		if k == "" || resolved || failed {
+			continue
+		}
+		req.Install = p.Command.Image.Install
+		ref, err := g.resolveImage(ctx, w, req)
+		if bf, ok := errors.AsType[errImageBuildFailed](err); ok {
+			buildFailed[k] = bf
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		refs[k] = ref
+	}
+	var runnable []lastv1alpha1.Probe
+	for _, p := range probes {
+		if _, bad := buildFailed[sandbox.ImageKey(p.Command)]; !bad {
+			runnable = append(runnable, p)
+		}
+	}
+	var ran []sandbox.ProbeOutcome
+	if len(runnable) > 0 {
+		var err error
+		ran, err = g.executor(w, base).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: req.Actor, Intent: req.Intent, Probes: runnable, Images: refs})
+		if err != nil {
+			return nil, err
+		}
+	}
+	outs := make([]sandbox.ProbeOutcome, 0, len(probes))
+	for _, p := range probes {
+		if bf, bad := buildFailed[sandbox.ImageKey(p.Command)]; bad {
+			outs = append(outs, sandbox.ProbeOutcome{ID: p.ID, Error: bf.Error(),
+				Result: runnerapi.Result{ID: p.ID, ExitCode: -1, Stderr: bf.LogTail}})
+		} else if len(ran) > 0 {
+			outs, ran = append(outs, ran[0]), ran[1:]
+		}
+	}
+	return outs, nil
 }

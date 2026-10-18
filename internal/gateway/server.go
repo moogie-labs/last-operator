@@ -64,6 +64,7 @@ func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Si
 		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace),
 		images: newImageIndex(kube, cfg.Namespace), builds: newImageBuilds(),
 		registry: images.NewClient(cfg.RegistryFrontHost, nil, true)}
+	g.builds.track = &g.inflight
 	g.newBuilder = func(c images.BuildPodConfig) imageBuilder {
 		return images.NewBuilder(g.kube, g.logs, g.registry, c)
 	}

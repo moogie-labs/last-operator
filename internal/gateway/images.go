@@ -94,6 +94,10 @@ type imageFlight struct {
 // slots, and the cache of successful manifest HEADs.
 type imageBuilds struct {
 	now func() time.Time
+	// track, when set, counts each detached flight so the gateway's RPC drain waits
+	// for it. Only a caller already counted there starts a flight, so the counter is
+	// above zero when a flight is added.
+	track *sync.WaitGroup
 
 	mu      sync.Mutex
 	flights map[string]*imageFlight
@@ -161,6 +165,9 @@ func (b *imageBuilds) do(ctx context.Context, key string, fn func(context.Contex
 		fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		f = &imageFlight{done: make(chan struct{}), cancel: cancel}
 		b.flights[key] = f
+		if b.track != nil {
+			b.track.Add(1)
+		}
 		go b.run(fctx, key, f, fn)
 	}
 	f.refs++
@@ -176,6 +183,9 @@ func (b *imageBuilds) do(ctx context.Context, key string, fn func(context.Contex
 
 func (b *imageBuilds) run(ctx context.Context, key string, f *imageFlight, fn func(context.Context) (string, error)) {
 	defer func() {
+		if b.track != nil {
+			defer b.track.Done()
+		}
 		b.mu.Lock()
 		if b.flights[key] == f {
 			delete(b.flights, key)

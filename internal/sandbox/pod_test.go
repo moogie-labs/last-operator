@@ -2,7 +2,6 @@ package sandbox_test
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +24,7 @@ const (
 
 func TestRunnerSpecConvertsCommands(t *testing.T) {
 	spec, total, err := sandbox.RunnerSpec([]lastv1alpha1.Command{
-		{ID: "a", Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", "pods"}}, Timeout: &metav1.Duration{Duration: time.Minute}},
+		{ID: "a", Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "get", podsResource}}, Timeout: &metav1.Duration{Duration: time.Minute}},
 		{Run: lastv1alpha1.CommandRun{Script: "echo hi"}, Files: map[string]string{"/work/x": "y"}},
 	})
 	if err != nil {
@@ -45,12 +44,15 @@ func TestRunnerSpecConvertsCommands(t *testing.T) {
 	}
 }
 
-func TestRunnerSpecRejectsImageBuildsAndBadCommands(t *testing.T) {
-	_, _, err := sandbox.RunnerSpec([]lastv1alpha1.Command{{Run: lastv1alpha1.CommandRun{Argv: []string{"aws"}},
+func TestRunnerSpecAcceptsAnImage(t *testing.T) {
+	spec, _, err := sandbox.RunnerSpec([]lastv1alpha1.Command{{Run: lastv1alpha1.CommandRun{Argv: []string{"aws"}},
 		Image: &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", "install", "awscli"}}}}}})
-	if !errors.Is(err, sandbox.ErrImageBuildsUnsupported) {
-		t.Fatalf("image err = %v", err)
+	if err != nil || len(spec.Commands) != 1 || spec.Commands[0].Argv[0] != "aws" {
+		t.Fatalf("spec = %+v, err = %v", spec, err)
 	}
+}
+
+func TestRunnerSpecRejectsBadCommands(t *testing.T) {
 	for _, c := range []lastv1alpha1.Command{
 		{Run: lastv1alpha1.CommandRun{}},
 		{Run: lastv1alpha1.CommandRun{Argv: []string{"a"}, Script: "b"}},

@@ -123,9 +123,6 @@ func covers(allowed, r sandbox.EgressRule) bool {
 
 // CheckCommand returns an ErrDenied error when c uses anything the policy forbids.
 func (e Effective) CheckCommand(c lastv1alpha1.Command) error {
-	if c.Image != nil {
-		return fmt.Errorf("%w: image.install commands are not supported until image builds (M4)", ErrDenied)
-	}
 	if c.Run.Script != "" && !e.AllowScripts {
 		return fmt.Errorf("%w: scripts are not allowed by policy", ErrDenied)
 	}

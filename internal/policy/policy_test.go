@@ -3,7 +3,6 @@ package policy_test
 import (
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -97,7 +96,6 @@ func TestCheckCommand(t *testing.T) {
 		"provider": {Run: ok.Run, Providers: []string{"q"}},
 		"egress":   {Run: ok.Run, Egress: []string{"192.168.0.1:443"}},
 		"badrule":  {Run: ok.Run, Egress: []string{"nope"}},
-		"install":  {Run: ok.Run, Image: &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", "install", "x"}}}}},
 	}
 	for name, c := range bad {
 		err := e.CheckCommand(c)
@@ -105,8 +103,14 @@ func TestCheckCommand(t *testing.T) {
 			t.Errorf("%s: CheckCommand = %v, want ErrDenied", name, err)
 		}
 	}
-	if err := e.CheckCommand(bad["install"]); !strings.Contains(err.Error(), "image.install") {
-		t.Errorf("install denial should name image.install: %v", err)
+}
+
+func TestCheckCommandAllowsImageInstall(t *testing.T) {
+	e, _ := policy.Resolve(opConfig([]string{"p"}, []string{"10.0.0.0/8:443"}, nil), nil)
+	c := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"aws"}},
+		Image: &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", "install", "x"}}}}}
+	if err := e.CheckCommand(c); err != nil {
+		t.Fatalf("CheckCommand(image.install) = %v", err)
 	}
 }
 

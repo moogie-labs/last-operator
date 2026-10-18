@@ -25,9 +25,6 @@ const (
 	tmpVolume             = "tmp"
 )
 
-// ErrImageBuildsUnsupported: image.install needs automatic image builds (spec §11.2, M4).
-var ErrImageBuildsUnsupported = errors.New("sandbox: image.install is not supported until image builds (M4)")
-
 // DefaultSandboxResources returns the default CPU, memory, and storage limits for a sandbox pod.
 func DefaultSandboxResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
@@ -52,9 +49,6 @@ func RunnerSpec(cmds []lastv1alpha1.Command) (runnerapi.Spec, time.Duration, err
 	spec := runnerapi.Spec{Version: runnerapi.Version}
 	var total time.Duration
 	for i, c := range cmds {
-		if c.Image != nil {
-			return runnerapi.Spec{}, 0, ErrImageBuildsUnsupported
-		}
 		if (len(c.Run.Argv) == 0) == (c.Run.Script == "") {
 			return runnerapi.Spec{}, 0, fmt.Errorf("sandbox: command %d: exactly one of argv or script must be set", i)
 		}

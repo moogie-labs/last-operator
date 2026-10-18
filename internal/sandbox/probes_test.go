@@ -41,7 +41,7 @@ func probeOf(id, assert string, egress ...string) lastv1alpha1.Probe {
 func countPods(xs []string) int {
 	n := 0
 	for _, v := range xs {
-		if v == "pods" {
+		if v == podsResource {
 			n++
 		}
 	}
@@ -447,5 +447,63 @@ func TestRunProbesTruncatesLongAssertionErrors(t *testing.T) {
 	_, results := probeEntries(t, sink)
 	if got := decode[probeResultPayloadJSON](t, results[0]).Results[0].Error; got != outs[0].Error {
 		t.Fatalf("audited error differs from the outcome error")
+	}
+}
+
+const (
+	imgB         = "reg/img@sha256:b"
+	imgC         = "reg/img@sha256:c"
+	podsResource = "pods"
+)
+
+func TestRunProbesGroupsByImageAndRunsEachGroupOnItsImage(t *testing.T) {
+	kube, created := fakeCluster(corev1.PodSucceeded)
+	aud, sink := newAudit(t)
+	logs := podLogs(kube, map[string]runnerapi.Result{"a": {ID: "a"}, "b": {ID: "b"}, "c": {ID: "c"}, "d": {ID: "d"}})
+	withInstall := func(p lastv1alpha1.Probe, argv ...string) lastv1alpha1.Probe {
+		p.Command.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: argv}}}
+		return p
+	}
+	a, b := probeOf("a", "true"), withInstall(probeOf("b", "true"), "apt-get", "install", "jq")
+	c, d := withInstall(probeOf("c", "true"), "apt-get", "install", "yq"), withInstall(probeOf("d", "true"), "apt-get", "install", "jq")
+	if sandbox.ImageKey(a.Command) != "" || sandbox.ImageKey(b.Command) == "" ||
+		sandbox.ImageKey(b.Command) != sandbox.ImageKey(d.Command) || sandbox.ImageKey(b.Command) == sandbox.ImageKey(c.Command) {
+		t.Fatalf("ImageKey: a=%q b=%q c=%q d=%q", sandbox.ImageKey(a.Command), sandbox.ImageKey(b.Command),
+			sandbox.ImageKey(c.Command), sandbox.ImageKey(d.Command))
+	}
+	outs, err := newProbeExec(kube, aud, logs).RunProbes(context.Background(), sandbox.ProbeRunRequest{Actor: testActor,
+		Intent: probeIntent, Probes: []lastv1alpha1.Probe{a, b, c, d},
+		Images: map[string]string{sandbox.ImageKey(b.Command): imgB, sandbox.ImageKey(c.Command): imgC}})
+	if err != nil || len(outs) != 4 || outs[0].ID != "a" || outs[3].ID != "d" {
+		t.Fatalf("outs = %+v, err = %v", outs, err)
+	}
+	if n := countPods(*created); n != 3 {
+		t.Fatalf("created %d pods, want 3", n)
+	}
+	starts, _ := probeEntries(t, sink)
+	got := map[string]string{}
+	for _, s := range starts {
+		var p struct {
+			Image  string                `json:"image"`
+			Probes []struct{ ID string } `json:"probes"`
+		}
+		if err := json.Unmarshal(s.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		got[p.Probes[0].ID] = p.Image
+	}
+	want := map[string]string{"a": probeImage, "b": imgB, "c": imgC}
+	if len(got) != 3 || got["a"] != want["a"] || got["b"] != want["b"] || got["c"] != want["c"] {
+		t.Fatalf("probe.start images = %v, want %v", got, want)
+	}
+	var podImages []string
+	for _, act := range kube.Actions() {
+		if ca, ok := act.(k8stesting.CreateAction); ok && act.GetResource().Resource == "pods" {
+			podImages = append(podImages, ca.GetObject().(*corev1.Pod).Spec.Containers[0].Image)
+		}
+	}
+	slices.Sort(podImages)
+	if !slices.Equal(podImages, []string{probeImage, imgB, imgC}) {
+		t.Fatalf("pod images = %v", podImages)
 	}
 }

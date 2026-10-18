@@ -281,19 +281,6 @@ func TestRunWithKubernetesProviderAllowsTheAPIServer(t *testing.T) {
 	assertCleaned(t, kube)
 }
 
-func TestRunRejectsImageBuildsBeforeAuditing(t *testing.T) {
-	kube, created := fakeCluster(corev1.PodSucceeded)
-	aud, sink := newAudit(t)
-	c := cmd(nil, nil)
-	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", "install", "x"}}}}
-	if _, err := newExec(kube, aud, envelopeLogs()).Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c}); !errors.Is(err, sandbox.ErrImageBuildsUnsupported) {
-		t.Fatalf("err = %v", err)
-	}
-	if len(entryTypes(entries(t, sink))) != 0 || len(*created) != 0 {
-		t.Fatal("rejected command still produced audit entries or objects")
-	}
-}
-
 func TestRunRaisesTheKubernetesTokenTTLAboveThePodLifetime(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodSucceeded, apiServerObjects()...)
 	withSecretUIDs(kube)

@@ -125,7 +125,7 @@ type imageEnv struct {
 	heads atomic.Int32
 }
 
-func newImageEnv(t *testing.T, op *lastv1alpha1.OperatorConfig) *imageEnv {
+func newImageEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Object) *imageEnv {
 	t.Helper()
 	ie := &imageEnv{}
 	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
@@ -137,7 +137,7 @@ func newImageEnv(t *testing.T, op *lastv1alpha1.OperatorConfig) *imageEnv {
 	}))
 	t.Cleanup(ie.srv.Close)
 	ie.host = strings.TrimPrefix(ie.srv.URL, "http://")
-	ie.testEnv = newTestEnv(t, op)
+	ie.testEnv = newTestEnv(t, append([]client.Object{op}, objs...)...)
 	ie.fb = &fakeBuilder{host: ie.host, started: make(chan string, 64)}
 
 	ctx := context.Background()

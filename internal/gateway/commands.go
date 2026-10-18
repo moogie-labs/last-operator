@@ -128,8 +128,22 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
 	}
-	image, err := g.sandboxImage(ctx)
-	if err != nil {
+	var install []lastv1alpha1.ArgvCommand
+	if expected.Image != nil {
+		install = expected.Image.Install
+	}
+	image, err := g.resolveImage(ctx, w, imageRequest{Intent: key, Stage: string(p.stage), Subject: p.subject,
+		Actor: actor, Install: install, Policy: eff})
+	if failed, ok := errors.AsType[errImageBuildFailed](err); ok {
+		p.failed = true
+		return &gatewayv1.RunCommandResponse{Result: &gatewayv1.CommandResult{ExitCode: -1, Error: failed.Error(),
+			Stderr: failed.LogTail}}, nil
+	}
+	if status.Code(err) == codes.FailedPrecondition {
+		p.failed = true
+		return nil, err
+	}
+	if err != nil { // Unavailable or the caller's own context: the step can be retried
 		return nil, err
 	}
 	res, err := g.executor(w, image).Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),

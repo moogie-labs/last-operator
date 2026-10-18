@@ -21,6 +21,22 @@ type ProbeRunRequest struct {
 	Actor  string
 	Intent string
 	Probes []lastv1alpha1.Probe
+	// Images maps ImageKey to the image reference its group runs on; "" or a missing
+	// key means the executor's configured image.
+	Images map[string]string
+}
+
+// ImageKey identifies a command's image spec for grouping: "" without install, else
+// the canonical JSON of its install list.
+func ImageKey(c lastv1alpha1.Command) string {
+	if c.Image == nil || len(c.Image.Install) == 0 {
+		return ""
+	}
+	b, err := audit.Canonical(c.Image.Install)
+	if err != nil { // an argv list always marshals; keep distinct specs distinct anyway
+		return fmt.Sprintf("%#v", c.Image.Install)
+	}
+	return string(b)
 }
 
 // ProbeOutcome is one probe's result. Passed is false whenever Error is set.
@@ -66,7 +82,7 @@ type probeResultPayload struct {
 	CleanupError  string             `json:"cleanupError,omitempty"`
 }
 
-// RunProbes runs probes grouped by identical providers and egress, one pod per group,
+// RunProbes runs probes grouped by identical providers, egress and image, one pod per group,
 // each recorded as a single probe.start/probe.result pair (spec §10.2).
 func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeOutcome, error) {
 	if req.Actor == "" {
@@ -82,7 +98,13 @@ func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeO
 	byID := map[string]ProbeOutcome{}
 	var errs []error
 	for _, group := range groupProbes(req.Probes) {
-		outs, err := e.runProbeGroup(ctx, req.Actor, req.Intent, group)
+		ge := e
+		if img := req.Images[ImageKey(group[0].Command)]; img != "" {
+			c := *e
+			c.cfg.Pod.Image = img
+			ge = &c
+		}
+		outs, err := ge.runProbeGroup(ctx, req.Actor, req.Intent, group)
 		for _, o := range outs {
 			byID[o.ID] = o
 		}
@@ -97,13 +119,16 @@ func (e *Executor) RunProbes(ctx context.Context, req ProbeRunRequest) ([]ProbeO
 	return outcomes, errors.Join(errs...)
 }
 
-// groupProbes groups probes by the set of their providers and the set of their egress
-// (order and duplicates ignored), keeping first-seen order.
+// groupProbes groups probes by the set of their providers, the set of their egress
+// (order and duplicates ignored) and their image spec, keeping first-seen order.
 func groupProbes(probes []lastv1alpha1.Probe) [][]lastv1alpha1.Probe {
 	var keys []string
 	groups := map[string][]lastv1alpha1.Probe{}
 	for _, p := range probes {
-		key, _ := json.Marshal(struct{ P, E []string }{uniqueSorted(p.Command.Providers), uniqueSorted(p.Command.Egress)})
+		key, _ := json.Marshal(struct {
+			P, E []string
+			I    string
+		}{uniqueSorted(p.Command.Providers), uniqueSorted(p.Command.Egress), ImageKey(p.Command)})
 		if _, ok := groups[string(key)]; !ok {
 			keys = append(keys, string(key))
 		}
