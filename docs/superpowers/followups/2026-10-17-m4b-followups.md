@@ -29,10 +29,11 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 ## Before M5 builds on this
 
-- **The final status hides `ImageBuildFailed`.** This behaviour predates M4b and applies to any failed step.
-  - **What happens:** after a step fails, the operator replans. When the model returns the plan that just failed, the gateway refuses it ("plan already opened a phase"), and the Intent's final message no longer shows the original cause.
-  - **The fix belongs in the operator's plan acceptance** (`internal/controller/intent_planning.go`). An identical plan should get a correction turn ("identical to the plan that failed: <feedback>") with a bounded number of attempts. If those run out, the Intent should fail with the original feedback.
-  - **The gateway's message also misleads.** "replan to run it again" is wrong after a replan.
+- **The final status hides `ImageBuildFailed`.** Done in a0e39be and e2b0856. This behaviour predated M4b and applied to any failed step.
+  - **What was wrong:** after a step failed, the operator replanned. When the model returned the plan that just failed, the gateway refused it ("plan already opened a phase"), and the Intent's final message no longer showed the original cause.
+  - **The fix is in the operator's plan acceptance** (`internal/controller/intent_planning.go`). `plan` reads the Intent's used plans from the audit log (`agent.UsedPlans`) and refuses an identical plan with a correction turn ("identical to plan <hash>, which already ran and failed: <feedback>"), within the usual `MaxAttempts`. If those run out, the Intent fails with "The model kept proposing the plan that already failed: <feedback>".
+  - **The gateway's message now reads** "a plan runs only once, so plan a different one".
+  - **A gateway without `QueryAudit`** (Unimplemented) skips the check, and the gateway's replay refusal remains the backstop.
 - **Join audit for a shared failed build.** When Intent B joins Intent A's build flight and the build fails, B's audit trail has only the operator-written `phase.end`, while the `image.build.result` names A. Add a gateway-written entry for B that points at the result's sequence number.
 - **Probe resolves are sequential.** Two uncached specs (2 × up to 35 minutes) can exceed `probeTimeout` (45 minutes). Later runs recover, because the first image is indexed by then. Resolve distinct specs in parallel, up to `maxConcurrentBuilds`.
 - **A shared flight builds with the first caller's policy.** A narrow-policy first caller can fail a build that a wider-policy waiter needed. The audited `egress` field records which policy was used. Document this, or key flights on the effective build egress.
