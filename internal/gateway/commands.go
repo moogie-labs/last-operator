@@ -139,12 +139,10 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		return &gatewayv1.RunCommandResponse{Result: &gatewayv1.CommandResult{ExitCode: -1, Error: failed.Error(),
 			Stderr: failed.LogTail}}, nil
 	}
-	if status.Code(err) == codes.FailedPrecondition {
-		p.failed = true
-		return nil, err
-	}
-	if err != nil { // Unavailable or the caller's own context: the step can be retried
-		return nil, err
+	if err != nil {
+		out, refused := d.imageError(err)
+		p.failed = refused // anything else (Unavailable, context) can be retried
+		return nil, out
 	}
 	res, err := g.executor(w, image).Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
 		SubjectHash: p.subject, AuthorizedBy: p.auth, Command: expected, Priority: priorityFor(p.stage)})

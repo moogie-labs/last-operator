@@ -166,6 +166,17 @@ func (d denial) deny(code codes.Code, format string, args ...any) error {
 	return status.Error(code, reason)
 }
 
+// imageError classifies an image resolve error. A FailedPrecondition or InvalidArgument
+// status is a refusal: it is audited as a denial and returned with refused set. Any
+// other error (Unavailable, the caller's context) is returned as it is.
+func (d denial) imageError(err error) (out error, refused bool) {
+	switch c := status.Code(err); c {
+	case codes.FailedPrecondition, codes.InvalidArgument:
+		return d.deny(c, "image: %s", status.Convert(err).Message()), true
+	}
+	return err, false
+}
+
 // errInvalidPolicy marks a policy that does not resolve; callers audit it as a denial.
 type errInvalidPolicy struct{ error }
 

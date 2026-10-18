@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -259,5 +261,64 @@ func TestDrainWaitsForADetachedBuildFlight(t *testing.T) {
 	}
 	if !ie.g.drain(time.Second) {
 		t.Fatal("drain did not finish after the flight ended")
+	}
+}
+
+// denials returns the reasons of every policy.denied entry.
+func (e *testEnv) denials() []string {
+	payloads := e.startPayloads(audit.TypePolicyDenied)
+	out := make([]string, 0, len(payloads))
+	for _, p := range payloads {
+		out = append(out, p["reason"].(string))
+	}
+	return out
+}
+
+func hostnameEgressOp() *lastv1alpha1.OperatorConfig {
+	return imageOp([]string{"example.com:443"})
+}
+
+func wantImageDenial(t *testing.T, ie *imageEnv) {
+	t.Helper()
+	ds := ie.denials()
+	if len(ds) != 1 || !strings.HasPrefix(ds[0], "image: ") || !strings.Contains(ds[0], "example.com") {
+		t.Fatalf("policy.denied reasons = %v", ds)
+	}
+}
+
+func TestRunCommandAuditsAnImageRefusalAndFailsThePhase(t *testing.T) {
+	ie, in := newImageRunEnv(t, hostnameEgressOp(), imageSteps())
+	h := in.Status.Plan.Hash
+	if _, err := ie.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ie.run(h, in.Status.Plan.Steps[0])
+	wantCode(t, err, codes.FailedPrecondition)
+	wantImageDenial(t, ie)
+	if !ie.g.phases.get(envKey).failed {
+		t.Fatal("an image refusal must fail the phase")
+	}
+}
+
+func TestRunProbesAuditsAnImageRefusal(t *testing.T) {
+	ie, in := newImageRunEnv(t, hostnameEgressOp(), []lastv1alpha1.Command{argvStep("s1", trueBin)}, probesWithImages())
+	executeAll(t, ie.testEnv, in)
+	_, err := ie.probe()
+	wantCode(t, err, codes.FailedPrecondition)
+	wantImageDenial(t, ie)
+	if n := len(ie.startPayloads(audit.TypeProbeStart)); n != 0 {
+		t.Fatalf("probes ran despite the refusal: %d probe.start", n)
+	}
+}
+
+func TestRunProbesMapsAnExecutorStatusErrorLikeAnyOther(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	env.kube.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, status.Error(codes.FailedPrecondition, "pod refused")
+	})
+	resp, err := env.probe()
+	if status.Code(err) != codes.Internal || resp != nil {
+		t.Fatalf("executor status error = %v, %v; want Internal", resp, err)
 	}
 }
