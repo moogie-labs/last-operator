@@ -33,6 +33,12 @@ const (
 	registryGCTimeout = 30 * time.Minute
 	// maxSidecarError bounds the sidecar's answer quoted in a sidecarError.
 	maxSidecarError = 1 << 10
+	// maxSidecarAnswer bounds the sidecar's 200 answer the gateway reads; its log is
+	// at most 64 KiB.
+	maxSidecarAnswer = 1 << 20
+	// defaultGCDeleteTimeout bounds each manifest DELETE, so a hung one cannot hold
+	// builds paused.
+	defaultGCDeleteTimeout = time.Minute
 )
 
 var (
@@ -41,7 +47,8 @@ var (
 )
 
 // imageGCDeleter deletes a manifest by digest; deleting a missing one is not an error.
-// images.Client implements it for the bundled registry.
+// images.Client implements it: with the admin credential through the bundled front
+// proxy, or with the push credential for an external registry.
 type imageGCDeleter interface {
 	Delete(ctx context.Context, repo, digest string) error
 }
@@ -100,7 +107,7 @@ func (g *Gateway) startImageGC(ctx context.Context, w *audit.Writer) bool {
 //  2. pause new builds and wait for running ones;
 //  3. for each candidate still unused, drop it from the index, delete its manifest,
 //     and write image.deleted;
-//  4. call the registry's GC sidecar (when there is one);
+//  4. call the registry's GC sidecar (bundled mode, when there is one);
 //  5. resume builds;
 //  6. write image.gc.result.
 //
@@ -146,13 +153,23 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 		}
 	}
 	slices.Sort(candidates)
+	// An external registry has no sidecar; its own lifecycle policy reclaims storage.
+	callSidecar := !externalRegistry(op) && g.cfg.RegistryGCURL != ""
+	var target registryTarget
 	var deleter imageGCDeleter
 	var admin *images.Credentials
-	if len(candidates) > 0 || g.cfg.RegistryGCURL != "" {
-		if admin, err = g.adminCredential(ctx); err != nil {
+	if len(candidates) > 0 || callSidecar {
+		if target, err = g.registryTarget(ctx, op); err != nil {
 			return gcResult{}, err
 		}
-		deleter = images.NewClient(g.cfg.RegistryFrontHost, admin, true)
+		// External manifests are deleted with the push credential, over HTTPS.
+		deleter = target.client
+		if !target.external {
+			if admin, err = g.adminCredential(ctx); err != nil {
+				return gcResult{}, err
+			}
+			deleter = g.registryClient(g.cfg.RegistryFrontHost, admin, true)
+		}
 	}
 
 	// The audit writes ignore cancellation, so a run that started always records its result.
@@ -178,12 +195,12 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 				res.SidecarError = "not called: " + err.Error()
 				return err
 			}
-			if err := g.deleteImage(ctx, actx, w, deleter, h, entries[h].Digest, cutoff, &res); err != nil {
+			if err := g.deleteImage(ctx, actx, w, deleter, target, h, entries[h].Digest, cutoff, &res); err != nil {
 				res.SidecarError = "not called: " + err.Error()
 				return err
 			}
 		}
-		if g.cfg.RegistryGCURL != "" {
+		if callSidecar {
 			freed, err := g.callRegistryGC(ctx, admin)
 			if err != nil {
 				res.SidecarError = err.Error()
@@ -203,10 +220,13 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 }
 
 // deleteImage drops one candidate, if it is still unused, then deletes its manifest
-// and writes image.deleted. Dropping first means no resolve can hand out the digest
-// once the DELETE is sent; a resolve that used the entry before the drop keeps it.
-// The error is set only when image.deleted could not be written.
-func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, deleter imageGCDeleter,
+// from target and writes image.deleted. Dropping first means no resolve can hand out
+// the digest once the DELETE is sent; a resolve that used the entry before the drop
+// keeps it. Each DELETE gets gcDeleteTimeout. A registry that refuses DELETE (405 or
+// UNSUPPORTED) is recorded as registryDeleted false, like any failure, and the entry
+// stays out of the index. The error is set only when image.deleted could not be
+// written.
+func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, deleter imageGCDeleter, target registryTarget,
 	specHash, digest string, cutoff time.Time, res *gcResult) error {
 	dropped, err := g.images.dropUnused(actx, specHash, digest, cutoff)
 	if err != nil {
@@ -218,12 +238,24 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 		slog.Info("Kept an image used since GC started", "specHash", specHash, "digest", digest)
 		return nil
 	}
-	g.builds.forgetHead(digest)
+	g.builds.forgetHead(target.headKey(digest))
 	rec := imageDeleted{SpecHash: specHash, Digest: digest}
-	if err := deleter.Delete(ctx, images.ImagesRepo, digest); err != nil {
+	timeout := g.gcDeleteTimeout
+	if timeout <= 0 {
+		timeout = defaultGCDeleteTimeout
+	}
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	err = deleter.Delete(dctx, target.repo, digest)
+	cancel()
+	switch {
+	case errors.Is(err, images.ErrDeleteUnsupported):
+		rec.Error = err.Error()
+		slog.Info("Registry refused to delete an unused image's manifest; its lifecycle policy must reclaim it",
+			"specHash", specHash, "digest", digest, "err", err)
+	case err != nil:
 		rec.Error = err.Error()
 		slog.Warn("Could not delete an unused image's manifest", "specHash", specHash, "digest", digest, "err", err)
-	} else {
+	default:
 		rec.RegistryDeleted = true
 		res.Deleted++
 	}
@@ -270,7 +302,7 @@ func (g *Gateway) callRegistryGC(ctx context.Context, admin *images.Credentials)
 		BytesFreed int64  `json:"bytesFreed"`
 		Log        string `json:"log"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSidecarAnswer)).Decode(&reply); err != nil {
 		return 0, fmt.Errorf("registry GC answer: %w", err)
 	}
 	slog.Debug("Registry garbage collection log", "log", reply.Log)

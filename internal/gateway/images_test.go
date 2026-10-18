@@ -52,14 +52,16 @@ const (
 var trueInstall, falseInstall = install([]string{"true"}), install([]string{"false"})
 
 // fakeBuilder pushes a random image to the test registry for each build, so the
-// digest it returns is one the registry has.
+// digest it returns is one the registry has. An external build (not Insecure) is
+// pushed to its PushRef with the push config's credential, through transport.
 type fakeBuilder struct {
-	host     string
-	started  chan string   // receives each build's spec hash as it starts
-	block    chan struct{} // when set, each build waits for one token
-	fail     error         // when set, builds fail with this reason
-	log      string        // the failed build's log
-	buildErr error         // when set, Build returns it (outcome unknown)
+	host      string
+	transport http.RoundTripper
+	started   chan string   // receives each build's spec hash as it starts
+	block     chan struct{} // when set, each build waits for one token
+	fail      error         // when set, builds fail with this reason
+	log       string        // the failed build's log
+	buildErr  error         // when set, Build returns it (outcome unknown)
 
 	mu         sync.Mutex
 	specs      []images.BuildSpec
@@ -70,7 +72,21 @@ type fakeBuilder struct {
 	cancelled  int // builds that saw their context end
 }
 
-func (f *fakeBuilder) Build(ctx context.Context, s images.BuildSpec) (images.BuildOutcome, error) {
+// boundBuilder is the fake builder for one build's pod configuration.
+type boundBuilder struct {
+	f   *fakeBuilder
+	cfg images.BuildPodConfig
+}
+
+func (b boundBuilder) Build(ctx context.Context, s images.BuildSpec) (images.BuildOutcome, error) {
+	return b.f.build(ctx, b.cfg, s)
+}
+
+func (b boundBuilder) ReapOrphans(ctx context.Context, all bool) (int, error) {
+	return b.f.ReapOrphans(ctx, all)
+}
+
+func (f *fakeBuilder) build(ctx context.Context, cfg images.BuildPodConfig, s images.BuildSpec) (images.BuildOutcome, error) {
 	f.mu.Lock()
 	f.specs = append(f.specs, s)
 	f.running++
@@ -98,7 +114,19 @@ func (f *fakeBuilder) Build(ctx context.Context, s images.BuildSpec) (images.Bui
 	if err != nil {
 		return images.BuildOutcome{}, err
 	}
-	digest, err := images.NewClient(f.host, nil, true).Push(ctx, images.ImagesRepo, images.Tag(s.SpecHash), img)
+	pushTo, repo := images.NewClient(f.host, nil, true), images.ImagesRepo
+	if !cfg.Insecure {
+		host, path, err := images.ParseRepository(cfg.PushRef)
+		if err != nil {
+			return images.BuildOutcome{}, err
+		}
+		creds, err := images.CredentialsFor(s.PushConfig, host)
+		if err != nil {
+			return images.BuildOutcome{}, err
+		}
+		pushTo, repo = images.NewClient(host, creds, false).WithTransport(f.transport), path
+	}
+	digest, err := pushTo.Push(ctx, repo, images.Tag(s.SpecHash), img)
 	if err != nil {
 		return images.BuildOutcome{}, err
 	}
@@ -204,7 +232,7 @@ func newImageEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.O
 		ie.fb.mu.Lock()
 		defer ie.fb.mu.Unlock()
 		ie.fb.cfgs = append(ie.fb.cfgs, cfg)
-		return ie.fb
+		return boundBuilder{f: ie.fb, cfg: cfg}
 	}
 	return ie
 }
@@ -638,11 +666,11 @@ func TestResolveRefuses(t *testing.T) {
 		op         *lastv1alpha1.OperatorConfig
 	}{
 		{name: "unpinned base", op: allowAll(), want: "image builds need OperatorConfig.sandbox.baseImage pinned by digest"},
-		{name: "external registry", op: func() *lastv1alpha1.OperatorConfig {
+		{name: "external registry without its settings", op: func() *lastv1alpha1.OperatorConfig {
 			op := imageOp(nil)
 			op.Spec.Registry = &lastv1alpha1.RegistryConfig{Mode: lastv1alpha1.RegistryExternal}
 			return op
-		}(), want: "external"},
+		}(), want: "registry.external"},
 		{name: "hostname in buildEgress", op: imageOp([]string{hostEgress}), want: hostEgress},
 		{name: "grant covers a canary", op: imageOp([]string{"10.96.0.0/16:8080"}, "10.96.0.0/16:8080"), want: testCanary},
 	} {

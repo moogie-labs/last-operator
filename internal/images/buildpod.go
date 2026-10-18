@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,11 @@ func BuildObjects(cfg BuildPodConfig, b BuildSpec, expires time.Time) (*corev1.S
 	}
 	if _, err := pushSecrets(b.PushConfig); err != nil {
 		return nil, nil, nil, err
+	}
+	if !cfg.Insecure {
+		if _, _, err := ParseRepository(cfg.PushRef); err != nil {
+			return nil, nil, nil, fmt.Errorf("push target: %w", err)
+		}
 	}
 	toml, output := "# No registry overrides: the push target is reached over HTTPS.\n", cfg.PushRef+":"+Tag(b.SpecHash)+",push=true"
 	if cfg.Insecure {
@@ -264,4 +270,33 @@ func buildPod(cfg BuildPodConfig, name, id, secretName string, timeoutSeconds in
 			},
 		},
 	}
+}
+
+// maxRepositoryLen bounds an external repository reference (host and path).
+const maxRepositoryLen = 255
+
+// repositoryPattern is an external repository: a registry host (DNS name or IPv4
+// address, with an optional port) and a path of lowercase OCI name components. It
+// admits no scheme, credential, tag, digest, whitespace, comma, quote or shell
+// metacharacter, because the reference reaches a shell script and BuildKit's
+// comma-separated --output.
+var repositoryPattern = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::[0-9]{1,5})?)` +
+	`/([a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*)$`)
+
+// errBadRepository never quotes the value: an operator may have pasted a URL with a
+// credential in it.
+var errBadRepository = errors.New(`repository must be "host[:port]/path": a registry host, then a lowercase path, ` +
+	"with no scheme, credential, tag, whitespace, comma, quote or shell metacharacter")
+
+// ParseRepository splits an external repository ("host[:port]/path") into its
+// registry host, the first path segment, and the repository path on that host.
+func ParseRepository(repository string) (host, path string, err error) {
+	if len(repository) > maxRepositoryLen {
+		return "", "", errBadRepository
+	}
+	m := repositoryPattern.FindStringSubmatch(repository)
+	if m == nil {
+		return "", "", errBadRepository
+	}
+	return m[1], m[2], nil
 }

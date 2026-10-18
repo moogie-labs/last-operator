@@ -82,13 +82,35 @@ func (g *Gateway) providerGetter(ctx context.Context, name string) (*lastv1alpha
 }
 
 // executor builds a sandbox executor for one RPC; every executor shares the
-// scheduler. Its pods run on image and start the runner copied from base, the
-// pinned sandbox base (spec §11.1).
-func (g *Gateway) executor(w *audit.Writer, base, image string) *sandbox.Executor {
+// scheduler. Its pods run on image, start the runner copied from base, the pinned
+// sandbox base (spec §11.1), and pull with pullSecrets.
+func (g *Gateway) executor(w *audit.Writer, base, image string, pullSecrets ...string) *sandbox.Executor {
 	cfg := g.execCfg
 	cfg.Pod.Image = image
 	cfg.Pod.RunnerImage = base
+	cfg.Pod.ImagePullSecrets = pullSecrets
 	return sandbox.NewExecutor(g.kube, g.providerGetter, w, g.sched.Load(), g.logs, cfg)
+}
+
+// runExecutor is executor for a sandbox run. In registry.mode external it first
+// copies the pull Secret into the sandbox namespace, and the run's pods pull with
+// it. Errors are ensurePullSecret's, or Unavailable when OperatorConfig cannot be read.
+func (g *Gateway) runExecutor(ctx context.Context, w *audit.Writer, base, image string) (*sandbox.Executor, error) {
+	op, err := g.operatorConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !externalRegistry(op) {
+		return g.executor(w, base, image), nil
+	}
+	ext, err := externalSettings(op)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.ensurePullSecret(ctx, ext); err != nil {
+		return nil, err
+	}
+	return g.executor(w, base, image, registryPullSecret), nil
 }
 
 // operatorConfig returns the cluster OperatorConfig, or nil when none exists.

@@ -2,9 +2,11 @@ package images_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -133,5 +135,65 @@ func TestHeadReportsAuthFailures(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), pusherPW) {
 		t.Fatalf("error leaks the password: %v", err)
+	}
+}
+
+// A client that is not insecure never falls back to plain HTTP, even for a loopback
+// or private host where go-containerregistry would, so its credential never travels
+// in the clear.
+func TestAnHTTPSClientNeverFallsBackToHTTP(t *testing.T) {
+	var sawAuth atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			sawAuth.Store(true)
+		}
+		registry.New().ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	digest := "sha256:" + strings.Repeat("0", 64)
+	found, err := images.NewClient(host, pusher, false).Head(context.Background(), "team/app", digest)
+	if err == nil || found {
+		t.Fatalf("Head over plain HTTP = %v, %v; want an error", found, err)
+	}
+	if err := images.NewClient(host, pusher, false).Delete(context.Background(), "team/app", digest); err == nil {
+		t.Fatal("Delete over plain HTTP succeeded")
+	}
+	if sawAuth.Load() {
+		t.Fatal("the credential was sent over plain HTTP")
+	}
+}
+
+func TestDeleteReportsARegistryThatRefusesDelete(t *testing.T) {
+	for name, refuse := range map[string]func(w http.ResponseWriter){
+		"405": func(w http.ResponseWriter) { w.WriteHeader(http.StatusMethodNotAllowed) },
+		"UNSUPPORTED": func(w http.ResponseWriter) {
+			http.Error(w, `{"errors":[{"code":"UNSUPPORTED"}]}`, http.StatusBadRequest)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					refuse(w)
+					return
+				}
+				registry.New().ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			err := images.NewClient(strings.TrimPrefix(srv.URL, "http://"), admin, true).
+				Delete(context.Background(), "team/app", "sha256:"+strings.Repeat("0", 64))
+			if !errors.Is(err, images.ErrDeleteUnsupported) {
+				t.Fatalf("Delete = %v, want ErrDeleteUnsupported", err)
+			}
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	err := images.NewClient(strings.TrimPrefix(srv.URL, "http://"), admin, true).
+		Delete(context.Background(), "team/app", "sha256:"+strings.Repeat("0", 64))
+	if err == nil || errors.Is(err, images.ErrDeleteUnsupported) {
+		t.Fatalf("Delete answered 500 = %v, want an ordinary error", err)
 	}
 }

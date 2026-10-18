@@ -77,7 +77,7 @@ rules:
     verbs: [get]
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [create, list, delete]
+    verbs: [get, create, list, delete]   # get: compare the last-registry-pull copy (external registry)
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
     verbs: [create, list, delete]

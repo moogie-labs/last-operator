@@ -58,7 +58,9 @@ type Builder struct {
 	now       func() time.Time
 }
 
-// NewBuilder returns a Builder. registry is used for anonymous manifest HEADs.
+// NewBuilder returns a Builder. registry is the bundled front proxy's anonymous
+// client, which confirms bundled builds; an external build is confirmed through a
+// client derived from it (same transport) for the push target.
 func NewBuilder(kube kubernetes.Interface, logs sandbox.LogReader, registry *Client, cfg BuildPodConfig) *Builder {
 	return &Builder{kube: kube, logs: logs, registry: registry, cfg: cfg, poll: time.Second, waitSlack: buildWaitSlack, now: time.Now}
 }
@@ -147,7 +149,11 @@ func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) 
 	if !digestPattern.MatchString(digest) {
 		return fail("build metadata has no valid %s", metadataDigest)
 	}
-	found, err := b.registry.Head(ctx, ImagesRepo, digest)
+	reg, repo, err := b.pushedTo(s)
+	if err != nil {
+		return BuildOutcome{}, fmt.Errorf("images: confirm built digest %s: %w", digest, err)
+	}
+	found, err := reg.Head(ctx, repo, digest)
 	if err != nil {
 		return BuildOutcome{}, fmt.Errorf("images: confirm built digest %s: %w", digest, err)
 	}
@@ -157,6 +163,24 @@ func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) 
 	out.Digest = digest
 	out.Duration = b.now().Sub(start)
 	return out, nil
+}
+
+// pushedTo is where a build's digest is confirmed: the bundled registry through the
+// anonymous front-proxy client, or the external repository in PushRef, over HTTPS,
+// with the push config's credential for its host.
+func (b *Builder) pushedTo(s BuildSpec) (*Client, string, error) {
+	if b.cfg.Insecure {
+		return b.registry, ImagesRepo, nil
+	}
+	host, repo, err := ParseRepository(b.cfg.PushRef)
+	if err != nil {
+		return nil, "", err
+	}
+	creds, err := CredentialsFor(s.PushConfig, host)
+	if err != nil {
+		return nil, "", err
+	}
+	return b.registry.WithTarget(host, creds, false), repo, nil
 }
 
 // cleanup deletes every object of the build, ignoring the caller's cancellation so the

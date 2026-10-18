@@ -104,7 +104,12 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		out, _ := d.imageError(err)
 		return nil, out
 	}
-	outs, err := g.runProbeImages(ctx, w, image, actor, key, probes, refs, buildFailed)
+	ex, err := g.runExecutor(ctx, w, image, image)
+	if err != nil {
+		out, _ := d.imageError(err)
+		return nil, out
+	}
+	outs, err := g.runProbeImages(ctx, ex, actor, key, probes, refs, buildFailed)
 	if err != nil {
 		if errors.Is(err, audit.ErrAuditUnavailable) {
 			return nil, status.Errorf(codes.Unavailable, "probe run: %v", err)
@@ -154,9 +159,9 @@ func (g *Gateway) resolveProbeImages(ctx context.Context, w *audit.Writer, req i
 	return refs, buildFailed, nil
 }
 
-// runProbeImages runs the probes whose build did not fail on their images; a failed
-// build fails its probes. Outcomes follow probe order.
-func (g *Gateway) runProbeImages(ctx context.Context, w *audit.Writer, base, actor, intent string, probes []lastv1alpha1.Probe,
+// runProbeImages runs, with ex, the probes whose build did not fail on their images;
+// a failed build fails its probes. Outcomes follow probe order.
+func (g *Gateway) runProbeImages(ctx context.Context, ex *sandbox.Executor, actor, intent string, probes []lastv1alpha1.Probe,
 	refs map[string]string, buildFailed map[string]errImageBuildFailed) ([]sandbox.ProbeOutcome, error) {
 	var runnable []lastv1alpha1.Probe
 	for _, p := range probes {
@@ -167,7 +172,7 @@ func (g *Gateway) runProbeImages(ctx context.Context, w *audit.Writer, base, act
 	var ran []sandbox.ProbeOutcome
 	if len(runnable) > 0 {
 		var err error
-		ran, err = g.executor(w, base, base).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: actor, Intent: intent, Probes: runnable, Images: refs})
+		ran, err = ex.RunProbes(ctx, sandbox.ProbeRunRequest{Actor: actor, Intent: intent, Probes: runnable, Images: refs})
 		if err != nil {
 			return nil, err
 		}

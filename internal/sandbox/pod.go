@@ -113,7 +113,10 @@ type PodConfig struct {
 	// command without install steps it equals Image.
 	RunnerImage     string
 	ImagePullPolicy corev1.PullPolicy
-	Resources       corev1.ResourceRequirements
+	// ImagePullSecrets name Secrets in Namespace that both containers pull with:
+	// the copied external registry pull secret, or none for the bundled registry.
+	ImagePullSecrets []string
+	Resources        corev1.ResourceRequirements
 }
 
 // SandboxPod builds the locked-down pod for a run (spec §11.1).
@@ -156,6 +159,13 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 	)
 	volumes = append(volumes, creds.Volumes...)
 	env := append([]corev1.EnvVar{{Name: "HOME", Value: "/work"}}, creds.Env...)
+	var pullSecrets []corev1.LocalObjectReference // nil, not empty, without any
+	if len(cfg.ImagePullSecrets) > 0 {
+		pullSecrets = make([]corev1.LocalObjectReference, 0, len(cfg.ImagePullSecrets))
+	}
+	for _, name := range cfg.ImagePullSecrets {
+		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: name})
+	}
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "last-run-" + runID, Namespace: cfg.Namespace, Labels: labels},
@@ -169,6 +179,7 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 			HostIPC:                      false,
 			ShareProcessNamespace:        &no,
 			ActiveDeadlineSeconds:        &deadlineSecs,
+			ImagePullSecrets:             pullSecrets,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},

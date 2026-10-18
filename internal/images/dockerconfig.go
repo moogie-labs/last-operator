@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -56,26 +57,45 @@ func keyHost(key string) string {
 }
 
 // CredentialsFor returns the basic credentials a Docker config JSON holds for host
-// ("auths"[key].auth, base64 "user:pass"), or nil when it has none. An exact key
-// match wins; otherwise a key that is host with an "http(s)://" scheme and/or a
-// path ("https://host", "host/v1/") matches. The password may contain colons.
+// ("auths"[key].auth, base64 "user:pass", or plain username and password), or nil
+// when it has none. An exact key match wins. Otherwise the keys that are host with an
+// "http(s)://" scheme and/or a path ("https://host", "host/v1/") are tried in sorted
+// order; two of them holding different credentials is an error. The password may
+// contain colons. Error text never includes a credential.
 func CredentialsFor(dockerConfig []byte, host string) (*Credentials, error) {
 	var cfg dockerConfigFile
 	if err := json.Unmarshal(dockerConfig, &cfg); err != nil {
 		return nil, errors.New("docker config is not valid JSON")
 	}
-	entry, ok := cfg.Auths[host]
-	if !ok {
-		for key, e := range cfg.Auths {
-			if keyHost(key) == host {
-				entry, ok = e, true
-				break
-			}
+	if entry, ok := cfg.Auths[host]; ok {
+		return entryCredentials(entry, host)
+	}
+	keys := make([]string, 0, len(cfg.Auths))
+	for key := range cfg.Auths {
+		if keyHost(key) == host {
+			keys = append(keys, key)
 		}
 	}
-	if !ok {
-		return nil, nil
+	slices.Sort(keys)
+	var found *Credentials
+	for _, key := range keys {
+		c, err := entryCredentials(cfg.Auths[key], host)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case c == nil:
+		case found == nil:
+			found = c
+		case *c != *found:
+			return nil, fmt.Errorf("docker config holds different credentials for %s under more than one key", host)
+		}
 	}
+	return found, nil
+}
+
+// entryCredentials decodes one auths entry; an entry without a credential is nil.
+func entryCredentials(entry dockerAuth, host string) (*Credentials, error) {
 	if entry.Auth == "" {
 		if entry.Username != "" || entry.Password != "" {
 			return &Credentials{Username: entry.Username, Password: entry.Password}, nil

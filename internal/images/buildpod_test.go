@@ -361,3 +361,43 @@ func TestBuildObjectsRejectAMalformedPushConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRepository(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"reg.example/last-images":           {"reg.example", "last-images"},
+		"reg.example:5443/team/last_images": {"reg.example:5443", "team/last_images"},
+		extRef:                              {"123.dkr.ecr.us-east-1.amazonaws.com", "last-images"},
+		"ghcr.io/acme/tools.images/a__b":    {"ghcr.io", "acme/tools.images/a__b"},
+		"10.0.0.5:5000/last/images":         {"10.0.0.5:5000", "last/images"},
+	} {
+		host, path, err := images.ParseRepository(in)
+		if err != nil || host != want[0] || path != want[1] {
+			t.Errorf("ParseRepository(%q) = %q, %q, %v; want %q, %q", in, host, path, err, want[0], want[1])
+		}
+	}
+	for _, in := range []string{
+		"", exampleHost, "reg.example/", "/last-images", "reg.example//x", "reg.example/x/",
+		"https://reg.example/x", "user:hunter2@reg.example/x", "reg.example/x y", "reg.example/x\ty", " reg.example/x",
+		"reg.example/x,push=false", `reg.example/x"`, "reg.example/x'", "reg.example/x;id", "reg.example/$(id)",
+		"reg.example/x`id`", "reg.example/x|y", "reg.example/x&y", "reg.example/x>y", "reg.example/x\ny",
+		"reg.example/X", "reg.example/x:tag", "reg.example/x@sha256:abc", "reg.example:port/x", "reg_example/x",
+		"reg.example/" + strings.Repeat("a", 256),
+	} {
+		_, _, err := images.ParseRepository(in)
+		if err == nil {
+			t.Errorf("ParseRepository(%q) succeeded, want an error", in)
+			continue
+		}
+		if in != "" && strings.Contains(err.Error(), in) || strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("ParseRepository(%q) error %q echoes the value", in, err)
+		}
+	}
+}
+
+func TestBuildObjectsRejectAnInvalidExternalRepository(t *testing.T) {
+	cfg := testCfg()
+	cfg.PushRef, cfg.Insecure = "reg.example/x,push=false", false
+	if _, _, _, err := images.BuildObjects(cfg, testBuild(), time.Unix(2000, 0)); err == nil {
+		t.Fatal("BuildObjects accepted a repository that would rewrite BuildKit's --output")
+	}
+}

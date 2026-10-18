@@ -38,13 +38,23 @@ func withInstall(c lastv1alpha1.Command, inst []lastv1alpha1.ArgvCommand) lastv1
 	return c
 }
 
-// podImages is the image of every sandbox pod created so far.
-func (e *testEnv) podImages() []string {
-	var out []string
+// createdPods is every sandbox pod created so far, in order.
+func (e *testEnv) createdPods() []*corev1.Pod {
+	var out []*corev1.Pod
 	for _, act := range e.kube.Actions() {
 		if ca, ok := act.(k8stesting.CreateAction); ok && act.GetResource().Resource == "pods" {
-			out = append(out, ca.GetObject().(*corev1.Pod).Spec.Containers[0].Image)
+			out = append(out, ca.GetObject().(*corev1.Pod))
 		}
+	}
+	return out
+}
+
+// podImages is the image of every sandbox pod created so far.
+func (e *testEnv) podImages() []string {
+	pods := e.createdPods()
+	out := make([]string, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, p.Spec.Containers[0].Image)
 	}
 	return out
 }
@@ -53,15 +63,14 @@ func (e *testEnv) podImages() []string {
 // copied from; it fails the test unless every pod starts that copy.
 func (e *testEnv) podRunners() []string {
 	e.t.Helper()
-	var out []string
-	for _, act := range e.kube.Actions() {
-		if ca, ok := act.(k8stesting.CreateAction); ok && act.GetResource().Resource == "pods" {
-			spec := ca.GetObject().(*corev1.Pod).Spec
-			if len(spec.InitContainers) != 1 || !slices.Equal(spec.Containers[0].Command, []string{"/last-bin/sandbox-runner"}) {
-				e.t.Fatalf("pod does not start the copied runner: init %+v, command %v", spec.InitContainers, spec.Containers[0].Command)
-			}
-			out = append(out, spec.InitContainers[0].Image)
+	pods := e.createdPods()
+	out := make([]string, 0, len(pods))
+	for _, p := range pods {
+		spec := p.Spec
+		if len(spec.InitContainers) != 1 || !slices.Equal(spec.Containers[0].Command, []string{"/last-bin/sandbox-runner"}) {
+			e.t.Fatalf("pod does not start the copied runner: init %+v, command %v", spec.InitContainers, spec.Containers[0].Command)
 		}
+		out = append(out, spec.InitContainers[0].Image)
 	}
 	return out
 }

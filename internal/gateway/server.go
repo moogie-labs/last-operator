@@ -49,12 +49,19 @@ type Gateway struct {
 	index   auditIndex
 	images  *imageIndex // built-image digest cache
 	builds  *imageBuilds
-	// registry is an anonymous client for the front proxy: manifest HEADs.
+	// registry is an anonymous client for the bundled front proxy: manifest HEADs.
 	registry *images.Client
 	// newBuilder returns the builder for one build's pod configuration; tests replace it.
 	newBuilder func(images.BuildPodConfig) imageBuilder
+	// registryTransport, when set, carries every registry request (tests trust their
+	// own TLS certificate with it); nil means the default transport.
+	registryTransport http.RoundTripper
 	// gcMu is held for the length of an image GC run: one at a time.
 	gcMu sync.Mutex
+	// gcDeleteTimeout bounds each manifest DELETE of an image GC run.
+	gcDeleteTimeout time.Duration
+	// pullMu serializes copies of the external registry's pull Secret.
+	pullMu sync.Mutex
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -65,7 +72,7 @@ func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Si
 	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
 		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace),
 		images: newImageIndex(kube, cfg.Namespace), builds: newImageBuilds(),
-		registry: images.NewClient(cfg.RegistryFrontHost, nil, true)}
+		registry: images.NewClient(cfg.RegistryFrontHost, nil, true), gcDeleteTimeout: defaultGCDeleteTimeout}
 	g.builds.track = &g.inflight
 	g.newBuilder = func(c images.BuildPodConfig) imageBuilder {
 		return images.NewBuilder(g.kube, g.logs, g.registry, c)

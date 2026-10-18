@@ -149,7 +149,13 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = refused // anything else (Unavailable, context) can be retried
 		return nil, out
 	}
-	res, err := g.executor(w, base, image).Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
+	ex, err := g.runExecutor(ctx, w, base, image)
+	if err != nil {
+		out, refused := d.imageError(err)
+		p.failed = refused
+		return nil, out
+	}
+	res, err := ex.Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
 		SubjectHash: p.subject, AuthorizedBy: p.auth, Command: expected, Priority: priorityFor(p.stage)})
 	if err != nil {
 		// The outcome may not be recorded: withhold any output, and stop the phase.

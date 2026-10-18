@@ -154,6 +154,20 @@ func TestSandboxPodStartsTheRunnerFromTheBase(t *testing.T) {
 	}
 }
 
+// Both containers pull through the pod's imagePullSecrets: an external registry's
+// built image and a base kept there alike.
+func TestSandboxPodListsItsImagePullSecrets(t *testing.T) {
+	cfg := sandbox.PodConfig{Namespace: lastSandboxNS, Image: testImage, RunnerImage: testImage}
+	if pod := sandbox.SandboxPod(cfg, testRunID, sandbox.Materialized{}, time.Minute); pod.Spec.ImagePullSecrets != nil {
+		t.Fatalf("imagePullSecrets = %+v, want none by default", pod.Spec.ImagePullSecrets)
+	}
+	cfg.ImagePullSecrets = []string{"last-registry-pull"}
+	pod := sandbox.SandboxPod(cfg, testRunID, sandbox.Materialized{}, time.Minute)
+	if !slices.Equal(pod.Spec.ImagePullSecrets, []corev1.LocalObjectReference{{Name: "last-registry-pull"}}) {
+		t.Fatalf("imagePullSecrets = %+v, want last-registry-pull", pod.Spec.ImagePullSecrets)
+	}
+}
+
 // checkRunnerCopySecurity checks the runner-copy init container: non-root,
 // RuntimeDefault seccomp, AppArmor left to the runtime, nothing to escalate.
 func checkRunnerCopySecurity(t *testing.T, sc *corev1.SecurityContext) {

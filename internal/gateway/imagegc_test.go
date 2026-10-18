@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,7 @@ type gcEnv struct {
 	called  chan struct{}                 // receives once per sidecar call, as it arrives
 	status  atomic.Int32                  // when set, the sidecar answers with it
 	release atomic.Pointer[chan struct{}] // when set, each sidecar call waits for it to close
+	answer  atomic.Pointer[string]        // when set, the sidecar answers 200 with it
 }
 
 func newGCEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Object) *gcEnv {
@@ -71,6 +73,10 @@ func newGCEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Obje
 		}
 		if code := ge.status.Load(); code != 0 {
 			http.Error(w, "garbage-collect exited 1", int(code))
+			return
+		}
+		if answer := ge.answer.Load(); answer != nil {
+			_, _ = io.WriteString(w, *answer)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"bytesFreed": testBytesFreed, "log": "blob eligible for deletion"})

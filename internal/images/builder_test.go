@@ -18,6 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/moogie-labs/last-operator/internal/images"
+	"github.com/moogie-labs/last-operator/internal/images/imagestest"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
@@ -335,4 +336,40 @@ func TestBuilderRedactsEveryPushConfigCredential(t *testing.T) {
 			t.Fatalf("%q leaked: log %q err %v", leak, out.Log, out.Err)
 		}
 	}
+}
+
+// An external build is confirmed in the repository it pushed to, with the push
+// credential, over HTTPS: never in the bundled registry.
+func TestBuildConfirmsAnExternalPushInItsRepository(t *testing.T) {
+	ext := imagestest.New(t, "robot", "ext-s3cret")
+	const repo = "acme/last-images"
+	digest := ext.Push(t, repo)
+	cfg := testCfg()
+	cfg.PushRef, cfg.Insecure = ext.Host+"/"+repo, false
+	b := testBuild()
+	b.PushConfig = images.DockerConfig(ext.Host, ext.User, ext.Password)
+	// The bundled client points elsewhere: an external build must not use it.
+	bundled, _ := pushed(t)
+	bundled = bundled.WithTransport(ext.Transport)
+
+	ext.Heads.Store(0)
+	kube := buildKube(corev1.PodSucceeded)
+	out, err := images.NewBuilder(kube, fixedLogs(envelopeLog(runnerapi.Result{Stdout: meta(digest)})), bundled, cfg).
+		Build(context.Background(), b)
+	if err != nil || out.Err != nil || out.Digest != digest {
+		t.Fatalf("Build = %+v, %v; want digest %s", out, err, digest)
+	}
+	if ext.Heads.Load() != 1 {
+		t.Fatalf("%d authenticated HEADs at the external registry, want 1", ext.Heads.Load())
+	}
+	assertClean(t, kube)
+
+	missing := "sha256:" + strings.Repeat("e", 64)
+	kube = buildKube(corev1.PodSucceeded)
+	out, err = images.NewBuilder(kube, fixedLogs(envelopeLog(runnerapi.Result{Stdout: meta(missing)})), bundled, cfg).
+		Build(context.Background(), b)
+	if err != nil || out.Err == nil || !strings.Contains(out.Err.Error(), "not in the registry") || out.Digest != "" {
+		t.Fatalf("Build = %+v, %v; want a failed build for a digest the repository lacks", out, err)
+	}
+	assertClean(t, kube)
 }

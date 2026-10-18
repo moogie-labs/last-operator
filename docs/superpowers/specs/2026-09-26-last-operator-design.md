@@ -1117,7 +1117,7 @@ is deleted.
   3. For each candidate that is still unused:
      - drop it from the image index;
      - delete its manifest through the front proxy with the admin
-       credential;
+       credential, waiting at most a minute;
      - write `image.deleted`
        `{"specHash", "digest", "registryDeleted": bool, "error"}`.
 
@@ -1125,7 +1125,8 @@ is deleted.
   4. Call the **GC sidecar** in the registry pod: `POST /gc` with the
      admin credential, waiting up to 30 minutes. It shares the PVC,
      runs `registry garbage-collect`, answers
-     `{"bytesFreed", "log"}`, and is reachable only from the gateway.
+     `{"bytesFreed", "log"}` (the gateway reads at most 1 MiB of it),
+     and is reachable only from the gateway.
      The chart sets `LAST_REGISTRY_GC_URL` only for the bundled
      registry; without it there is no call and no bytes are freed.
   5. Resume builds.
@@ -1152,9 +1153,49 @@ is deleted.
   Autopilot) must use an external registry.
 
 **External (optional).** `registry.mode: external` points at a
-repository in ECR, GHCR, Harbor, or similar. The gateway uses
-`pushSecretRef` to push and delete. Sandbox pods use `pullSecretRef` as
-an `imagePullSecret`.
+repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
+`pullSecretRef` name `kubernetes.io/dockerconfigjson` Secrets (key
+`.dockerconfigjson`) in the gateway namespace.
+
+- **Repository.** `host[:port]/path`, where the first path segment is
+  the registry host. It may not carry a scheme, a credential, a tag,
+  whitespace, a comma, a quote or a shell metacharacter, because it
+  reaches the build script and BuildKit's comma-separated `--output`.
+  Anything else is `FailedPrecondition` naming
+  `registry.external.repository`, without echoing the value.
+- **Builds** push to `<repository>:sha256-<hex>`. The push Secret's
+  config becomes the build's `/work/.docker/config.json`, with no
+  `http = true`, and the base is used unchanged. Build egress gets no
+  front-proxy rule: `images.buildEgress` must list the registry's
+  CIDRs. The builder confirms the pushed digest in `<repository>`, over
+  HTTPS, with the push config's credential for the registry host.
+- **Push Secret.** The gateway reads it for each resolve. A missing
+  Secret, a missing `.dockerconfigjson`, or a config with no credential
+  for the registry host is `FailedPrecondition` naming
+  `registry.external.pushSecretRef`, audited as a `policy.denied` on
+  `RunCommand` and `RunProbes`. A config's credential for a host is its
+  exact `auths` key if there is one; otherwise the keys that normalise
+  to the host (`https://host`, `host/v1/`), in sorted order. Two of
+  them holding different credentials is an error.
+- **Runs** use `<repository>@<digest>`. The gateway checks manifests
+  with HEAD, using the push credential over HTTPS. The HEAD cache is
+  keyed by registry, repository and digest.
+- **Pull Secret.** Before every sandbox run in external mode, the
+  gateway copies `pullSecretRef` to `last-sandbox/last-registry-pull`.
+  It creates the copy, or deletes and recreates it when it differs, so
+  a rotated pull Secret reaches the next run; the `last-gateway-sandbox`
+  Role has `get` on Secrets for the comparison. Every sandbox pod lists
+  the copy in `imagePullSecrets`, which covers both its containers.
+- **GC** deletes manifests with the push credential over HTTPS, each
+  DELETE bounded to a minute (in both modes). Many registries (ECR,
+  GHCR among them) refuse DELETE with a 405 or an error code
+  `UNSUPPORTED`. GC then records `image.deleted` with
+  `registryDeleted: false` and the refusal in `error`, and the entry
+  still leaves the index; the registry's own lifecycle policy reclaims
+  the storage. There is no sidecar call, so `bytesFreed` is 0.
+- **Switching modes** needs no migration. The image index and the HEAD
+  cache serve both modes. An entry whose digest the current registry
+  lacks fails its HEAD, leaves the index, and is rebuilt there.
 
 ## 12. LLM providers
 

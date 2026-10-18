@@ -15,6 +15,8 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -103,7 +105,7 @@ type imageBuilds struct {
 	flights map[string]*imageFlight
 	stopped bool // set by stop: no new flight starts
 	sem     chan struct{}
-	heads   map[string]time.Time // digest -> when its HEAD must be repeated
+	heads   map[string]time.Time // headKey -> when its HEAD must be repeated
 	// active counts builds holding a slot, of whichever semaphore they took it from.
 	active int
 	// paused is set by pause: acquire waits until resumed is closed. idle, when set,
@@ -218,14 +220,16 @@ func (b *imageBuilds) pause(ctx context.Context) (resume func(), err error) {
 	return resume, nil
 }
 
-func (b *imageBuilds) headCached(digest string) bool {
+// The HEAD cache is keyed by registryTarget.headKey (registry, repository and
+// digest), so a HEAD that succeeded in one registry never vouches for another.
+func (b *imageBuilds) headCached(key string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	exp, ok := b.heads[digest]
+	exp, ok := b.heads[key]
 	return ok && b.now().Before(exp)
 }
 
-func (b *imageBuilds) cacheHead(digest string) {
+func (b *imageBuilds) cacheHead(key string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
@@ -234,14 +238,14 @@ func (b *imageBuilds) cacheHead(digest string) {
 			delete(b.heads, d)
 		}
 	}
-	b.heads[digest] = now.Add(headCacheTTL)
+	b.heads[key] = now.Add(headCacheTTL)
 }
 
 // forgetHead drops a cached HEAD, for a manifest the gateway deleted.
-func (b *imageBuilds) forgetHead(digest string) {
+func (b *imageBuilds) forgetHead(key string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.heads, digest)
+	delete(b.heads, key)
 }
 
 // do runs fn once per key at a time: callers that arrive while it runs share its
@@ -325,10 +329,11 @@ func (b *imageBuilds) leave(key string, f *imageFlight) {
 }
 
 // resolveImage returns the reference a command runs on: the base when install is empty,
-// else "<pullHost>/last/images@<digest>", building it (single flight, capped) when needed.
-// gRPC errors: FailedPrecondition (unpinned base, external mode, hostname in buildEgress,
-// a grant covering a canary), Unavailable (registry or Kubernetes errors);
-// errImageBuildFailed for a failed build.
+// else "<pullHost>/last/images@<digest>" (bundled registry) or "<repository>@<digest>"
+// (external), building it (single flight, capped) when needed.
+// gRPC errors: FailedPrecondition (unpinned base, an invalid external repository or
+// push Secret, hostname in buildEgress, a grant covering a canary), Unavailable
+// (registry or Kubernetes errors); errImageBuildFailed for a failed build.
 func (g *Gateway) resolveImage(ctx context.Context, w *audit.Writer, req imageRequest) (string, error) {
 	base, err := g.sandboxImage(ctx)
 	if err != nil {
@@ -346,9 +351,6 @@ func (g *Gateway) resolveImageOn(ctx context.Context, w *audit.Writer, base stri
 	if err != nil {
 		return "", err
 	}
-	if op != nil && op.Spec.Registry != nil && op.Spec.Registry.Mode == lastv1alpha1.RegistryExternal {
-		return "", status.Error(codes.FailedPrecondition, "image builds do not support registry.mode external yet; use the bundled registry")
-	}
 	baseDigest, err := images.BaseDigest(base)
 	if err != nil {
 		return "", status.Error(codes.FailedPrecondition, unpinnedBaseMsg)
@@ -357,9 +359,15 @@ func (g *Gateway) resolveImageOn(ctx context.Context, w *audit.Writer, base stri
 	if err != nil {
 		return "", status.Errorf(codes.InvalidArgument, "image spec: %v", err)
 	}
+	// The index and the HEAD cache serve both modes. After a mode switch an entry
+	// whose digest the current registry lacks fails its HEAD and is rebuilt.
+	target, err := g.registryTarget(ctx, op)
+	if err != nil {
+		return "", err
+	}
 	return g.builds.do(ctx, specHash, func(ctx context.Context) (string, error) {
 		if e, ok := g.images.get(specHash); ok {
-			usable, err := g.checkIndexed(ctx, specHash, e)
+			usable, err := g.checkIndexed(ctx, target, specHash, e)
 			if err != nil {
 				return "", err
 			}
@@ -367,16 +375,17 @@ func (g *Gateway) resolveImageOn(ctx context.Context, w *audit.Writer, base stri
 			// drops an entry it deletes the manifest, so a resolve that lost that race
 			// rebuilds, and an entry touched first is no longer unused, so GC keeps it.
 			if usable && g.images.touchIfIndexed(specHash, e.Digest, g.builds.now()) {
-				return g.runRef(e.Digest), nil
+				return target.runRef(e.Digest), nil
 			}
 		}
-		return g.build(ctx, w, req, op, base, specHash)
+		return g.build(ctx, w, req, op, target, base, specHash)
 	})
 }
 
 // checkIndexed reports whether an index entry may run: its build entry verifies and
-// the registry still has the manifest. An entry that fails either check is dropped.
-func (g *Gateway) checkIndexed(ctx context.Context, specHash string, e imageEntry) (bool, error) {
+// target's repository still has the manifest. An entry that fails either check is
+// dropped.
+func (g *Gateway) checkIndexed(ctx context.Context, target registryTarget, specHash string, e imageEntry) (bool, error) {
 	if err := g.verifyBuild(ctx, specHash, e); err != nil {
 		if errors.Is(err, errAuditUnreadable) {
 			return false, status.Errorf(codes.Unavailable, "check the image index entry for %s: %v", specHash, err)
@@ -386,10 +395,11 @@ func (g *Gateway) checkIndexed(ctx context.Context, specHash string, e imageEntr
 		g.dropImage(ctx, specHash)
 		return false, nil
 	}
-	if g.builds.headCached(e.Digest) {
+	key := target.headKey(e.Digest)
+	if g.builds.headCached(key) {
 		return true, nil
 	}
-	found, err := g.registry.Head(ctx, images.ImagesRepo, e.Digest)
+	found, err := target.client.Head(ctx, target.repo, e.Digest)
 	if err != nil {
 		return false, status.Errorf(codes.Unavailable, "check image %s in the registry: %v", e.Digest, err)
 	}
@@ -398,7 +408,7 @@ func (g *Gateway) checkIndexed(ctx context.Context, specHash string, e imageEntr
 		g.dropImage(ctx, specHash)
 		return false, nil
 	}
-	g.builds.cacheHead(e.Digest)
+	g.builds.cacheHead(key)
 	return true, nil
 }
 
@@ -410,16 +420,21 @@ func (g *Gateway) dropImage(ctx context.Context, specHash string) {
 	}
 }
 
-// build runs one audited build of specHash and indexes the digest it produced.
-func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, op *lastv1alpha1.OperatorConfig, base, specHash string) (string, error) {
+// build runs one audited build of specHash into target and indexes the digest it produced.
+func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, op *lastv1alpha1.OperatorConfig,
+	target registryTarget, base, specHash string) (string, error) {
 	// Configuration refusals come before the slot, so they never queue behind builds.
-	egress, err := g.buildEgress(ctx, op, req.Policy)
+	egress, err := g.buildEgress(ctx, op, req.Policy, target.external)
 	if err != nil {
 		return "", err
 	}
-	user, password, err := g.pusherCredential(ctx)
-	if err != nil {
-		return "", err
+	pushConfig := target.pushConfig
+	if !target.external {
+		user, password, err := g.pusherCredential(ctx)
+		if err != nil {
+			return "", err
+		}
+		pushConfig = images.DockerConfig(g.cfg.RegistryFrontHost, user, password)
 	}
 	release, err := g.builds.acquire(ctx)
 	if err != nil {
@@ -427,12 +442,16 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 	}
 	defer release()
 	cfg := g.buildPodConfig(op, base)
+	if target.external {
+		// Pushed over HTTPS with no http = true, and the base used unchanged.
+		cfg.PullHost, cfg.FrontHost, cfg.PushRef, cfg.Insecure = "", "", target.pushRef, false
+	}
 	containerfile, err := images.Containerfile(cfg.BuildBase(base), req.Install)
 	if err != nil {
 		return "", status.Errorf(codes.InvalidArgument, "image install: %v", err)
 	}
 	spec := images.BuildSpec{ID: randomBuildID(), SpecHash: specHash, Base: base, Install: req.Install,
-		PushConfig: images.DockerConfig(g.cfg.RegistryFrontHost, user, password), Egress: egress}
+		PushConfig: pushConfig, Egress: egress}
 	builder := g.newBuilder(cfg)
 
 	draft := func(typ string, payload any) audit.Draft {
@@ -446,7 +465,7 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 	// audit calls ignore cancellation while the build itself still honors it.
 	result, err := w.DoEntry(context.WithoutCancel(ctx),
 		draft(audit.TypeImageBuildStart, buildStart{SpecHash: specHash, BaseImage: base, Containerfile: containerfile,
-			PushRef: cfg.FrontHost + "/" + images.ImagesRepo + ":" + images.Tag(specHash),
+			PushRef: cfg.PushRef + ":" + images.Tag(specHash),
 			Egress:  append(ruleStrings(egress), kubeDNSGrant)}),
 		func(context.Context) (any, error) {
 			var buildErr error
@@ -485,14 +504,15 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 		// The entry is kept in memory, so this process reuses it; another rebuilds.
 		slog.Warn("Could not save the image index", "specHash", specHash, "err", err)
 	}
-	g.builds.cacheHead(out.Digest)
-	return g.runRef(out.Digest), nil
+	g.builds.cacheHead(target.headKey(out.Digest))
+	return target.runRef(out.Digest), nil
 }
 
-// buildEgress returns a build's egress grants: the registry front proxy's Service and
-// endpoints, and each images.buildEgress entry the requesting Intent's policy allows.
+// buildEgress returns a build's egress grants: the bundled registry front proxy's
+// Service and endpoints (none for an external registry, whose CIDRs buildEgress must
+// list), and each images.buildEgress entry the requesting Intent's policy allows.
 // Hostname entries, and any grant covering an egress canary, are FailedPrecondition.
-func (g *Gateway) buildEgress(ctx context.Context, op *lastv1alpha1.OperatorConfig, pol policy.Effective) ([]sandbox.EgressRule, error) {
+func (g *Gateway) buildEgress(ctx context.Context, op *lastv1alpha1.OperatorConfig, pol policy.Effective, external bool) ([]sandbox.EgressRule, error) {
 	var allowed []sandbox.EgressRule
 	if op != nil && op.Spec.Images != nil {
 		for _, entry := range op.Spec.Images.BuildEgress {
@@ -511,9 +531,13 @@ func (g *Gateway) buildEgress(ctx context.Context, op *lastv1alpha1.OperatorConf
 			allowed = append(allowed, r)
 		}
 	}
-	rules, err := sandbox.ServiceEgress(ctx, g.kube, g.cfg.RegistryNamespace, registryFrontService)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "registry egress: %v", err)
+	rules := make([]sandbox.EgressRule, 0, len(allowed)+2)
+	if !external {
+		front, err := sandbox.ServiceEgress(ctx, g.kube, g.cfg.RegistryNamespace, registryFrontService)
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "registry egress: %v", err)
+		}
+		rules = append(rules, front...)
 	}
 	rules = append(rules, allowed...)
 	for _, c := range g.execCfg.EgressCanaries {
@@ -553,7 +577,7 @@ func (g *Gateway) buildPodConfig(op *lastv1alpha1.OperatorConfig, base string) i
 		Canaries: slices.Clone(g.execCfg.EgressCanaries)}
 }
 
-// runRef is the reference sandbox pods run a built image by.
+// runRef is the reference sandbox pods run an image built into the bundled registry by.
 func (g *Gateway) runRef(digest string) string {
 	return g.cfg.RegistryPullHost + "/" + images.ImagesRepo + "@" + digest
 }
@@ -642,4 +666,100 @@ func (g *Gateway) reapExpiredBuilds(ctx context.Context) {
 	if reaped > 0 {
 		slog.Info("Reaped expired image builds", "count", reaped)
 	}
+}
+
+// registryTarget is where built images live for one resolve or GC run: the bundled
+// registry behind its front proxy, or the external repository (design §6.2).
+type registryTarget struct {
+	external bool
+	// host and repo address manifests for HEAD and DELETE.
+	host, repo string
+	// client HEADs manifests: anonymously through the front proxy (bundled), or with
+	// the push credential over HTTPS (external), which also deletes them.
+	client *images.Client
+	// pushRef is the push target without the tag.
+	pushRef string
+	// pushConfig is the external push Secret's config. Bundled builds get the
+	// pusher credential instead.
+	pushConfig []byte
+	// runPrefix precedes "@<digest>" in the reference sandbox pods run.
+	runPrefix string
+}
+
+func (t registryTarget) runRef(digest string) string { return t.runPrefix + "@" + digest }
+
+// headKey names a manifest in the HEAD cache.
+func (t registryTarget) headKey(digest string) string { return t.host + "/" + t.repo + "@" + digest }
+
+// externalRegistry reports whether OperatorConfig selects registry.mode external.
+func externalRegistry(op *lastv1alpha1.OperatorConfig) bool {
+	return op != nil && op.Spec.Registry != nil && op.Spec.Registry.Mode == lastv1alpha1.RegistryExternal
+}
+
+// externalSettings returns registry.external, which the CRD requires in external mode.
+func externalSettings(op *lastv1alpha1.OperatorConfig) (*lastv1alpha1.ExternalRegistry, error) {
+	if ext := op.Spec.Registry.External; ext != nil {
+		return ext, nil
+	}
+	return nil, status.Error(codes.FailedPrecondition, "OperatorConfig registry.mode external needs registry.external")
+}
+
+// registryTarget returns the registry op selects. The bundled one needs no reads; an
+// external one needs a valid repository and a push Secret holding a credential for
+// its host. Errors: FailedPrecondition for a configuration the operator must fix,
+// naming the field and never a credential; Unavailable when a Secret cannot be read.
+func (g *Gateway) registryTarget(ctx context.Context, op *lastv1alpha1.OperatorConfig) (registryTarget, error) {
+	if !externalRegistry(op) {
+		return registryTarget{host: g.cfg.RegistryFrontHost, repo: images.ImagesRepo, client: g.registry,
+			pushRef: g.cfg.RegistryFrontHost + "/" + images.ImagesRepo, runPrefix: g.cfg.RegistryPullHost + "/" + images.ImagesRepo}, nil
+	}
+	ext, err := externalSettings(op)
+	if err != nil {
+		return registryTarget{}, err
+	}
+	host, repo, err := images.ParseRepository(ext.Repository)
+	if err != nil {
+		return registryTarget{}, status.Errorf(codes.FailedPrecondition, "OperatorConfig registry.external.repository: %v", err)
+	}
+	config, err := g.dockerConfig(ctx, "pushSecretRef", ext.PushSecretRef.Name)
+	if err != nil {
+		return registryTarget{}, err
+	}
+	creds, err := images.CredentialsFor(config, host)
+	if err != nil {
+		return registryTarget{}, status.Errorf(codes.FailedPrecondition, "OperatorConfig registry.external.pushSecretRef: Secret %s/%s: %v",
+			g.cfg.Namespace, ext.PushSecretRef.Name, err)
+	}
+	if creds == nil {
+		return registryTarget{}, status.Errorf(codes.FailedPrecondition,
+			"OperatorConfig registry.external.pushSecretRef: Secret %s/%s holds no credential for %s", g.cfg.Namespace, ext.PushSecretRef.Name, host)
+	}
+	return registryTarget{external: true, host: host, repo: repo, client: g.registryClient(host, creds, false),
+		pushRef: ext.Repository, pushConfig: config, runPrefix: ext.Repository}, nil
+}
+
+// registryClient returns a registry client that uses the gateway's transport.
+func (g *Gateway) registryClient(host string, creds *images.Credentials, insecure bool) *images.Client {
+	return images.NewClient(host, creds, insecure).WithTransport(g.registryTransport)
+}
+
+// dockerConfig reads the .dockerconfigjson of the Secret that registry.external.<field>
+// names in the gateway namespace. Neither the config nor any part of it may appear
+// in an error, a log line or an audit payload.
+func (g *Gateway) dockerConfig(ctx context.Context, field, name string) ([]byte, error) {
+	sec, err := g.kube.CoreV1().Secrets(g.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, status.Errorf(codes.FailedPrecondition, "OperatorConfig registry.external.%s: Secret %s/%s not found",
+			field, g.cfg.Namespace, name)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "read the Secret %s/%s that registry.external.%s names: %v",
+			g.cfg.Namespace, name, field, err)
+	}
+	config := sec.Data[corev1.DockerConfigJsonKey]
+	if len(config) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition, "OperatorConfig registry.external.%s: Secret %s/%s has no %s key",
+			field, g.cfg.Namespace, name, corev1.DockerConfigJsonKey)
+	}
+	return config, nil
 }
