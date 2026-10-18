@@ -242,8 +242,9 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 }
 
-// intentEntryTypes reads the bundled audit store and returns the types of entries for intent.
-func intentEntryTypes(t *testing.T, intent string) []string {
+// auditEntries reads the bundled audit store and returns every entry, in chain order,
+// that belongs to intent ("" returns all of them).
+func auditEntries(t *testing.T, intent string) []audit.Entry {
 	t.Helper()
 	ctx := context.Background()
 	chain := kubectl(t, "get", "cm", "-n", "last-gateway", "last-audit-config", "-o", "jsonpath={.data.chainId}")
@@ -260,7 +261,7 @@ func intentEntryTypes(t *testing.T, intent string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var types []string
+	var entries []audit.Entry
 	for _, o := range objs {
 		body, err := sink.Get(ctx, o.Key, "")
 		if err != nil {
@@ -270,9 +271,19 @@ func intentEntryTypes(t *testing.T, intent string) []string {
 		if err := json.Unmarshal(body, &e); err != nil {
 			t.Fatal(err)
 		}
-		if e.Intent == intent {
-			types = append(types, e.Type)
+		if intent == "" || e.Intent == intent {
+			entries = append(entries, e)
 		}
+	}
+	return entries
+}
+
+// intentEntryTypes returns the types of the audit entries for intent.
+func intentEntryTypes(t *testing.T, intent string) []string {
+	t.Helper()
+	var types []string
+	for _, e := range auditEntries(t, intent) {
+		types = append(types, e.Type)
 	}
 	return types
 }

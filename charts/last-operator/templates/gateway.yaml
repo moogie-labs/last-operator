@@ -116,6 +116,34 @@ metadata:
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-gateway-apiserver}
 subjects:
   - {kind: ServiceAccount, name: last-gateway, namespace: {{ $gw }}}
+{{- if .Values.registry.bundled.enabled }}
+---
+# The gateway reads the front Service and lists its EndpointSlices to build the egress rules
+# for image builds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: last-gateway-registry
+  namespace: {{ .Values.namespaces.registry }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: last-gateway-registry
+  namespace: {{ .Values.namespaces.registry }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: last-gateway-registry}
+subjects:
+  - {kind: ServiceAccount, name: last-gateway, namespace: {{ $gw }}}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -194,6 +222,11 @@ spec:
             - {name: LAST_SANDBOX_NAMESPACE, value: {{ .Values.namespaces.sandbox | quote }}}
             - {name: LAST_EGRESS_CANARIES, value: {{ .Values.sandbox.egressCanaries | default (printf "service/%s/last-gateway:8080,node:10250" $gw) | quote }}}
             - {name: LAST_DRAIN_TIMEOUT, value: {{ printf "%ds" (int .Values.gateway.drainTimeoutSeconds) | quote }}}
+            - {name: LAST_REGISTRY_FRONT_HOST, value: {{ printf "last-registry-front.%s.svc:5000" .Values.namespaces.registry | quote }}}
+            - {name: LAST_REGISTRY_PULL_HOST, value: {{ printf "localhost:%d" (int .Values.registry.bundled.hostPort) | quote }}}
+            - {name: LAST_REGISTRY_NAMESPACE, value: {{ .Values.namespaces.registry | quote }}}
+            - {name: LAST_BUILD_NAMESPACE, value: {{ .Values.namespaces.build | quote }}}
+            - {name: LAST_BUILDKIT_IMAGE, value: {{ .Values.registry.bundled.buildkitImage | quote }}}
             {{- with .Values.sandbox.image }}
             - {name: LAST_SANDBOX_IMAGE, value: {{ . | quote }}}
             {{- end }}

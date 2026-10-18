@@ -42,6 +42,7 @@ registry:
     storageClassName: ""   # "" = cluster default
     size: 20Gi
     hostPort: 5000
+    buildkitImage: moby/buildkit:v0.26.2-rootless   # image builds; preload it on air-gapped nodes
     resources:
       requests: {cpu: 50m, memory: 64Mi}
       limits: {memory: 512Mi}

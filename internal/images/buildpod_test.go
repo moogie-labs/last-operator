@@ -127,7 +127,7 @@ func checkBuildSecurity(t *testing.T, pod *corev1.Pod, c corev1.Container) {
 	}
 	init := pod.Spec.InitContainers[0]
 	is := init.SecurityContext
-	if is.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || is.AppArmorProfile.Type != corev1.AppArmorProfileTypeRuntimeDefault ||
+	if is.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || is.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined ||
 		is.AllowPrivilegeEscalation == nil || *is.AllowPrivilegeEscalation || *is.RunAsGroup != 1000 ||
 		len(is.Capabilities.Drop) != 1 || is.Capabilities.Drop[0] != "ALL" ||
 		init.Resources.Requests.Cpu().String() != "10m" || init.Resources.Requests.Memory().String() != "16Mi" || init.Resources.Limits.Memory().String() != "32Mi" {

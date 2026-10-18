@@ -205,8 +205,10 @@ func buildPod(cfg BuildPodConfig, name, id, secretName string, timeoutSeconds in
 				VolumeMounts: []corev1.VolumeMount{{Name: binVolume, MountPath: "/last-bin"}},
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser: &uid, RunAsGroup: &uid, AllowPrivilegeEscalation: &no,
-					SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-					AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+					SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+					// Unconfined, not RuntimeDefault: a node without AppArmor (kind on Docker Desktop)
+					// refuses a pod that asks for an enforced profile, but not for Unconfined.
+					AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
 					Capabilities:    &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
 				Resources: corev1.ResourceRequirements{

@@ -71,6 +71,11 @@ spec:
   llmProviderRef: {name: $LLM}
   defaults:
     providers: [$PROVIDER]
+    # Image builds reach the Debian mirrors (build egress is the intersection of this
+    # and images.buildEgress; the demo opts in to both).
+    egress: {allowed: ["0.0.0.0/0:80", "0.0.0.0/0:443"]}
+  images:
+    buildEgress: ["0.0.0.0/0:80", "0.0.0.0/0:443"]
 EOF
 
 go build -o bin/kubectl-last ./cmd/kubectl-last

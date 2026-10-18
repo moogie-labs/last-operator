@@ -365,4 +365,10 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | awk '/kind: Role$$/{r=1} r&&/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[configmaps\]' | grep -q 'verbs: \[create, list, delete\]'
 	@# Without the bundled registry there is no pull proxy, but the build namespace and the gateway's Role remain.
 	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'hostPort'
+	@# Image builds: the gateway knows the registry hosts and the BuildKit image, and can list the front Service's EndpointSlices.
+	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_BUILDKIT_IMAGE, value: "moby/buildkit:v0.26.2-rootless"'
+	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_REGISTRY_PULL_HOST, value: "localhost:5000"'
+	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_REGISTRY_FRONT_HOST, value: "last-registry-front.last-registry.svc:5000"'
+	helm template last charts/last-operator -n last-system | awk '/^kind: Role$$/{r=1} r&&/name: last-gateway-registry/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[endpointslices\]' | grep -q 'verbs: \[list\]'
+	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'name: last-gateway-registry'
 	helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'name: last-gateway-build'

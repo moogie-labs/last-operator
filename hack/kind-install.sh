@@ -14,6 +14,8 @@ NGINX_IMAGE="nginx:1.27-alpine"
 # chart values; preloaded for the same reason.
 REGISTRY_IMAGE="registry:3.0.0"
 REGISTRY_PROXY_IMAGE="nginxinc/nginx-unprivileged:1.27.5-alpine"
+# Must match registry.bundled.buildkitImage; the build pods run it.
+BUILDKIT_IMAGE="moby/buildkit:v0.26.2-rootless"
 
 kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --config hack/kind-config.yaml --wait 120s
 kubectl config use-context "kind-$CLUSTER"
@@ -52,6 +54,7 @@ done
 load_image "$NGINX_IMAGE"
 load_image "$REGISTRY_IMAGE"
 load_image "$REGISTRY_PROXY_IMAGE"
+load_image "$BUILDKIT_IMAGE"
 
 make helm-crds
 # Helm installs crds/ only on first install and never upgrades them; apply them

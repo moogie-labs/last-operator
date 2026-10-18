@@ -82,6 +82,15 @@ make demo                               # kind + chart + an anthropic LLMProvide
 
 The key goes only into a Secret in `last-gateway`. The demo never runs in CI.
 
+The M4 real-model check bakes a tool into an image:
+
+```bash
+DEMO_REQUEST="install the AWS CLI in an image and print its version" make demo
+```
+
+The build reaches the Debian mirrors (the demo opens ports 80 and 443 for builds)
+and spends API credit.
+
 ## Quick start (kind)
 
 ```bash
