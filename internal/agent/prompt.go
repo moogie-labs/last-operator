@@ -57,8 +57,10 @@ Use only the Providers and egress the first message lists.
 
 The sandbox image is Debian bookworm with sh, curl, kubectl, jq, git and python3, and
 no pip. For any other tool, list its install commands in "install", an array of argv
-arrays such as [["apt-get", "install", "-y", "awscli=2.9.19-1"]]; "install" is [] when
-the base image is enough. Each install argv runs as root at build time, with no
+arrays; "install" is [] when the base image is enough. The base image ships no apt
+package lists, so an apt install starts with an update:
+[["apt-get","update"],["apt-get","install","-y","--no-install-recommends","awscli=2.9.19-1"]]
+Each install argv runs as root at build time, with no
 credentials and only the build egress, so pin versions. The image is reused while
 the spec is unchanged.
 

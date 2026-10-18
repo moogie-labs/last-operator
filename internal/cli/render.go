@@ -106,8 +106,6 @@ func renderPending(w io.Writer, pc *lastv1alpha1.PendingCommand, hash string, fi
 	renderCommand(w, "  ", pc.Command, files)
 }
 
-// renderCommand writes one command: argv or script, files by path and size
-// (with their contents if files), Providers, egress and timeout.
 // shellWords quotes an argv the way a shell would need it, one word per element.
 func shellWords(argv []string) string {
 	words := make([]string, len(argv))
@@ -117,6 +115,8 @@ func shellWords(argv []string) string {
 	return strings.Join(words, " ")
 }
 
+// renderCommand writes one command: argv or script, files by path and size
+// (with their contents if files), Providers, egress and timeout.
 func renderCommand(w io.Writer, indent string, c lastv1alpha1.Command, files bool) {
 	if len(c.Run.Argv) > 0 {
 		writef(w, "%srun:       %s\n", indent, shellWords(c.Run.Argv))
