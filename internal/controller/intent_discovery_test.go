@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -136,13 +138,30 @@ var _ = Describe("Intent discovery", func() {
 	})
 
 	It("tells the model a command's result was lost when RunCommand fails in transit", func() {
+		// The retry finds the step already run, as the gateway reports it.
 		subject := awaitingDiscovery(&script{llm: turns(commandTurn(look), answer(steps)),
-			runErr: map[string]error{plan.DiscoveryStepID: status.Error(codes.Unavailable, "connection reset")}})
+			runErrs: []error{status.Error(codes.Unavailable, "connection reset"),
+				status.Error(codes.FailedPrecondition, "an earlier step failed or could not run; end the phase")}})
 		approveCommand(key, subject, lastv1alpha1.DecisionApprove, "")
 
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
-		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginDiscovery, runDiscoveryStep, endFailed, callLLM}))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginDiscovery, runDiscoveryStep, runDiscoveryStep, endFailed, callLLM}))
 		Expect(lastUserMessage(key)).To(Equal("The command may have run, but its result was lost: connection reset"))
+	})
+
+	It("tells the model when the command's image build fails, with the build log", func() {
+		log := strings.Repeat("x", 20<<10) + "\nE: Unable to locate package jq\n"
+		subject := awaitingDiscovery(&script{llm: turns(commandTurn(look), answer(steps)),
+			buildLog: map[string]string{plan.DiscoveryStepID: log}})
+		approveCommand(key, subject, lastv1alpha1.DecisionApprove, "")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginDiscovery, runDiscoveryStep, endFailed, callLLM}),
+			"no command ran, so there is no command.result entry to read back")
+		turn := lastUserMessage(key)
+		Expect(turn).To(HavePrefix(agent.NotRunTurn("ImageBuildFailed: install step 1 exited 100") + "\nstderr (last bytes):\n…"))
+		Expect(turn).To(HaveSuffix("E: Unable to locate package jq\n"))
+		Expect(len(turn)).To(BeNumerically("<=", maxTurnMessage))
 	})
 
 	It("tells the model a command did not run when the gateway refuses to run it", func() {

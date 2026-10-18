@@ -117,14 +117,27 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 	return r.finishPhase(ctx, in)
 }
 
-// runStep calls RunCommand, retrying while another call of the phase holds it (Aborted).
+// runStep calls RunCommand, retrying while another call of the phase holds it
+// (Aborted) or the gateway is unavailable (Unavailable: it keeps the phase open
+// when, say, the sandbox image could not be resolved). The gateway refuses a
+// retry (FailedPrecondition) once an earlier attempt ran or failed the step, so
+// that refusal after an Unavailable means the earlier attempt's outcome was
+// lost, and its Unavailable error is returned instead.
 func (r *IntentReconciler) runStep(ctx context.Context, in *lastv1alpha1.Intent, subject, id string, raw []byte) (*gatewayv1.CommandResult, error) {
 	req := &gatewayv1.RunCommandRequest{Intent: intentRef(in), SubjectHash: subject, StepId: id, CommandJson: raw}
+	var unavailable error
 	for attempt := 1; ; attempt++ {
 		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
 		resp, err := r.Gateway.RunCommand(sctx, req)
 		cancel()
-		if status.Code(err) != codes.Aborted || attempt == retries {
+		code := status.Code(err)
+		if code == codes.FailedPrecondition && unavailable != nil {
+			return nil, unavailable
+		}
+		if code == codes.Unavailable {
+			unavailable = err
+		}
+		if (code != codes.Aborted && code != codes.Unavailable) || attempt == retries {
 			return resp.GetResult(), err
 		}
 		if err := sleep(ctx, r.RetryDelay); err != nil {
@@ -133,12 +146,21 @@ func (r *IntentReconciler) runStep(ctx context.Context, in *lastv1alpha1.Intent,
 	}
 }
 
+// failureTail bounds the stderr a step failure carries into the replanning
+// conversation, a failed build's log included: the feedback is a condition
+// message, clipped to maxMessage (1 KiB).
+const failureTail = 512
+
 // stepFailure describes a failed step for the replanning conversation.
 func stepFailure(id string, res *gatewayv1.CommandResult) string {
 	if res.GetError() != "" {
-		return fmt.Sprintf("step %s could not run: %s", id, res.GetError())
+		why := fmt.Sprintf("step %s could not run: %s", id, res.GetError())
+		if res.GetStderr() != "" {
+			why += "; stderr: " + tail(res.GetStderr(), failureTail)
+		}
+		return why
 	}
-	return fmt.Sprintf("step %s exited %d: %s", id, res.GetExitCode(), tail(res.GetStderr(), 512))
+	return fmt.Sprintf("step %s exited %d: %s", id, res.GetExitCode(), tail(res.GetStderr(), failureTail))
 }
 
 // tail returns the last n bytes of s, cut on a UTF-8 boundary.

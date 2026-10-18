@@ -73,6 +73,47 @@ var _ = Describe("Intent execution", func() {
 		Expect(meta.FindStatusCondition(getIntent(key).Status.Conditions, CondExecuted)).To(BeNil())
 	})
 
+	It("plans again with the build log's tail when a step's image build fails", func() {
+		failing := []lastv1alpha1.Command{argvStep("s1", "jq", "--version")}
+		fixed := []lastv1alpha1.Command{argvStep("s2", trueCmd)}
+		log := strings.Repeat("x", 4<<10) + "\nE: Unable to locate package jq\n"
+		awaitingApproval(&script{buildLog: map[string]string{"s1": log}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+			if strings.Contains(requestText(req), "Unable to locate package jq") {
+				return answer(fixed), nil
+			}
+			return answer(failing), nil
+		}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(planHash(key)).Should(Equal(hashOf(fixed)))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, endFailed, callLLM}))
+		Expect(requestText(gw.lastRequest(key))).To(ContainSubstring(
+			"step s1 could not run: ImageBuildFailed: install step 1 exited 100; stderr: …" + strings.Repeat("x", 10)))
+	})
+
+	It("retries a step while the gateway is unavailable", func() {
+		unavailable := status.Error(codes.Unavailable, "sandbox image not resolved")
+		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1})), stdout: stdout,
+			runErrs: []error{unavailable, unavailable}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(executedReason(key)).Should(Equal(ReasonPhaseEnded))
+		Expect(gw.calls(key)[:5]).To(Equal([]string{callLLM, beginPhase, runS1, runS1, runS1}))
+		Expect(gw.calls(key)[5]).To(Equal(endSucceeded))
+	})
+
+	It("fails the Intent when the gateway stays unavailable", func() {
+		unavailable := status.Error(codes.Unavailable, "sandbox image not resolved")
+		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1})), stdout: stdout,
+			runErrs: []error{unavailable, unavailable, unavailable, unavailable, unavailable}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonExecutionFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("sandbox image not resolved"))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, runS1, runS1, runS1, runS1, endFailed}))
+	})
+
 	It("ends the phase and fails when the gateway refuses a step", func() {
 		awaitingApproval(&script{llm: turns(answer([]lastv1alpha1.Command{s1, s2})), stdout: stdout,
 			runErr: map[string]error{"s2": status.Error(codes.PermissionDenied, "approval withdrawn")}})

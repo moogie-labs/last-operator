@@ -490,13 +490,16 @@ func (x *RunCommandRequest) GetCommandJson() []byte {
 
 // CommandResult is one sandboxed command's outcome.
 type CommandResult struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	RunId           string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ExitCode        int32                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	Stdout          string                 `protobuf:"bytes,3,opt,name=stdout,proto3" json:"stdout,omitempty"`
-	Stderr          string                 `protobuf:"bytes,4,opt,name=stderr,proto3" json:"stderr,omitempty"`
-	StdoutTruncated bool                   `protobuf:"varint,5,opt,name=stdout_truncated,json=stdoutTruncated,proto3" json:"stdout_truncated,omitempty"`
-	StderrTruncated bool                   `protobuf:"varint,6,opt,name=stderr_truncated,json=stderrTruncated,proto3" json:"stderr_truncated,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Empty when no run was started: the gateway refused the command before
+	// running it (a failed image build), so no command.result entry exists and
+	// error and stderr carry all there is.
+	RunId           string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ExitCode        int32  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Stdout          string `protobuf:"bytes,3,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	Stderr          string `protobuf:"bytes,4,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	StdoutTruncated bool   `protobuf:"varint,5,opt,name=stdout_truncated,json=stdoutTruncated,proto3" json:"stdout_truncated,omitempty"`
+	StderrTruncated bool   `protobuf:"varint,6,opt,name=stderr_truncated,json=stderrTruncated,proto3" json:"stderr_truncated,omitempty"`
 	// Set when the command could not run or did not finish.
 	Error         string `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields

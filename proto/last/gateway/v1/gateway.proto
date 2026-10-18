@@ -90,6 +90,9 @@ message RunCommandRequest {
 
 // CommandResult is one sandboxed command's outcome.
 message CommandResult {
+  // Empty when no run was started: the gateway refused the command before
+  // running it (a failed image build), so no command.result entry exists and
+  // error and stderr carry all there is.
   string run_id = 1;
   int32 exit_code = 2;
   string stdout = 3;

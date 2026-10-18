@@ -74,12 +74,20 @@ const (
 // maxMessage bounds condition messages; command output stays in the audit log.
 const maxMessage = 1024
 
+// maxTurnMessage bounds an Executed message that is the model's next turn
+// (ReasonDiscoveryDenied, ReasonDiscoveryFailed), such as a failed build's log
+// tail, which has no audit entry to read back. Condition messages may hold 32 KiB.
+const maxTurnMessage = 16 << 10
+
 // clip cuts s to maxMessage bytes on a UTF-8 boundary.
-func clip(s string) string {
-	if len(s) <= maxMessage {
+func clip(s string) string { return clipTo(s, maxMessage) }
+
+// clipTo cuts s to n bytes on a UTF-8 boundary and marks the cut with "…".
+func clipTo(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	cut := maxMessage
+	cut := n
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
@@ -88,6 +96,13 @@ func clip(s string) string {
 
 func setCondition(conds *[]metav1.Condition, gen int64, typ string, s metav1.ConditionStatus, reason, msg string) {
 	meta.SetStatusCondition(conds, metav1.Condition{Type: typ, Status: s, Reason: reason, Message: clip(msg), ObservedGeneration: gen})
+}
+
+// setExecutedTurn sets the Executed condition to a message that is the model's
+// next turn, clipped to maxTurnMessage rather than maxMessage.
+func setExecutedTurn(in *lastv1alpha1.Intent, s metav1.ConditionStatus, reason, msg string) {
+	meta.SetStatusCondition(&in.Status.Conditions, metav1.Condition{Type: CondExecuted, Status: s, Reason: reason,
+		Message: clipTo(msg, maxTurnMessage), ObservedGeneration: in.Generation})
 }
 
 // setPhase moves an Intent to phase p and records why in its Ready condition.

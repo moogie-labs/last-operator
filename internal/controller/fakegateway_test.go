@@ -58,6 +58,8 @@ type script struct {
 	stdout   map[string]string // step ID → stdout
 	exit     map[string]int32  // step ID → exit code; a failing step's stderr is "boom"
 	runErr   map[string]error  // step ID → RunCommand error
+	runErrs  []error           // errors returned by the next RunCommand calls, in order, before runErr
+	buildLog map[string]string // step ID → the log of a failed image build: no run starts
 	endErrs  []error           // errors returned by the next EndPhase calls, in order
 	failing  map[string]bool   // probe ID → fails; other probes pass
 	probeErr error             // RunProbes error
@@ -282,8 +284,18 @@ func (f *fakeGateway) RunCommand(_ context.Context, in *gatewayv1.RunCommandRequ
 	}
 	f.argv[key][in.GetStepId()] = c.Run.Argv
 	s := f.scriptFor(key)
+	if len(s.runErrs) > 0 {
+		err := s.runErrs[0]
+		s.runErrs = s.runErrs[1:]
+		return nil, err
+	}
 	if err := s.runErr[in.GetStepId()]; err != nil {
 		return nil, err
+	}
+	if log, ok := s.buildLog[in.GetStepId()]; ok {
+		// As the gateway answers a failed build: no run, so no command.result entry.
+		return &gatewayv1.RunCommandResponse{Result: &gatewayv1.CommandResult{ExitCode: -1,
+			Error: "ImageBuildFailed: install step 1 exited 100", Stderr: log}}, nil
 	}
 	res := &gatewayv1.CommandResult{RunId: "run-" + in.GetStepId(), ExitCode: s.exit[in.GetStepId()], Stdout: s.stdout[in.GetStepId()]}
 	if res.ExitCode != 0 {

@@ -125,9 +125,27 @@ func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.In
 	case err != nil:
 		// The call failed in transit or timed out: the command may have run.
 		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.LostTurn(describe(err)))
+	case res.GetRunId() == "":
+		// The gateway never started a run (its image build failed): there is no
+		// command.result entry, so the turn carries the error and the log tail.
+		return r.discovered(ctx, in, ReasonDiscoveryFailed, notRunTurn(res))
 	}
 	logf.FromContext(ctx).Info("Ran discovery command", "command", subject, "exitCode", res.GetExitCode())
 	return r.discovered(ctx, in, ReasonDiscoveryRan, "Discovery command "+subject+" ran")
+}
+
+// notRunTurn reports a discovery command the gateway never started: its error
+// and the tail of its stderr (a failed build's log), within maxTurnMessage.
+func notRunTurn(res *gatewayv1.CommandResult) string {
+	msg := agent.NotRunTurn(res.GetError())
+	if res.GetStderr() == "" {
+		return clipTo(msg, maxTurnMessage)
+	}
+	const label = "\nstderr (last bytes):\n"
+	if room := maxTurnMessage - len(msg) - len(label) - len("…"); room > 0 {
+		msg += label + tail(res.GetStderr(), room)
+	}
+	return clipTo(msg, maxTurnMessage)
 }
 
 // discovered records how the pending discovery command ended in the Executed
@@ -145,7 +163,7 @@ func (r *IntentReconciler) discovered(ctx context.Context, in *lastv1alpha1.Inte
 			in.Status.PendingCommand.Hash != subject {
 			return
 		}
-		setExecuted(in, s, reason, msg)
+		setExecutedTurn(in, s, reason, msg)
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM to continue")
 	})
 }
