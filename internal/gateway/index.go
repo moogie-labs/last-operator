@@ -129,8 +129,8 @@ func (g *Gateway) saveRecord(ctx context.Context, rec *LoadedRecord) error {
 	}
 }
 
-// flushIndexes saves every Intent's collected entries; failures are logged and
-// retried on the next flush. It runs in the leader loop, so it never waits for a
+// flushIndexes saves every Intent's collected entries, and the image index's
+// lastUsed times when due; failures are logged and retried on the next flush. It runs in the leader loop, so it never waits for a
 // busy Intent: EndPhase can hold an Intent's lock for as long as a sandbox step
 // runs. A skipped Intent's entries stay pending for the next flush or a QueryAudit.
 func (g *Gateway) flushIndexes(ctx context.Context) {
@@ -144,6 +144,9 @@ func (g *Gateway) flushIndexes(ctx context.Context) {
 		if err != nil {
 			slog.Warn("Could not save the audit index", "intent", intent, "err", err)
 		}
+	}
+	if err := g.images.flushUsed(ctx, g.builds.now()); err != nil {
+		slog.Warn("Could not save the image index", "err", err)
 	}
 }
 

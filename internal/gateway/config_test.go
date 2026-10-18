@@ -39,6 +39,29 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvImageBuildDefaults(t *testing.T) {
+	cfg, err := ConfigFromEnv(envWith(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RegistryFrontHost != "last-registry-front.last-registry.svc:5000" || cfg.RegistryPullHost != "localhost:5000" ||
+		cfg.RegistryNamespace != "last-registry" || cfg.BuildNamespace != "last-build" ||
+		cfg.BuildKitImage != "moby/buildkit:v0.26.2-rootless" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	cfg, err = ConfigFromEnv(envWith(map[string]string{
+		"LAST_REGISTRY_FRONT_HOST": "front.reg.svc:5000", "LAST_REGISTRY_PULL_HOST": "localhost:15000",
+		"LAST_REGISTRY_NAMESPACE": "reg", "LAST_BUILD_NAMESPACE": "builds", "LAST_BUILDKIT_IMAGE": testBuildKitImg,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RegistryFrontHost != "front.reg.svc:5000" || cfg.RegistryPullHost != "localhost:15000" ||
+		cfg.RegistryNamespace != "reg" || cfg.BuildNamespace != "builds" || cfg.BuildKitImage != testBuildKitImg {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
 func TestConfigFromEnvRequiresChainAndBucket(t *testing.T) {
 	for _, missing := range []string{"LAST_AUDIT_CHAIN_ID", "LAST_AUDIT_BUCKET", "POD_NAMESPACE", "POD_NAME", "LAST_OPERATOR_IDENTITY"} {
 		env := baseEnv()

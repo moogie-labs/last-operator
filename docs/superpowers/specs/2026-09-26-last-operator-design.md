@@ -933,14 +933,27 @@ Every command runs in a sandbox pod:
 
 ### 11.2 Automatic image builds
 
-When a command has `image.install`, the gateway resolves its
-`specHash` to a digest:
+When a command (or a probe group) has `image.install`, the gateway
+resolves its `specHash` to a digest. It does so inside `RunCommand`
+and `RunProbes`, before `command.start` or `probe.start`, and only for
+commands in the approved open phase or the approved probe set, so an
+unapproved install never builds. Builds need a base pinned by digest
+(`OperatorConfig.sandbox.baseImage`); with only the Helm fallback tag,
+a command with `image.install` fails with `FailedPrecondition`.
 
-1. **Lookup.** The gateway keeps a `specHash → digest` index, rebuilt
-   at startup from `image.build.result` audit entries. The audit log,
-   not registry tags, is authoritative, so a changed tag is never
-   trusted. If an entry exists and the digest is still in the
-   registry, the gateway uses it.
+1. **Lookup.** The gateway keeps a persisted index, the ConfigMap
+   `last-image-index` in its namespace, mapping
+   `specHash → {digest, buildSeq, lastUsed}`. The index is only a
+   cache; the audit log is authoritative. On first use in a process,
+   the gateway reads the signed `image.build.result` entry at
+   `buildSeq` and checks its seal, its type, the spec hash, the digest
+   and a `succeeded` outcome. An entry that fails is dropped (logged at
+   error level) and the image is rebuilt, so a digest no verified entry
+   names never runs, and a lost index only costs rebuilds. A verified
+   entry is then checked with a manifest `HEAD` (a success is cached
+   for 10 minutes); a manifest gone from the registry means a rebuild.
+   A hit updates `lastUsed` in memory, flushed at most once an hour per
+   entry.
 2. **Build.** Otherwise the gateway generates a Containerfile:
    ```
    FROM <baseImage>@<baseDigest>
@@ -948,24 +961,45 @@ When a command has `image.install`, the gateway resolves its
    RUN ["pip", "install", "awscli==1.33.0"]      # one exec-form RUN per install argv
    USER 65532
    ```
-   It then launches a **build pod** in `last-sandbox`, using rootless
-   BuildKit. The build pod:
-   - gets **no provider credentials**, ever;
-   - has egress only to `OperatorConfig.images.buildEgress` (package
-     sources such as PyPI, npm, and GitHub releases, intersected with
-     policy) and to the registry;
+   It then launches a **build pod** in `last-build`, a namespace only
+   the gateway writes to, labelled `privileged` for Pod Security, with a
+   default-deny NetworkPolicy. The pod runs rootless BuildKit without
+   its process sandbox (`--oci-worker-no-process-sandbox`, the only
+   configuration that works on kind), under the sandbox runner, so the
+   egress gate (§11.1) applies. The build pod:
+   - gets **no provider credentials** and no ServiceAccount token, ever;
+   - has egress only to the registry (the front proxy's ClusterIP and
+     endpoints), kube-dns on port 53, and the entries of
+     `OperatorConfig.images.buildEgress` that the requesting Intent's
+     policy allows. `buildEgress` takes IP and CIDR entries only and is
+     empty by default; a hostname entry fails the command with
+     `FailedPrecondition`, as does any grant that covers an egress
+     canary;
    - receives the registry's push-only credential (bundled: the
      front proxy's *pusher* credential, which cannot delete; external:
      `pushSecretRef`) through a Secret that exists only for the build;
-   - has CPU, memory, and time limits.
-3. **Record.** The gateway writes `image.build.start` (specHash and
-   Containerfile) before the build, and `image.build.result` (digest
-   and build log, truncated at 1 MiB) afterwards. The command then
-   runs on `image@digest`.
+   - has CPU, memory, and time limits (`images.buildTimeout`, default
+     15m, at most 30m).
+
+   At most `images.maxConcurrentBuilds` builds (default 2) run at once;
+   the rest queue. Build objects are deleted whatever the outcome, and
+   the leading gateway deletes any left over when it starts leading.
+3. **Record.** The gateway writes `image.build.start` (spec hash, base
+   image, Containerfile and push tag) before the build, and
+   `image.build.result` (digest, outcome, duration and build log,
+   truncated at 1 MiB with the push credential redacted) afterwards.
+   Both carry the requesting Intent, stage and subject hash. Only a
+   succeeded build enters the index. The command then runs on
+   `image@digest`.
 4. **Single flight.** Concurrent requests for the same `specHash` wait
-   on one build.
-5. **Failure.** A failed build fails the command, and the build log is
-   returned to the agent as context.
+   on one build, and a failed build fails every waiter.
+5. **Failure.** A failed or timed-out build fails the command with
+   `ImageBuildFailed: <reason>`, and the last 64 KiB of the build log as
+   its stderr. During execution the step fails as any failed step does;
+   during discovery the model sees the log and can change the install
+   commands; during probes the probe fails with the same reason. A
+   registry that cannot be reached is `Unavailable`, which the operator
+   retries.
 
 Once built, an image is reused by every later command with the same
 spec, including probes, remediation, and teardown. Unpinned installs
@@ -1332,7 +1366,7 @@ The CRs emit standard Kubernetes Events for phase transitions.
 | Operator grants itself Auto mode or more providers | Config CRs are read-only to the operator; the gateway resolves policy itself |
 | Command chaining defeats allow rules | Rules match structured argv only; scripts never match |
 | Unapproved binary masquerades as an allowed one | `image.install` commands must also match the rule; images pinned by digest, with the digest mapping taken from the audit log rather than registry tags |
-| Build step leaks or abuses credentials | Build pods never receive provider credentials; egress limited to `buildEgress` + registry |
+| Build step leaks or abuses credentials | Build pods never receive provider credentials; egress limited to the registry, DNS and the policy-allowed `buildEgress` |
 | Credential leakage via LLM context | Credentials are never returned to the operator; injected only into the sandbox |
 | Operator hides its tracks | Fail-closed WORM audit written by the gateway; hash chain + signatures + compliance lock |
 | Command escapes its scope | Sandbox with no API token, per-execution egress, short-lived credentials limited to the named Providers |

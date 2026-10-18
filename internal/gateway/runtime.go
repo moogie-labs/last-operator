@@ -180,8 +180,9 @@ func firstInternalIP(nodes []corev1.Node) string {
 }
 
 // prepareLeading runs before this replica publishes its writer: canaries are
-// resolved, the scheduler is sized, and every orphaned run is reaped. Any error
-// ends leadership, so nothing runs without an egress gate or over stale grants.
+// resolved, the scheduler is sized, every orphaned run is reaped, the image index
+// is loaded and every leftover build is reaped. Any error ends leadership, so
+// nothing runs without an egress gate or over stale grants.
 func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 	canaries, err := g.resolveCanaries(ctx)
 	if err != nil {
@@ -205,6 +206,9 @@ func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 		return fmt.Errorf("gateway: reap orphaned sandbox runs: %w", err)
 	}
 	slog.Info("Reaped orphaned sandbox runs", "count", reaped, "maxConcurrent", maxConcurrent, "canaries", len(canaries))
+	if err := g.prepareImages(ctx, op); err != nil {
+		return err
+	}
 	g.rpcMu.Lock()
 	g.draining = false
 	g.rpcMu.Unlock()

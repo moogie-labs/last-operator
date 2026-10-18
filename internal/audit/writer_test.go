@@ -645,3 +645,20 @@ func TestOpenReportsResumedFrom(t *testing.T) {
 		t.Fatalf("gateway.start payload = %s, want %s", got, want)
 	}
 }
+
+// DoEntry returns the stored outcome entry, so a caller can point at it.
+func TestDoEntryReturnsTheStoredOutcome(t *testing.T) {
+	s, sink := newSigner(t), audittest.NewMemSink()
+	w := openWriter(t, sink, s, writerConfig(newClock()))
+	got, err := w.DoEntry(bg, cmd(1), func(context.Context) (any, error) { return nil, nil }, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored := readEntry(t, sink, 2); got.Seq != 2 || got.Hash != stored.Hash || got.Type != audit.TypeCommandResult {
+		t.Fatalf("DoEntry = %+v, want the stored seq-2 outcome %+v", got, stored)
+	}
+	sink.SetFailPuts(true)
+	if got, err := w.DoEntry(bg, cmd(2), func(context.Context) (any, error) { return nil, nil }, after); err == nil || got.Seq != 0 || got.Hash != "" {
+		t.Fatalf("DoEntry with a failing store = %+v, %v; want the zero entry and an error", got, err)
+	}
+}

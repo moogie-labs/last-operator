@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/images"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -47,6 +48,11 @@ type Gateway struct {
 	probing sync.Map // intent key -> in-flight probe run
 	index   auditIndex
 	images  *imageIndex // built-image digest cache
+	builds  *imageBuilds
+	// registry is an anonymous client for the front proxy: manifest HEADs.
+	registry *images.Client
+	// newBuilder returns the builder for one build's pod configuration; tests replace it.
+	newBuilder func(images.BuildPodConfig) imageBuilder
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -56,7 +62,11 @@ type Gateway struct {
 func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Sink, signer *audit.Signer) *Gateway {
 	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
 		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace),
-		images: newImageIndex(kube, cfg.Namespace)}
+		images: newImageIndex(kube, cfg.Namespace), builds: newImageBuilds(),
+		registry: images.NewClient(cfg.RegistryFrontHost, nil, true)}
+	g.newBuilder = func(c images.BuildPodConfig) imageBuilder {
+		return images.NewBuilder(g.kube, g.logs, g.registry, c)
+	}
 	g.execCfg = sandbox.ExecutorConfig{
 		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
 		ProviderNamespace: cfg.Namespace,

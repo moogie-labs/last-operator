@@ -31,6 +31,10 @@ const (
 	buildSucceeded = "succeeded"
 )
 
+// errAuditUnreadable marks a verifyBuild failure that says nothing about the entry:
+// the audit store could not be read. The caller keeps the entry and reports Unavailable.
+var errAuditUnreadable = errors.New("audit log unreadable")
+
 // imageEntry is one built image: its digest and the signed image.build.result
 // entry that names it.
 type imageEntry struct {
@@ -246,7 +250,7 @@ func (g *Gateway) verifyBuild(ctx context.Context, specHash string, e imageEntry
 		return fmt.Errorf("audit entry %d does not exist", e.BuildSeq)
 	}
 	if err != nil {
-		return fmt.Errorf("read audit entry %d: %w", e.BuildSeq, err)
+		return fmt.Errorf("%w: read audit entry %d: %w", errAuditUnreadable, e.BuildSeq, err)
 	}
 	entry, err := audit.DecodeEntry(body)
 	if err != nil {

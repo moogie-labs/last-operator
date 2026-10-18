@@ -45,6 +45,22 @@ type Config struct {
 	// DrainTimeout (LAST_DRAIN_TIMEOUT, default 5m) bounds the wait for in-flight
 	// RPCs when this replica stops leading.
 	DrainTimeout time.Duration
+	// RegistryFrontHost (LAST_REGISTRY_FRONT_HOST, default
+	// last-registry-front.last-registry.svc:5000) is the bundled registry's front
+	// proxy: builds push there and the gateway checks manifests there.
+	RegistryFrontHost string
+	// RegistryPullHost (LAST_REGISTRY_PULL_HOST, default localhost:5000) is how
+	// nodes pull from the bundled registry; built images run as
+	// <pullHost>/last/images@<digest>.
+	RegistryPullHost string
+	// RegistryNamespace (LAST_REGISTRY_NAMESPACE, default last-registry) holds the
+	// front proxy's Service, last-registry-front, which build pods may reach.
+	RegistryNamespace string
+	// BuildNamespace (LAST_BUILD_NAMESPACE, default last-build) holds build pods.
+	BuildNamespace string
+	// BuildKitImage (LAST_BUILDKIT_IMAGE, default moby/buildkit:v0.26.2-rootless)
+	// is the build pods' image.
+	BuildKitImage string
 }
 
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
@@ -74,6 +90,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		SandboxNamespace:   or("LAST_SANDBOX_NAMESPACE", "last-sandbox"),
 		SandboxImage:       strings.TrimSpace(getenv("LAST_SANDBOX_IMAGE")),
 		AuditWriterSecret:  strings.TrimSpace(getenv("LAST_AUDIT_WRITER_SECRET")),
+		RegistryFrontHost:  or("LAST_REGISTRY_FRONT_HOST", "last-registry-front.last-registry.svc:5000"),
+		RegistryPullHost:   or("LAST_REGISTRY_PULL_HOST", "localhost:5000"),
+		RegistryNamespace:  or("LAST_REGISTRY_NAMESPACE", "last-registry"),
+		BuildNamespace:     or("LAST_BUILD_NAMESPACE", "last-build"),
+		BuildKitImage:      or("LAST_BUILDKIT_IMAGE", "moby/buildkit:v0.26.2-rootless"),
 	}
 	// A fixed-order slice keeps the reported variable deterministic.
 	for _, req := range []struct{ name, value string }{

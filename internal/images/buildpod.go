@@ -67,6 +67,20 @@ type BuildSpec struct {
 	Egress []sandbox.EgressRule
 }
 
+// BuildBase is the reference a build's FROM line uses for base: a base under
+// PullHost (the bundled registry, as nodes see it) is rewritten to FrontHost, which
+// the build pod can reach; any other base is used as is.
+func (cfg BuildPodConfig) BuildBase(base string) string {
+	pullHost := cfg.PullHost
+	if pullHost == "" {
+		pullHost = bundledPullHost
+	}
+	if rest, ok := strings.CutPrefix(base, pullHost+"/"); ok {
+		return cfg.FrontHost + "/" + rest
+	}
+	return base
+}
+
 func buildLabels(id string, expires time.Time) map[string]string {
 	return map[string]string{
 		sandbox.LabelManagedBy: sandbox.ManagedByValue,
@@ -83,15 +97,7 @@ func BuildObjects(cfg BuildPodConfig, b BuildSpec, expires time.Time) (*corev1.S
 	if b.ID == "" {
 		return nil, nil, nil, errors.New("build has no ID")
 	}
-	base := b.Base
-	pullHost := cfg.PullHost
-	if pullHost == "" {
-		pullHost = bundledPullHost
-	}
-	if rest, ok := strings.CutPrefix(base, pullHost+"/"); ok {
-		base = cfg.FrontHost + "/" + rest
-	}
-	containerfile, err := Containerfile(base, b.Install)
+	containerfile, err := Containerfile(cfg.BuildBase(b.Base), b.Install)
 	if err != nil {
 		return nil, nil, nil, err
 	}
