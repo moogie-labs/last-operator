@@ -365,19 +365,33 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-build-default-deny'
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ConfigMap\n/ && doc ~ /\nmetadata:\n  name: last-registry-pull-proxy\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -qF 'location ~ "^/v2/last/(images|base)/(manifests|blobs)/sha256:[0-9a-f]{64}\z" {'
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ConfigMap\n/ && doc ~ /\nmetadata:\n  name: last-registry-pull-proxy\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'location / { return 403; }'
-	@# The GC sidecar: shares the registry PVC, sees only the admin htpasswd line, and is reachable only from the gateway.
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'name: registry-gc'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'mountPath: /var/lib/registry' | grep -c 'mountPath: /var/lib/registry' | grep -q '^2$$'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'mountPath: /etc/registry-gc/htpasswd'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A3 'secretName: last-registry-auth' | grep -A2 'items:' | grep -q 'key: admin'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'terminationGracePeriodSeconds: 1560'
-	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Deployment\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A8 'secretName: last-registry-auth' | grep -q 'key: pusher'
-	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-gc'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Service\n/ && doc ~ /\nmetadata:\n  name: last-registry-gc\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -q 'port: 5001'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: NetworkPolicy\n/ && doc ~ /\nmetadata:\n  name: last-registry\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | awk 'function close_item() { if (item ~ /port: 5001/) { found++; if (item ~ /port: 5000/ || item !~ /kubernetes.io\/metadata.name: last-gateway\n *podSelector:\n *matchLabels:\n *app.kubernetes.io\/name: last-gateway\n/ || item ~ /last-registry-front/) bad = 1 } item = "" } /^ *#/ { next } /^    - / { close_item() } /^[^ ]/ || /^  [a-z]/ { if (!/^  ingress:/) close_item() } { item = item $$0 "\n" } END { close_item(); exit !(found == 1 && !bad) }'
-	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_IMAGE_GC_INTERVAL, value: "24h"'
-	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_REGISTRY_GC_URL, value: "http://last-registry-gc.last-registry.svc:5001"'
-	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'last-registry-gc'
+	@# The GC sidecar: shares the registry PVC read-write, sees only the admin htpasswd line (a directory mount, so kubelet refreshes it), and is reachable only from the gateway.
+	@# Each check reads a render saved to a file, so a failed render fails the target instead of passing a negated grep.
+	@r=$$(mktemp) && trap 'rm -f $$r' EXIT && helm template last charts/last-operator -n last-system >$$r && \
+	doc() { awk -v k="$$1" -v n="$$2" 'function emit() { if (doc ~ ("\nkind: " k "\n") && doc ~ ("\nmetadata:\n  name: " n "\n")) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' $$r; } && \
+	dep=$$(doc Deployment last-registry) && test -n "$$dep" && \
+	sc=$$(printf '%s\n' "$$dep" | awk '/^        - name: /{f=($$0=="        - name: registry-gc")} /^      [a-z]/{f=0} f') && \
+	vol=$$(printf '%s\n' "$$dep" | awk '/^        - name: /{f=($$0=="        - name: gc-auth")} /^[^ ]/{f=0} f') && \
+	test -n "$$sc" && test -n "$$vol" && \
+	printf '%s\n' "$$sc" | grep -qE 'mountPath: /var/lib/registry\}$$' && \
+	! printf '%s\n' "$$sc" | grep 'mountPath: /var/lib/registry' | grep -q readOnly && \
+	printf '%s\n' "$$sc" | grep -E 'mountPath: /etc/registry-gc[,}]' | grep -q 'readOnly: true' && \
+	! printf '%s\n' "$$sc" | grep -q subPath && \
+	printf '%s\n' "$$sc" | grep -q 'allowPrivilegeEscalation: false' && \
+	printf '%s\n' "$$sc" | grep -q 'drop: \[ALL\]' && \
+	printf '%s\n' "$$sc" | grep -q '^          resources:' && \
+	printf '%s\n' "$$sc" | grep -q 'name: gc, containerPort: 5001' && \
+	printf '%s\n' "$$sc" | grep -A2 'readinessProbe:' | grep -q 'tcpSocket: {port: gc}' && \
+	printf '%s\n' "$$sc" | grep -A2 'livenessProbe:' | grep -q 'tcpSocket: {port: gc}' && \
+	test "$$(printf '%s\n' "$$vol" | grep -c 'key:')" = 1 && printf '%s\n' "$$vol" | grep -q 'key: admin, path: htpasswd' && \
+	printf '%s\n' "$$vol" | grep -q 'secretName: last-registry-auth' && \
+	printf '%s\n' "$$dep" | grep -q 'terminationGracePeriodSeconds: 1560' && \
+	! printf '%s\n' "$$dep" | grep -q 'checksum/auth' && \
+	doc Service last-registry-gc | grep -q 'port: 5001' && \
+	doc NetworkPolicy last-registry | awk 'function close_item() { if (item ~ /port: 5001/) { found++; if (item ~ /port: 5000/ || item !~ /kubernetes.io\/metadata.name: last-gateway\n *podSelector:\n *matchLabels:\n *app.kubernetes.io\/name: last-gateway\n/ || item ~ /last-registry-front/) bad = 1 } item = "" } /^ *#/ { next } /^    - / { close_item() } /^[^ ]/ || /^  [a-z]/ { if (!/^  ingress:/) close_item() } { item = item $$0 "\n" } END { close_item(); exit !(found == 1 && !bad) }' && \
+	grep -q 'name: LAST_IMAGE_GC_INTERVAL, value: "24h"' $$r && \
+	grep -q 'name: LAST_REGISTRY_GC_URL, value: "http://last-registry-gc.last-registry.svc:5001"' $$r
+	@r=$$(mktemp) && trap 'rm -f $$r' EXIT && helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false >$$r && ! grep -q 'last-registry-gc' $$r
 	helm template last charts/last-operator -n last-system | awk '/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -q 'resources: \[configmaps\]'
 	helm template last charts/last-operator -n last-system | awk '/kind: Role$$/{r=1} r&&/name: last-gateway-build/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[configmaps\]' | grep -q 'verbs: \[create, list, delete\]'
 	@# Without the bundled registry there is no pull proxy, but the build namespace and the gateway's Role remain.

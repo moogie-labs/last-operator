@@ -76,9 +76,6 @@ spec:
       labels:
         app.kubernetes.io/name: last-registry
         {{- include "last.labels" . | nindent 8 }}
-      annotations:
-        # helm re-salts the htpasswd lines on every render; the sidecar mounts one by subPath, which never updates in place.
-        checksum/auth: {{ include (print $.Template.BasePath "/registry-secrets.yaml") . | sha256sum }}
     spec:
       # The GC sidecar waits up to 25 minutes for an in-flight garbage collection on SIGTERM;
       # the grace period is that plus 60 s so a rollout does not kill a run midway.
@@ -118,17 +115,25 @@ spec:
             - {name: OTEL_TRACES_EXPORTER, value: none}
           ports:
             - {name: gc, containerPort: 5001}
+          readinessProbe:
+            tcpSocket: {port: gc}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: gc}
+            periodSeconds: 20
+            failureThreshold: 6
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
           resources: {{- toYaml .Values.registry.bundled.gcResources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /var/lib/registry}
-            - {name: gc-auth, mountPath: /etc/registry-gc/htpasswd, subPath: htpasswd, readOnly: true}
+            - {name: gc-auth, mountPath: /etc/registry-gc, readOnly: true}
       volumes:
         - name: data
           persistentVolumeClaim: {claimName: last-registry-data}
-        # Only the admin line: the sidecar never sees the pusher's.
+        # Only the admin line, as a directory mount (no subPath) so kubelet refreshes it when the Secret changes
+        # and the registry pod never restarts for it. The sidecar never sees the pusher's line.
         - name: gc-auth
           secret:
             secretName: last-registry-auth
