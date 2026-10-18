@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +111,8 @@ func newImageScenario(t *testing.T, prefix string, install [][]string, intents .
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, err := json.Marshal([]string{a})
+	// A model that repeats its plan after a failure, as often as the operator will ask.
+	script, err := json.Marshal(slices.Repeat([]string{a}, agent.MaxAttempts+1))
 	if err != nil {
 		t.Fatal(err)
 	}
