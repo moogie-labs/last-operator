@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-const envCanaries = "LAST_EGRESS_CANARIES"
+const (
+	envCanaries        = "LAST_EGRESS_CANARIES"
+	envImageGCInterval = "LAST_IMAGE_GC_INTERVAL"
+	envRegistryGCURL   = "LAST_REGISTRY_GC_URL"
+)
 
 func baseEnv() map[string]string {
 	return map[string]string{
@@ -173,5 +177,29 @@ func TestConfigFromEnvReadsTheWriterSecretName(t *testing.T) {
 	cfg, err = ConfigFromEnv(envWith(nil))
 	if err != nil || cfg.AuditWriterSecret != "" {
 		t.Fatalf("default cfg = %+v, %v", cfg, err)
+	}
+}
+
+func TestConfigFromEnvImageGC(t *testing.T) {
+	cfg, err := ConfigFromEnv(envWith(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No URL means no sidecar: the chart sets one only for the bundled registry.
+	if cfg.ImageGCInterval != 24*time.Hour || cfg.RegistryGCURL != "" {
+		t.Fatalf("interval %v, sidecar URL %q; want 24h and none", cfg.ImageGCInterval, cfg.RegistryGCURL)
+	}
+	gcURL := "http://last-registry-gc.last-registry.svc:5001"
+	cfg, err = ConfigFromEnv(envWith(map[string]string{envImageGCInterval: "1m", envRegistryGCURL: gcURL}))
+	if err != nil || cfg.ImageGCInterval != time.Minute || cfg.RegistryGCURL != gcURL {
+		t.Fatalf("cfg = %v, %q (err %v); want 1m and %s", cfg.ImageGCInterval, cfg.RegistryGCURL, err, gcURL)
+	}
+	for _, bad := range []map[string]string{
+		{envImageGCInterval: "0s"}, {envImageGCInterval: "-1h"}, {envImageGCInterval: "daily"},
+		{envRegistryGCURL: "last-registry-gc:5001"}, {envRegistryGCURL: "ftp://gc:5001"},
+	} {
+		if _, err := ConfigFromEnv(envWith(bad)); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
 	}
 }

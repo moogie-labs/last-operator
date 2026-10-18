@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,25 +133,57 @@ func (x *imageIndex) put(ctx context.Context, specHash string, e imageEntry) err
 
 // drop removes the entry, and any verification cached for it, and saves.
 func (x *imageIndex) drop(ctx context.Context, specHash string) error {
-	return x.mutate(ctx, func() {
-		delete(x.entries, specHash)
-		delete(x.flushed, specHash)
-		for k := range x.verified {
-			if strings.HasPrefix(k, specHash+"|") {
-				delete(x.verified, k)
-			}
+	return x.mutate(ctx, func() { x.dropLocked(specHash) })
+}
+
+func (x *imageIndex) dropLocked(specHash string) {
+	delete(x.entries, specHash)
+	delete(x.flushed, specHash)
+	for k := range x.verified {
+		if strings.HasPrefix(k, specHash+"|") {
+			delete(x.verified, k)
 		}
-	})
+	}
+}
+
+// dropUnused drops the entry, as drop does, only if it still names digest and was
+// last used before cutoff. dropped reports whether it did; the entry is gone from
+// memory even when the save fails (err).
+func (x *imageIndex) dropUnused(ctx context.Context, specHash, digest string, cutoff time.Time) (dropped bool, err error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if e, ok := x.entries[specHash]; !ok || e.Digest != digest || !e.LastUsed.Before(cutoff) {
+		return false, nil
+	}
+	return true, x.saveRetryLocked(ctx, func() { x.dropLocked(specHash) })
+}
+
+// snapshot returns a copy of every entry.
+func (x *imageIndex) snapshot() map[string]imageEntry {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return maps.Clone(x.entries)
 }
 
 // touch records a use in memory only; flushUsed writes it back.
 func (x *imageIndex) touch(specHash string, now time.Time) {
+	x.touchIfIndexed(specHash, "", now)
+}
+
+// touchIfIndexed records a use, as touch does, and reports whether the entry is
+// indexed (with this digest, when digest is not empty).
+func (x *imageIndex) touchIfIndexed(specHash, digest string, now time.Time) bool {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if e, ok := x.entries[specHash]; ok && now.After(e.LastUsed) {
+	e, ok := x.entries[specHash]
+	if !ok || (digest != "" && e.Digest != digest) {
+		return false
+	}
+	if now.After(e.LastUsed) {
 		e.LastUsed = now
 		x.entries[specHash] = e
 	}
+	return true
 }
 
 // flushUsed saves the index when some entry's lastUsed changed and that entry was

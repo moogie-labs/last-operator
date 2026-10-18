@@ -1018,15 +1018,30 @@ don't change behavior when upstream packages change. A **new** plan
 with the same spec reuses the image. To pick up new package versions,
 the plan must pin a different version.
 
-**Garbage collection.** Once a day, the gateway deletes images whose
-`specHash` isn't referenced by any existing Intent's last executed
-plan and that haven't been used for `images.unusedRetention`. Each
-deletion is audited (`image.deleted`). For the bundled registry this
-works in two parts (§11.3):
+**Garbage collection.** The leading gateway collects unused images
+every `LAST_IMAGE_GC_INTERVAL` (default `24h`; the first run comes one
+interval after it takes leadership), one run at a time.
+
+- **Candidates** are image-index entries whose `lastUsed` is older than
+  `images.unusedRetention` (default 30 days), minus the referenced spec
+  hashes.
+- **A spec hash is referenced** when, computed on the current pinned
+  base, it comes from an install in any Intent's `status.plan` (steps,
+  and each resource's probes and teardown) or any ManagedResource's
+  probes or teardown.
+- **References are only a hint.** Intent status is operator-written, so
+  it is untrusted. A false reference only keeps an image longer; a
+  missing one only causes a rebuild.
+- **No pinned base, no GC.** Without a digest-pinned base no reference
+  can be computed, so the run deletes nothing, writes nothing and logs
+  why.
+
+Each deletion is audited (`image.deleted`). For the bundled registry
+this works in two parts (§11.3):
 
 1. The gateway deletes manifests through the registry API.
-2. Blob storage is reclaimed in a GC window, which the gateway
-   coordinates.
+2. Blob storage is reclaimed by the registry's GC sidecar, in a window
+   the gateway coordinates.
 
 External registries use their own retention and GC after the manifest
 is deleted.
@@ -1095,19 +1110,42 @@ is deleted.
 - **Coordinated GC.** Distribution's `registry garbage-collect` is
   unsafe while uploads are in progress, and every upload comes from a
   build the gateway starts. The gateway therefore runs GC as follows:
-  1. Write `image.gc.start`.
+  1. Write `image.gc.start`
+     `{"retention", "candidates": [specHash...]}`.
   2. Pause new builds (they queue) and wait for running builds to
      finish.
-  3. Delete unused manifests through the front proxy with the admin
-     credential.
-  4. Call the **GC sidecar** in the registry pod. It shares the PVC,
-     runs `registry garbage-collect`, and listens on an endpoint that
-     requires the admin credential and is reachable only from the
-     gateway.
-  5. Resume builds and write `image.gc.result` with the bytes freed.
+  3. For each candidate that is still unused:
+     - drop it from the image index;
+     - delete its manifest through the front proxy with the admin
+       credential;
+     - write `image.deleted`
+       `{"specHash", "digest", "registryDeleted": bool, "error"}`.
 
-  Pulls continue throughout. A build waiting during GC is delayed, not
-  failed.
+     A failed DELETE is recorded there, and the run goes on.
+  4. Call the **GC sidecar** in the registry pod: `POST /gc` with the
+     admin credential, waiting up to 30 minutes. It shares the PVC,
+     runs `registry garbage-collect`, answers
+     `{"bytesFreed", "log"}`, and is reachable only from the gateway.
+     The chart sets `LAST_REGISTRY_GC_URL` only for the bundled
+     registry; without it there is no call and no bytes are freed.
+  5. Resume builds.
+  6. Write `image.gc.result`
+     `{"deleted", "bytesFreed", "sidecarError", "durationMs"}`.
+
+  The gateway writes all three entry types, with no Intent.
+- **Builds resume on every path.** That includes a failed DELETE, a
+  failed sidecar call (recorded as `sidecarError`) and cancellation (a
+  step-down cancels the run). A run that was cancelled still writes
+  `image.gc.result` with what it did.
+- **A resolve never receives a deleted digest.** The entry leaves the
+  index *before* its manifest is deleted (the reverse of the M4 design's
+  order, deliberately).
+  - A resolve that finds the entry gone builds the image again. The
+    build waits for the pause, so it starts after GC.
+  - A resolve that used the entry before the drop made it used again.
+    GC then keeps it.
+- **Pulls continue throughout,** as do resolves of images still
+  indexed. A build waiting during GC is delayed, not failed.
 - **Validation required:** run `hack/registry-check.sh` against the
   platform; kind and k3s pass (spike, 2026-10-17); EKS and GKE Standard
   are pending a run. Platforms that forbid `hostPort` (e.g. GKE

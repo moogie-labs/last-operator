@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +62,13 @@ type Config struct {
 	// BuildKitImage (LAST_BUILDKIT_IMAGE, default moby/buildkit:v0.26.2-rootless)
 	// is the build pods' image.
 	BuildKitImage string
+	// ImageGCInterval (LAST_IMAGE_GC_INTERVAL, default 24h) is how often the leader
+	// garbage-collects unused images; the first run is one interval after it leads.
+	ImageGCInterval time.Duration
+	// RegistryGCURL (LAST_REGISTRY_GC_URL, optional) is the bundled registry's GC
+	// sidecar, such as http://last-registry-gc.last-registry.svc:5001. The chart sets
+	// it only for the bundled registry; empty means there is no sidecar to call.
+	RegistryGCURL string
 }
 
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
@@ -95,6 +103,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		RegistryNamespace:  or("LAST_REGISTRY_NAMESPACE", "last-registry"),
 		BuildNamespace:     or("LAST_BUILD_NAMESPACE", "last-build"),
 		BuildKitImage:      or("LAST_BUILDKIT_IMAGE", "moby/buildkit:v0.26.2-rootless"),
+		RegistryGCURL:      strings.TrimSpace(getenv("LAST_REGISTRY_GC_URL")),
 	}
 	// A fixed-order slice keeps the reported variable deterministic.
 	for _, req := range []struct{ name, value string }{
@@ -122,6 +131,15 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg.DrainTimeout, err = time.ParseDuration(or("LAST_DRAIN_TIMEOUT", "5m"))
 	if err != nil || cfg.DrainTimeout <= 0 {
 		return Config{}, fmt.Errorf("gateway: LAST_DRAIN_TIMEOUT must be a positive duration: %v", err)
+	}
+	cfg.ImageGCInterval, err = time.ParseDuration(or("LAST_IMAGE_GC_INTERVAL", defaultImageGCInterval.String()))
+	if err != nil || cfg.ImageGCInterval <= 0 {
+		return Config{}, fmt.Errorf("gateway: LAST_IMAGE_GC_INTERVAL must be a positive duration: %v", err)
+	}
+	if cfg.RegistryGCURL != "" {
+		if u, err := url.Parse(cfg.RegistryGCURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+			return Config{}, errors.New("gateway: LAST_REGISTRY_GC_URL must be an http or https URL with a host and no credentials")
+		}
 	}
 	for spec := range strings.SplitSeq(getenv("LAST_EGRESS_CANARIES"), ",") {
 		if spec = strings.TrimSpace(spec); spec == "" {

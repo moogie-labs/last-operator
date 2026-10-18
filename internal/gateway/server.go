@@ -53,6 +53,8 @@ type Gateway struct {
 	registry *images.Client
 	// newBuilder returns the builder for one build's pod configuration; tests replace it.
 	newBuilder func(images.BuildPodConfig) imageBuilder
+	// gcMu is held for the length of an image GC run: one at a time.
+	gcMu sync.Mutex
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -245,7 +247,11 @@ func (g *Gateway) lead(parent context.Context) error {
 	// ones finish and record their outcomes. Then the index entries those writes
 	// produced are saved: the writer is still stored, but nothing new can use it.
 	// Only then is the writer withdrawn.
+	// An image GC run is cancelled when the drain starts, so it resumes builds and
+	// records its result within the drain window instead of holding it open.
+	gcCtx, stopGC := context.WithCancel(ctx)
 	defer func() {
+		stopGC()
 		g.drain(g.cfg.DrainTimeout)
 		g.flushIndexesOnStepDown(ctx)
 	}()
@@ -255,6 +261,12 @@ func (g *Gateway) lead(parent context.Context) error {
 	defer ticker.Stop()
 	flush := time.NewTicker(indexFlushInterval)
 	defer flush.Stop()
+	gcEvery := g.cfg.ImageGCInterval
+	if gcEvery <= 0 {
+		gcEvery = defaultImageGCInterval
+	}
+	gc := time.NewTicker(gcEvery)
+	defer gc.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -264,6 +276,8 @@ func (g *Gateway) lead(parent context.Context) error {
 			return context.Cause(ctx)
 		case <-flush.C:
 			g.flushIndexes(ctx)
+		case <-gc.C:
+			g.startImageGC(gcCtx, w)
 		case <-ticker.C:
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)

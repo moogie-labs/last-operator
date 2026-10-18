@@ -104,6 +104,13 @@ type imageBuilds struct {
 	stopped bool // set by stop: no new flight starts
 	sem     chan struct{}
 	heads   map[string]time.Time // digest -> when its HEAD must be repeated
+	// active counts builds holding a slot, of whichever semaphore they took it from.
+	active int
+	// paused is set by pause: acquire waits until resumed is closed. idle, when set,
+	// is closed as active drops to zero.
+	paused  bool
+	resumed chan struct{}
+	idle    chan struct{}
 }
 
 func newImageBuilds() *imageBuilds {
@@ -124,15 +131,91 @@ func (b *imageBuilds) slots() chan struct{} {
 	return b.sem
 }
 
-// acquire waits for a build slot and returns its release.
+// acquire waits for a build slot, and for any pause to end, and returns its release.
 func (b *imageBuilds) acquire(ctx context.Context) (func(), error) {
-	sem := b.slots()
-	select {
-	case sem <- struct{}{}:
-		return func() { <-sem }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	for {
+		if err := b.waitResumed(ctx); err != nil {
+			return nil, err
+		}
+		sem := b.slots()
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		b.mu.Lock()
+		if !b.paused {
+			b.active++
+			b.mu.Unlock()
+			var once sync.Once
+			return func() { once.Do(func() { <-sem; b.finished() }) }, nil
+		}
+		b.mu.Unlock()
+		<-sem // a pause began while this build waited for the slot: give it back and wait
 	}
+}
+
+func (b *imageBuilds) waitResumed(ctx context.Context) error {
+	b.mu.Lock()
+	for b.paused {
+		resumed := b.resumed
+		b.mu.Unlock()
+		select {
+		case <-resumed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		b.mu.Lock()
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *imageBuilds) finished() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.active--
+	if b.active == 0 && b.idle != nil {
+		close(b.idle)
+		b.idle = nil
+	}
+}
+
+// pause stops new builds from starting (they wait in acquire) and waits until every
+// running build has released its slot. It counts builds, not slots, so a resize
+// during a build or a pause changes nothing. On success the caller must call resume,
+// which is safe to call more than once; on error builds are already resumed.
+func (b *imageBuilds) pause(ctx context.Context) (resume func(), err error) {
+	b.mu.Lock()
+	if b.paused {
+		b.mu.Unlock()
+		return nil, errors.New("image builds are already paused")
+	}
+	b.paused, b.resumed = true, make(chan struct{})
+	var idle chan struct{}
+	if b.active > 0 {
+		b.idle = make(chan struct{})
+		idle = b.idle
+	}
+	b.mu.Unlock()
+	var once sync.Once
+	resume = func() {
+		once.Do(func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			b.paused, b.idle = false, nil
+			close(b.resumed)
+		})
+	}
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			resume()
+			return nil, ctx.Err()
+		}
+	}
+	return resume, nil
 }
 
 func (b *imageBuilds) headCached(digest string) bool {
@@ -152,6 +235,13 @@ func (b *imageBuilds) cacheHead(digest string) {
 		}
 	}
 	b.heads[digest] = now.Add(headCacheTTL)
+}
+
+// forgetHead drops a cached HEAD, for a manifest the gateway deleted.
+func (b *imageBuilds) forgetHead(digest string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.heads, digest)
 }
 
 // do runs fn once per key at a time: callers that arrive while it runs share its
@@ -273,8 +363,10 @@ func (g *Gateway) resolveImageOn(ctx context.Context, w *audit.Writer, base stri
 			if err != nil {
 				return "", err
 			}
-			if usable {
-				g.images.touch(specHash, g.builds.now())
+			// The touch succeeds only while the entry is still indexed: once image GC
+			// drops an entry it deletes the manifest, so a resolve that lost that race
+			// rebuilds, and an entry touched first is no longer unused, so GC keeps it.
+			if usable && g.images.touchIfIndexed(specHash, e.Digest, g.builds.now()) {
 				return g.runRef(e.Digest), nil
 			}
 		}

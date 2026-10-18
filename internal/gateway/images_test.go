@@ -123,15 +123,42 @@ type imageEnv struct {
 	srv   *httptest.Server
 	host  string
 	heads atomic.Int32
+	// deletes counts admitted manifest DELETEs; deleteStatus, when set, answers them.
+	deletes      atomic.Int32
+	deleteStatus atomic.Int32
+	// deleteRelease, when set, holds each DELETE until it closes; deleting
+	// receives once per held DELETE as it arrives.
+	deleteRelease atomic.Pointer[chan struct{}]
+	deleting      chan struct{}
 }
 
 func newImageEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Object) *imageEnv {
 	t.Helper()
-	ie := &imageEnv{}
+	ie := &imageEnv{deleting: make(chan struct{}, 16)}
 	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	ie.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
+		switch r.Method {
+		case http.MethodHead:
 			ie.heads.Add(1)
+		case http.MethodDelete:
+			// The front proxy admits DELETE with the admin credential only.
+			if user, pw, ok := r.BasicAuth(); !ok || user != testAdminUser || pw != testAdminPW {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			ie.deletes.Add(1)
+			if release := ie.deleteRelease.Load(); release != nil {
+				ie.deleting <- struct{}{}
+				select {
+				case <-*release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if code := ie.deleteStatus.Load(); code != 0 {
+				w.WriteHeader(int(code))
+				return
+			}
 		}
 		reg.ServeHTTP(w, r)
 	}))
