@@ -958,7 +958,8 @@ a command with `image.install` fails with `FailedPrecondition`.
    ```
    FROM <baseImage>@<baseDigest>
    USER root
-   RUN ["pip", "install", "awscli==1.33.0"]      # one exec-form RUN per install argv
+   RUN ["apt-get", "update"]                      # one exec-form RUN per install argv
+   RUN ["apt-get", "install", "-y", "--no-install-recommends", "awscli=2.9.19-1"]
    USER 65532
    ```
    It then launches a **build pod** in `last-build`, a namespace only
@@ -1003,7 +1004,7 @@ a command with `image.install` fails with `FailedPrecondition`.
 
 Once built, an image is reused by every later command with the same
 spec, including probes, remediation, and teardown. Unpinned installs
-(`pip install awscli`) are therefore frozen at build time, and probes
+(`apt-get install -y awscli`) are therefore frozen at build time, and probes
 don't change behavior when upstream packages change. A **new** plan
 with the same spec reuses the image. To pick up new package versions,
 the plan must pin a different version.

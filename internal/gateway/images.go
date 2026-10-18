@@ -64,13 +64,30 @@ type buildStart struct {
 	BaseImage     string `json:"baseImage"`
 	Containerfile string `json:"containerfile"`
 	PushRef       string `json:"pushRef"`
+	// Egress is the build pod's grants: the registry rules, the allowed buildEgress
+	// entries, and kubeDNSGrant for the DNS rule the build objects add.
+	Egress []string `json:"egress"`
 }
 
-// imageFlight is one resolve of a spec hash that other callers wait on.
+// kubeDNSGrant names the kube-dns rule (UDP and TCP 53) in image.build.start.
+const kubeDNSGrant = "kube-dns:53"
+
+func ruleStrings(rules []sandbox.EgressRule) []string {
+	out := make([]string, 0, len(rules)+1)
+	for _, r := range rules {
+		out = append(out, r.String())
+	}
+	return out
+}
+
+// imageFlight is one resolve of a spec hash that callers share. It runs detached
+// from any one caller and is cancelled only when every caller has gone.
 type imageFlight struct {
-	done chan struct{}
-	ref  string
-	err  error
+	done   chan struct{}
+	ref    string
+	err    error
+	refs   int // callers still waiting; guarded by imageBuilds.mu
+	cancel context.CancelFunc
 }
 
 // imageBuilds is the resolver's state: in-flight resolves per spec hash, the build
@@ -132,31 +149,61 @@ func (b *imageBuilds) cacheHead(digest string) {
 	b.heads[digest] = now.Add(headCacheTTL)
 }
 
-// do runs fn once per key at a time: callers that arrive while it runs wait for
-// its result instead (single flight). A waiter whose own context ends stops waiting.
+// do runs fn once per key at a time: callers that arrive while it runs share its
+// result (single flight). fn runs on its own goroutine, on a context that keeps the
+// first caller's values but not its cancellation; it is cancelled only when the last
+// waiting caller has gone. A caller whose own context ends stops waiting and gets
+// its own context error; the others are unaffected.
 func (b *imageBuilds) do(ctx context.Context, key string, fn func(context.Context) (string, error)) (string, error) {
 	b.mu.Lock()
-	if f, ok := b.flights[key]; ok {
-		b.mu.Unlock()
-		select {
-		case <-f.done:
-			return f.ref, f.err
-		case <-ctx.Done():
-			return "", status.FromContextError(ctx.Err()).Err()
-		}
+	f, ok := b.flights[key]
+	if !ok {
+		fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		f = &imageFlight{done: make(chan struct{}), cancel: cancel}
+		b.flights[key] = f
+		go b.run(fctx, key, f, fn)
 	}
-	// The default error reaches waiters only if fn panics.
-	f := &imageFlight{done: make(chan struct{}), err: status.Error(codes.Internal, "image resolve did not finish")}
-	b.flights[key] = f
+	f.refs++
 	b.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.ref, f.err
+	case <-ctx.Done():
+		b.leave(key, f)
+		return "", status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+func (b *imageBuilds) run(ctx context.Context, key string, f *imageFlight, fn func(context.Context) (string, error)) {
 	defer func() {
 		b.mu.Lock()
-		delete(b.flights, key)
+		if b.flights[key] == f {
+			delete(b.flights, key)
+		}
 		b.mu.Unlock()
+		f.cancel()
 		close(f.done)
 	}()
 	f.ref, f.err = fn(ctx)
-	return f.ref, f.err
+	if f.err != nil && ctx.Err() != nil && status.Code(f.err) != codes.Unavailable {
+		// Only reachable when every caller has gone; keep §7's Unavailable for any
+		// caller that might still read it.
+		f.err = status.Errorf(codes.Unavailable, "image resolve cancelled: %v", f.err)
+	}
+}
+
+// leave drops one caller from the flight; the last one cancels it and removes it,
+// so a later call starts afresh.
+func (b *imageBuilds) leave(key string, f *imageFlight) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	f.refs--
+	if f.refs == 0 {
+		f.cancel()
+		if b.flights[key] == f {
+			delete(b.flights, key)
+		}
+	}
 }
 
 // resolveImage returns the reference a command runs on: the base when install is empty,
@@ -240,11 +287,7 @@ func (g *Gateway) dropImage(ctx context.Context, specHash string) {
 
 // build runs one audited build of specHash and indexes the digest it produced.
 func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, op *lastv1alpha1.OperatorConfig, base, specHash string) (string, error) {
-	release, err := g.builds.acquire(ctx)
-	if err != nil {
-		return "", status.FromContextError(err).Err()
-	}
-	defer release()
+	// Configuration refusals come before the slot, so they never queue behind builds.
 	egress, err := g.buildEgress(ctx, op, req.Policy)
 	if err != nil {
 		return "", err
@@ -253,6 +296,11 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 	if err != nil {
 		return "", err
 	}
+	release, err := g.builds.acquire(ctx)
+	if err != nil {
+		return "", status.Errorf(codes.Unavailable, "wait for a build slot: %v", err)
+	}
+	defer release()
 	cfg := g.buildPodConfig(op, base)
 	containerfile, err := images.Containerfile(cfg.BuildBase(base), req.Install)
 	if err != nil {
@@ -273,7 +321,8 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 	// audit calls ignore cancellation while the build itself still honors it.
 	result, err := w.DoEntry(context.WithoutCancel(ctx),
 		draft(audit.TypeImageBuildStart, buildStart{SpecHash: specHash, BaseImage: base, Containerfile: containerfile,
-			PushRef: cfg.FrontHost + "/" + images.ImagesRepo + ":" + images.Tag(specHash)}),
+			PushRef: cfg.FrontHost + "/" + images.ImagesRepo + ":" + images.Tag(specHash),
+			Egress:  append(ruleStrings(egress), kubeDNSGrant)}),
 		func(context.Context) (any, error) {
 			var buildErr error
 			out, buildErr = builder.Build(buildCtx, spec)

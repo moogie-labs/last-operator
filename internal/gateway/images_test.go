@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -43,16 +44,21 @@ const (
 	goneDigest      = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	settle          = 200 * time.Millisecond
 	testBuildKitImg = "buildkit:test"
+	hostEgress      = "pypi.org:443"
 )
+
+// trueInstall and falseInstall are two distinct image specs.
+var trueInstall, falseInstall = install([]string{"true"}), install([]string{"false"})
 
 // fakeBuilder pushes a random image to the test registry for each build, so the
 // digest it returns is one the registry has.
 type fakeBuilder struct {
-	host    string
-	started chan string   // receives each build's spec hash as it starts
-	block   chan struct{} // when set, each build waits for one token
-	fail    error         // when set, builds fail with this reason
-	log     string        // the failed build's log
+	host     string
+	started  chan string   // receives each build's spec hash as it starts
+	block    chan struct{} // when set, each build waits for one token
+	fail     error         // when set, builds fail with this reason
+	log      string        // the failed build's log
+	buildErr error         // when set, Build returns it (outcome unknown)
 
 	mu         sync.Mutex
 	specs      []images.BuildSpec
@@ -60,6 +66,7 @@ type fakeBuilder struct {
 	reaps      []bool
 	running    int
 	maxRunning int
+	cancelled  int // builds that saw their context end
 }
 
 func (f *fakeBuilder) Build(ctx context.Context, s images.BuildSpec) (images.BuildOutcome, error) {
@@ -74,8 +81,14 @@ func (f *fakeBuilder) Build(ctx context.Context, s images.BuildSpec) (images.Bui
 		select {
 		case <-f.block:
 		case <-ctx.Done():
+			f.mu.Lock()
+			f.cancelled++
+			f.mu.Unlock()
 			return images.BuildOutcome{}, ctx.Err()
 		}
+	}
+	if f.buildErr != nil {
+		return images.BuildOutcome{}, f.buildErr
 	}
 	if f.fail != nil {
 		return images.BuildOutcome{Err: f.fail, Log: f.log, LogTruncated: true, Duration: time.Second}, nil
@@ -205,7 +218,11 @@ func (ie *imageEnv) request(inst []lastv1alpha1.ArgvCommand) imageRequest {
 
 // resolve bounds each call, so a broken single flight or cap fails a test instead of hanging it.
 func (ie *imageEnv) resolve(inst []lastv1alpha1.ArgvCommand) (string, error) {
-	ctx, cancel := context.WithTimeout(ie.ctx, 5*time.Second)
+	return ie.resolveCtx(ie.ctx, inst)
+}
+
+func (ie *imageEnv) resolveCtx(ctx context.Context, inst []lastv1alpha1.ArgvCommand) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return ie.g.resolveImage(ctx, ie.g.writer.Load(), ie.request(inst))
 }
@@ -322,8 +339,9 @@ func (ie *imageEnv) checkBuildAudit(hash string) (buildResult, uint64) {
 	}
 	wantCF := "FROM " + ie.host + "/last/base@" + testBaseDigest + "\nUSER root\n" +
 		`RUN ["apt-get","install","-y","jq=1.6-2.1"]` + "\nUSER 65532\n"
+	wantEgress := []string{frontClusterIP + "/32:5000", frontEndpointIP + "/32:5000", kubeDNSGrant}
 	if start.SpecHash != hash || start.BaseImage != testBase || start.Containerfile != wantCF ||
-		start.PushRef != ie.host+"/last/images:"+images.Tag(hash) {
+		start.PushRef != ie.host+"/last/images:"+images.Tag(hash) || !slices.Equal(start.Egress, wantEgress) {
 		t.Fatalf("image.build.start = %+v", start)
 	}
 	var res buildResult
@@ -533,7 +551,7 @@ func TestBuildsAreCappedByMaxConcurrentBuilds(t *testing.T) {
 		t.Fatal(err)
 	}
 	ie.fb.block = make(chan struct{})
-	first, second := install([]string{"true"}), install([]string{"false"})
+	first, second := trueInstall, falseInstall
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	wg.Go(func() { _, errs[0] = ie.resolve(first) })
@@ -589,7 +607,7 @@ func TestResolveRefuses(t *testing.T) {
 			op.Spec.Registry = &lastv1alpha1.RegistryConfig{Mode: lastv1alpha1.RegistryExternal}
 			return op
 		}(), want: "external"},
-		{name: "hostname in buildEgress", op: imageOp([]string{"pypi.org:443"}), want: "pypi.org:443"},
+		{name: "hostname in buildEgress", op: imageOp([]string{hostEgress}), want: hostEgress},
 		{name: "grant covers a canary", op: imageOp([]string{"10.96.0.0/16:8080"}, "10.96.0.0/16:8080"), want: testCanary},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -674,5 +692,164 @@ func TestBuildLimitsFromOperatorConfig(t *testing.T) {
 	}
 	if buildTimeout(nil) != images.DefaultBuildTimeout || maxConcurrentBuilds(nil) != images.DefaultMaxConcurrentBuilds {
 		t.Error("no OperatorConfig must mean the defaults")
+	}
+}
+
+// eventually polls cond for up to 5 s.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func (ie *imageEnv) flights() int {
+	ie.g.builds.mu.Lock()
+	defer ie.g.builds.mu.Unlock()
+	return len(ie.g.builds.flights)
+}
+
+func TestAFirstCallerCancellingDoesNotStopTheSharedBuild(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.fb.block = make(chan struct{})
+	first, cancelFirst := context.WithCancel(ie.ctx)
+	defer cancelFirst()
+	var firstErr, secondErr error
+	var ref string
+	var wg sync.WaitGroup
+	wg.Go(func() { _, firstErr = ie.resolveCtx(first, toolInstall) })
+	ie.waitStarted()
+	wg.Go(func() { ref, secondErr = ie.resolve(toolInstall) })
+	time.Sleep(settle) // let the second caller join the flight
+	cancelFirst()
+	time.Sleep(settle)
+	close(ie.fb.block)
+	wg.Wait()
+	wantCode(t, firstErr, codes.Canceled)
+	if secondErr != nil || ref == "" {
+		t.Fatalf("second caller = %q, %v; want the digest", ref, secondErr)
+	}
+	if ie.fb.builds() != 1 || ie.fb.cancelled != 0 {
+		t.Fatalf("%d builds, %d cancelled; want 1 build, not cancelled", ie.fb.builds(), ie.fb.cancelled)
+	}
+}
+
+func TestEveryCallerCancellingCancelsTheBuild(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.fb.block = make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(ie.ctx)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Go(func() { _, errs[i] = ie.resolveCtx(ctx, toolInstall) })
+	}
+	ie.waitStarted()
+	time.Sleep(settle)
+	cancel()
+	wg.Wait()
+	for _, err := range errs {
+		wantCode(t, err, codes.Canceled)
+	}
+	eventually(t, "the build to see its context end", func() bool {
+		ie.fb.mu.Lock()
+		defer ie.fb.mu.Unlock()
+		return ie.fb.cancelled == 1
+	})
+	if n := ie.flights(); n != 0 {
+		t.Fatalf("%d flights left, want the cancelled one removed", n)
+	}
+	// The cancelled build still gets its result entry (the audit ignores cancellation).
+	eventually(t, "image.build.result", func() bool { return len(ie.entriesOf(audit.TypeImageBuildResult)) == 1 })
+	var res buildResult
+	if err := json.Unmarshal(ie.entriesOf(audit.TypeImageBuildResult)[0].Payload, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != buildFailed || res.Error == "" {
+		t.Fatalf("image.build.result = %+v, want a failure with an error", res)
+	}
+	ie.fb.block <- struct{}{}
+	if _, err := ie.resolve(toolInstall); err != nil {
+		t.Fatal(err)
+	}
+	if ie.fb.builds() != 2 {
+		t.Fatalf("%d builds, want a fresh build after the cancelled one", ie.fb.builds())
+	}
+}
+
+func TestACallerCancelledWhileQueuedDoesNotAffectItsFlight(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.g.builds.resize(1)
+	ie.fb.block = make(chan struct{}, 2)
+	running, queued := trueInstall, falseInstall
+	var wg sync.WaitGroup
+	var runErr, waitErr, leftErr error
+	var ref string
+	wg.Go(func() { _, runErr = ie.resolve(running) })
+	ie.waitStarted()
+	leaving, leave := context.WithCancel(ie.ctx)
+	defer leave()
+	wg.Go(func() { _, leftErr = ie.resolveCtx(leaving, queued) })
+	time.Sleep(settle) // the leaving caller starts the flight
+	wg.Go(func() { ref, waitErr = ie.resolve(queued) })
+	time.Sleep(settle) // both queued callers share the flight waiting for the slot
+	leave()
+	time.Sleep(settle)
+	ie.fb.block <- struct{}{}
+	ie.fb.block <- struct{}{}
+	wg.Wait()
+	wantCode(t, leftErr, codes.Canceled)
+	if runErr != nil || waitErr != nil || ref == "" {
+		t.Fatalf("running %v, waiting %q %v; want both built", runErr, ref, waitErr)
+	}
+	if ie.fb.builds() != 2 {
+		t.Fatalf("%d builds, want 2", ie.fb.builds())
+	}
+}
+
+func TestAConfigRefusalDoesNotQueueBehindBuilds(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.g.builds.resize(1)
+	ie.fb.block = make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = ie.resolve(trueInstall) })
+	defer func() { close(ie.fb.block); wg.Wait() }()
+	ie.waitStarted()
+	var op lastv1alpha1.OperatorConfig
+	if err := ie.crd.Get(ie.ctx, client.ObjectKey{Name: testConfigName}, &op); err != nil {
+		t.Fatal(err)
+	}
+	op.Spec.Images.BuildEgress = []string{hostEgress}
+	if err := ie.crd.Update(ie.ctx, &op); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err := ie.resolve(toolInstall)
+	wantCode(t, err, codes.FailedPrecondition)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the refusal took %v; it queued behind the running build", d)
+	}
+}
+
+func TestABuilderErrorIsAuditedAndUnavailable(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.fb.buildErr = errors.New("create build pod: forbidden")
+	_, err := ie.resolve(toolInstall)
+	wantCode(t, err, codes.Unavailable)
+	results := ie.entriesOf(audit.TypeImageBuildResult)
+	if len(results) != 1 {
+		t.Fatalf("%d image.build.result entries, want 1", len(results))
+	}
+	var res buildResult
+	if err := json.Unmarshal(results[0].Payload, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != buildFailed || !strings.Contains(res.Error, "create build pod: forbidden") || res.Digest != "" {
+		t.Fatalf("image.build.result = %+v", res)
+	}
+	if _, ok := ie.g.images.get(specHashOf(t, toolInstall)); ok {
+		t.Fatal("an unknown outcome was indexed")
 	}
 }
