@@ -62,7 +62,7 @@ make helm-crds
 kubectl apply --server-side --force-conflicts -f charts/last-operator/crds/
 helm upgrade --install last charts/last-operator -n last-system --create-namespace \
   --set image.tag="$TAG" --set image.registry="$REGISTRY" --set image.pullPolicy=Never \
-  --set audit.bundled.size=1Gi \
+  --set audit.bundled.size=1Gi --set gateway.imageGCInterval=1m \
   --set sandbox.image="$REGISTRY/last-sandbox-base:$TAG" \
   --wait --wait-for-jobs --timeout 10m
 # A rebuilt image under the same tag is only picked up by new pods.

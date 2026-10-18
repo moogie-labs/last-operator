@@ -92,6 +92,8 @@ spec:
           env:
             - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
             - {name: OTEL_TRACES_EXPORTER, value: none}
+            # The image's default config serves a debug endpoint on :5001, the GC sidecar's port in this pod.
+            - {name: REGISTRY_HTTP_DEBUG_ADDR, value: "127.0.0.1:5002"}
           ports:
             - {name: registry, containerPort: 5000}
           readinessProbe:
