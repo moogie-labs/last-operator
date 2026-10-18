@@ -119,6 +119,19 @@ func TestNextGivesUpAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestNextWrapsTheLastCheckErrorInErrNoTurn(t *testing.T) {
+	refused := errors.New("not this one")
+	llm := &fakeLLM{answers: []string{commandAnswer}}
+	_, _, _, err := (&Planner{LLM: llm}).Next(context.Background(), ref, NewConversation(nginxRequest),
+		func(Turn) error { return refused })
+	if !errors.Is(err, ErrNoTurn) || !errors.Is(err, refused) {
+		t.Fatalf("Next = %v, want ErrNoTurn wrapping the check error", err)
+	}
+	if want := "agent: the model gave no valid turn: not this one"; err.Error() != want {
+		t.Errorf("message = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestNextTurnsACheckFailureIntoACorrection(t *testing.T) {
 	llm := &fakeLLM{answers: []string{questionsAnswer, commandAnswer}}
 	check := func(turn Turn) error {

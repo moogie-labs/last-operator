@@ -167,5 +167,5 @@ func (p *Planner) Next(ctx context.Context, ref *gatewayv1.IntentRef, conv Conve
 		lastErr = err
 		conv = conv.With(correctionTurn(err))
 	}
-	return Turn{}, nil, 0, fmt.Errorf("%w: %v", ErrNoTurn, lastErr)
+	return Turn{}, nil, 0, fmt.Errorf("%w: %w", ErrNoTurn, lastErr)
 }

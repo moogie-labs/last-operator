@@ -13,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -243,8 +244,13 @@ func TestImageBuildFailureFailsTheStep(t *testing.T) {
 	if in.Status.Phase != lastv1alpha1.PhaseFailed {
 		t.Fatalf("intent phase = %s, want Failed\n%s", in.Status.Phase, out)
 	}
-	// The operator replans after the failed step, so the Intent's later status is not the
-	// build error; the audit entries the gateway wrote for the step are.
+	// The operator replans after the failed step and the model repeats the plan, so the
+	// Intent fails at planning; its status must still lead with the build error.
+	ready := meta.FindStatusCondition(in.Status.Conditions, "Ready")
+	if ready == nil || !strings.Contains(ready.Message, "ImageBuildFailed") {
+		t.Errorf("Ready condition = %+v, want a message containing ImageBuildFailed", ready)
+	}
+	// The audit entries the gateway wrote for the step carry the same cause.
 	var buildFailed, ended *audit.Entry
 	for _, e := range auditEntries(t, sc.ns+"/bad") {
 		switch {

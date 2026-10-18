@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,11 +91,25 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		}
 		conv = conv.With(next)
 	}
+	used, err := agent.UsedPlans(actx, r.Gateway, intentRef(in))
+	switch {
+	case status.Code(err) == codes.Unimplemented:
+		used = nil // a gateway without QueryAudit cannot say; its replay refusal stays the backstop
+	case err != nil:
+		return ctrl.Result{}, err // transient: retried with backoff
+	}
+	feedback := replanFeedback(in)
 	pctx, pcancel := context.WithTimeout(ctx, planTimeout)
 	defer pcancel()
-	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, answeredCheck(in))
+	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, both(answeredCheck(in), rerunCheck(used, feedback)))
 	var capped *agent.CapError
 	switch {
+	case errors.Is(err, agent.ErrNoTurn) && errors.Is(err, errPlanAlreadyRan):
+		msg := "The model kept proposing the plan that already ran"
+		if feedback != "" {
+			msg = "The model kept proposing the plan that already failed: " + feedback
+		}
+		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, msg)
 	case errors.Is(err, agent.ErrNoTurn) || errors.Is(err, agent.ErrNoSeq) || errors.As(err, &capped) || terminal(err):
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, describe(err))
 	case err != nil:

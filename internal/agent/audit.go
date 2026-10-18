@@ -81,6 +81,23 @@ func DiscoveryResult(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, s
 	return resultTurn(*found), nil
 }
 
+// UsedPlans returns the hashes of the plans this Intent has already opened a
+// phase for: the subjects of its phase.begin entries outside Discovery. The
+// gateway refuses to run any of them again. A truncated index gives what it
+// still holds.
+func UsedPlans(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (map[string]bool, error) {
+	used := map[string]bool{}
+	_, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
+		if e.GetStage() != string(lastv1alpha1.StageDiscovery) {
+			used[e.GetSubjectHash()] = true
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return used, nil
+}
+
 // ErrNoReload means the audit log no longer holds the whole planning session,
 // so it cannot be rebuilt.
 var ErrNoReload = errors.New("agent: the conversation cannot be reloaded")

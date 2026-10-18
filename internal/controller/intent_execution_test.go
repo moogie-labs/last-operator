@@ -16,6 +16,15 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
+// conversationText joins every message of a CallLLM request.
+func conversationText(req *gatewayv1.CallLLMRequest) string {
+	var b strings.Builder
+	for _, m := range req.GetMessages() {
+		b.WriteString(m.GetContent() + "\n")
+	}
+	return b.String()
+}
+
 var _ = Describe("Intent execution", func() {
 	var key types.NamespacedName
 	s1 := argvStep("s1", argKubectl, argGet, "namespace", "x", "-o", "json")
@@ -71,6 +80,47 @@ var _ = Describe("Intent execution", func() {
 		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, endFailed, callLLM}))
 		Expect(requestText(gw.lastRequest(key))).To(ContainSubstring("step s1 exited 1: boom"))
 		Expect(meta.FindStatusCondition(getIntent(key).Status.Conditions, CondExecuted)).To(BeNil())
+	})
+
+	It("asks the model to change a replan that is identical to the plan that failed", func() {
+		failing := []lastv1alpha1.Command{argvStep("s1", "false")}
+		fixed := []lastv1alpha1.Command{argvStep("s2", trueCmd)}
+		awaitingApproval(&script{exit: map[string]int32{"s1": 1}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+			if strings.Contains(conversationText(req), "identical to plan") {
+				return answer(fixed), nil
+			}
+			return answer(failing), nil
+		}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(planHash(key)).Should(Equal(hashOf(fixed)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		text := conversationText(gw.lastRequest(key))
+		Expect(text).To(ContainSubstring("identical to plan " + hashOf(failing) + ", which already ran and failed: step s1 exited 1: boom"))
+		Expect(text).To(ContainSubstring("A plan runs only once"))
+	})
+
+	It("fails with the original cause when the model keeps proposing the plan that failed", func() {
+		failing := []lastv1alpha1.Command{argvStep("s1", "false")}
+		awaitingApproval(&script{exit: map[string]int32{"s1": 1}, llm: func(*gatewayv1.CallLLMRequest) (string, error) {
+			return answer(failing), nil
+		}})
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(HavePrefix("The model kept proposing the plan that already failed: step s1 exited 1: boom"))
+	})
+
+	It("retries planning while the gateway cannot read the audit log", func() {
+		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1})),
+			queryErr: status.Error(codes.Unavailable, "index unreachable")})
+		createIntent(key, "provision")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhasePlanning))
+		Consistently(phase(key), "2s").Should(Equal(lastv1alpha1.PhasePlanning))
+		Expect(gw.calls(key)).NotTo(ContainElement(callLLM))
+		gw.updateScript(key, func(s *script) { s.queryErr = nil })
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 	})
 
 	It("plans again with the build log's tail when a step's image build fails", func() {

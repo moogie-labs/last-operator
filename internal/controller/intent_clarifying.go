@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -53,6 +54,43 @@ func answeredCheck(in *lastv1alpha1.Intent) func(agent.Turn) error {
 		for _, q := range t.Questions {
 			if hasAnswer(in, q.ID) {
 				return fmt.Errorf("question id %q was answered earlier in this conversation; give every question a new id", q.ID)
+			}
+		}
+		return nil
+	}
+}
+
+// errPlanAlreadyRan marks a plan the gateway would refuse because an earlier
+// phase of the Intent already ran it.
+var errPlanAlreadyRan = errors.New("the plan already ran")
+
+// ranError is the model-facing message of a rerun refusal; it matches errPlanAlreadyRan.
+type ranError string
+
+func (e ranError) Error() string      { return string(e) }
+func (ranError) Is(target error) bool { return target == errPlanAlreadyRan }
+
+// rerunCheck refuses a plan whose hash is in used, telling the model why. The
+// feedback is the failure the session was asked to address, if any.
+func rerunCheck(used map[string]bool, feedback string) func(agent.Turn) error {
+	return func(t agent.Turn) error {
+		if t.Kind != agent.KindPlan || t.Plan == nil || !used[t.Plan.Hash] {
+			return nil
+		}
+		msg := "This plan is identical to plan " + t.Plan.Hash + ", which already ran"
+		if feedback != "" {
+			msg += " and failed: " + feedback
+		}
+		return ranError(msg + ". A plan runs only once: change it so it addresses what went wrong")
+	}
+}
+
+// both runs each check in turn and returns the first refusal.
+func both(checks ...func(agent.Turn) error) func(agent.Turn) error {
+	return func(t agent.Turn) error {
+		for _, c := range checks {
+			if err := c(t); err != nil {
+				return err
 			}
 		}
 		return nil

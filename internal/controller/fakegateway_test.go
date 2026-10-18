@@ -261,6 +261,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	}
 	f.open[key], f.openStage[key] = subject, stage
+	f.appendAudit(key, "phase.begin", stage, subject, map[string]any{})
 	if discovery {
 		f.used[subject] = true
 	}
@@ -442,7 +443,9 @@ func (f *fakeGateway) QueryAudit(_ context.Context, in *gatewayv1.QueryAuditRequ
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record(key, queryAudit)
+	if !slices.Equal(in.GetTypes(), []string{"phase.begin"}) {
+		f.record(key, queryAudit) // the used-plans read happens before every model turn: not part of the call logs
+	}
 	s := f.scriptFor(key)
 	if s.queryErr != nil {
 		return nil, s.queryErr

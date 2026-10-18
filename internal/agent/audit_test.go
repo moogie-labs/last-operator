@@ -173,3 +173,22 @@ func TestReloadSkipsAnswersTheIntentDoesNotRecord(t *testing.T) {
 		t.Fatalf("Reload = %v, want ErrNoReload", err)
 	}
 }
+
+func TestUsedPlansSkipsDiscovery(t *testing.T) {
+	a := &fakeAuditor{pageSize: 1, entries: []*gatewayv1.AuditEntry{
+		entry(1, audit.TypePhaseBegin, "Discovery", "sha256:cmd", nil),
+		entry(2, audit.TypePhaseBegin, "Create", "sha256:one", nil),
+		entry(3, audit.TypePhaseBegin, "Update", "sha256:two", nil),
+		entry(4, audit.TypeLLMRequest, "", "sha256:other", nil),
+	}}
+	got, err := UsedPlans(context.Background(), a, ref)
+	if err != nil {
+		t.Fatalf("UsedPlans = %v", err)
+	}
+	if len(got) != 2 || !got["sha256:one"] || !got["sha256:two"] {
+		t.Errorf("UsedPlans = %v, want the Create and Update subjects only", got)
+	}
+	if _, err := UsedPlans(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref); err == nil {
+		t.Error("UsedPlans hid a gateway error")
+	}
+}

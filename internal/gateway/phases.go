@@ -394,7 +394,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		if stage == lastv1alpha1.StageDiscovery {
 			return nil, d.deny(codes.FailedPrecondition, "this discovery command already ran, and its approval is used up; ask for it again to run it again")
 		}
-		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; replan to run it again")
+		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; a plan runs only once, so plan a different one")
 	}
 	if stage == lastv1alpha1.StageCreate {
 		if err := recordFits(rec, stage, subject, canonical); err != nil {
