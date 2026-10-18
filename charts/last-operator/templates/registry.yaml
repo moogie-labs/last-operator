@@ -76,7 +76,13 @@ spec:
       labels:
         app.kubernetes.io/name: last-registry
         {{- include "last.labels" . | nindent 8 }}
+      annotations:
+        # helm re-salts the htpasswd lines on every render; the sidecar mounts one by subPath, which never updates in place.
+        checksum/auth: {{ include (print $.Template.BasePath "/registry-secrets.yaml") . | sha256sum }}
     spec:
+      # The GC sidecar waits up to 25 minutes for an in-flight garbage collection on SIGTERM;
+      # the grace period is that plus 60 s so a rollout does not kill a run midway.
+      terminationGracePeriodSeconds: 1560
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -104,9 +110,30 @@ spec:
           resources: {{- toYaml .Values.registry.bundled.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /var/lib/registry}
+        - name: registry-gc
+          image: {{ tpl .Values.registry.bundled.gcImage . }}
+          env:
+            # Same overrides as the registry container: `registry garbage-collect` reads the same config.
+            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
+            - {name: OTEL_TRACES_EXPORTER, value: none}
+          ports:
+            - {name: gc, containerPort: 5001}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.registry.bundled.gcResources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/registry}
+            - {name: gc-auth, mountPath: /etc/registry-gc/htpasswd, subPath: htpasswd, readOnly: true}
       volumes:
         - name: data
           persistentVolumeClaim: {claimName: last-registry-data}
+        # Only the admin line: the sidecar never sees the pusher's.
+        - name: gc-auth
+          secret:
+            secretName: last-registry-auth
+            items:
+              - {key: admin, path: htpasswd}
 ---
 apiVersion: v1
 kind: Service
@@ -121,6 +148,20 @@ spec:
     - name: registry
       port: 5000
       targetPort: registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: last-registry-gc
+  namespace: {{ $reg }}
+  labels: {{- include "last.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: last-registry
+  ports:
+    - name: gc
+      port: 5001
+      targetPort: gc
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -210,6 +251,15 @@ spec:
               app.kubernetes.io/name: last-registry-front
       ports:
         - {port: 5000, protocol: TCP}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespaces.gateway }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: last-gateway
+      ports:
+        - {port: 5001, protocol: TCP}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

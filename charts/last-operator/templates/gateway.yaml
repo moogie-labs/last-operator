@@ -225,6 +225,10 @@ spec:
             - {name: LAST_REGISTRY_FRONT_HOST, value: {{ printf "last-registry-front.%s.svc:5000" .Values.namespaces.registry | quote }}}
             - {name: LAST_REGISTRY_PULL_HOST, value: {{ printf "localhost:%d" (int .Values.registry.bundled.hostPort) | quote }}}
             - {name: LAST_REGISTRY_NAMESPACE, value: {{ .Values.namespaces.registry | quote }}}
+            - {name: LAST_IMAGE_GC_INTERVAL, value: {{ .Values.gateway.imageGCInterval | quote }}}
+            {{- if .Values.registry.bundled.enabled }}
+            - {name: LAST_REGISTRY_GC_URL, value: {{ printf "http://last-registry-gc.%s.svc:5001" .Values.namespaces.registry | quote }}}
+            {{- end }}
             - {name: LAST_BUILD_NAMESPACE, value: {{ .Values.namespaces.build | quote }}}
             - {name: LAST_BUILDKIT_IMAGE, value: {{ .Values.registry.bundled.buildkitImage | quote }}}
             {{- with .Values.sandbox.image }}

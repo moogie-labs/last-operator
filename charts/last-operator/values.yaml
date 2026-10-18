@@ -49,11 +49,16 @@ registry:
     frontResources:
       requests: {cpu: 10m, memory: 32Mi}
       limits: {memory: 128Mi}
+    gcImage: '{{ include "last.image" (list . "registry-gc") }}'   # the GC sidecar; rendered with tpl
+    gcResources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {memory: 256Mi}
     pullProxyResources:
       requests: {cpu: 10m, memory: 16Mi}
       limits: {memory: 64Mi}
 
 gateway:
+  imageGCInterval: 24h   # how often the gateway garbage-collects unused images; the first run is one interval after it takes leadership
   drainTimeoutSeconds: 300   # in-flight RPC drain on shutdown; the pod grace period is this plus 30
   resources:
     requests: {cpu: 50m, memory: 64Mi}
