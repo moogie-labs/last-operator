@@ -373,3 +373,28 @@ func TestBuildConfirmsAnExternalPushInItsRepository(t *testing.T) {
 	}
 	assertClean(t, kube)
 }
+
+func TestBuildConfirmsAnExternalPushAtAPrivateAddress(t *testing.T) {
+	ext := imagestest.New(t, "robot", "ext-s3cret")
+	const repo = "acme/last-images"
+	img, err := random.Image(128, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := &images.Credentials{Username: ext.User, Password: ext.Password}
+	digest, err := images.NewClient(ext.Loopback, creds, false).WithTransport(ext.Transport).Push(context.Background(), repo, "t", img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testCfg()
+	cfg.PushRef, cfg.Insecure = ext.Loopback+"/"+repo, false
+	b := testBuild()
+	b.PushConfig = images.DockerConfig(ext.Loopback, ext.User, ext.Password)
+	kube := buildKube(corev1.PodSucceeded)
+	reg := images.NewClient("unused:5000", nil, true).WithTransport(ext.Transport)
+	out, err := images.NewBuilder(kube, fixedLogs(envelopeLog(runnerapi.Result{Stdout: meta(digest)})), reg, cfg).
+		Build(context.Background(), b)
+	if err != nil || out.Err != nil || out.Digest != digest {
+		t.Fatalf("Build = %+v, %v; want digest %s", out, err, digest)
+	}
+}

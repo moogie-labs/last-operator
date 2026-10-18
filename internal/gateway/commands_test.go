@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -416,10 +417,10 @@ func TestRunCommandRefusesAProviderThatNamesTheExternalWriterSecret(t *testing.T
 
 func TestNewForbidsTheConfiguredWriterSecret(t *testing.T) {
 	g := New(Config{Namespace: ns, AuditWriterSecret: "ext-writer"}, nil, nil, nil, nil)
-	if len(g.execCfg.ForbiddenSecrets) != 1 || g.execCfg.ForbiddenSecrets[0] != "ext-writer" {
+	if !slices.Equal(g.execCfg.ForbiddenSecrets, []string{registryAdminSecret, registryPusherSecret, "ext-writer"}) {
 		t.Fatalf("ForbiddenSecrets = %v", g.execCfg.ForbiddenSecrets)
 	}
-	if g := New(Config{Namespace: ns}, nil, nil, nil, nil); len(g.execCfg.ForbiddenSecrets) != 0 {
+	if g := New(Config{Namespace: ns}, nil, nil, nil, nil); !slices.Equal(g.execCfg.ForbiddenSecrets, []string{registryAdminSecret, registryPusherSecret}) {
 		t.Fatalf("ForbiddenSecrets = %v", g.execCfg.ForbiddenSecrets)
 	}
 }

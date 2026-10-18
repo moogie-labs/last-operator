@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -298,6 +299,7 @@ func TestExternalModeRefusesABadConfiguration(t *testing.T) {
 		{name: "a shell metacharacter", repo: func(h string) string { return h + "/x;id" }, want: repoField},
 		{name: "whitespace", repo: func(h string) string { return h + "/x y" }, want: repoField},
 		{name: "no path", repo: func(h string) string { return h }, want: repoField},
+		{name: "a dotless host (Docker Hub)", repo: func(string) string { return "harbor/acme/x" }, want: repoField},
 		{name: "no .dockerconfigjson", push: func(string) []byte { return nil }, want: pushRefField},
 		{name: "invalid JSON", push: func(string) []byte { return []byte("{" + testExtPW) }, want: pushRefField,
 			leaks: []string{testExtPW}},
@@ -351,7 +353,8 @@ func (ge *gcEnv) seedExternal(ext *imagestest.Registry, inst []lastv1alpha1.Argv
 	hash, digest := specHashOf(ge.t, inst), ext.Push(ge.t, testExtPath)
 	seq := writeBuildResult(ge.t, ge.testEnv, audit.TypeImageBuildResult,
 		buildResult{SpecHash: hash, StartSeq: 1, Outcome: buildSucceeded, Digest: digest})
-	if err := ge.g.images.put(context.Background(), hash, imageEntry{Digest: digest, BuildSeq: seq, LastUsed: lastUsed}); err != nil {
+	if err := ge.g.images.put(context.Background(), hash,
+		imageEntry{Digest: digest, BuildSeq: seq, LastUsed: lastUsed, Registry: ext.Host + "/" + testExtPath}); err != nil {
 		ge.t.Fatal(err)
 	}
 	return hash, digest
@@ -447,5 +450,147 @@ func TestImageGCLimitsTheSidecarAnswer(t *testing.T) {
 	ge.answer.Store(&small)
 	if res, err := ge.run(); err != nil || res.BytesFreed != 5 || res.SidecarError != "" {
 		t.Fatalf("result = %+v, %v; want 5 bytes freed", res, err)
+	}
+}
+
+// An entry built into another registry (before a mode switch) leaves the index
+// without a DELETE: the current registry's 404 would claim a deletion that did not
+// happen. A current-registry 404 still counts as deleted.
+func TestImageGCLeavesAnotherRegistrysImagesAlone(t *testing.T) {
+	old := time.Now().Add(-31 * day)
+	t.Run("external mode, bundled entry", func(t *testing.T) {
+		ext := imagestest.New(t, testExtUser, testExtPW)
+		ge := newGCEnv(t, externalOp(ext.Host+"/"+testExtPath))
+		useExternal(t, ge.imageEnv, ext)
+		bundledHash, bundledDigest := ge.seed(trueInstall, old) // no Registry: the bundled one
+		_, extDigest := ge.seedExternal(ext, falseInstall, old)
+		if _, err := ge.run(); err != nil {
+			t.Fatal(err)
+		}
+		got := ge.deletedByDigest()
+		want := "built into " + ge.host + "/last/images, not the current registry"
+		if p := got[bundledDigest]; p.RegistryDeleted || p.Error != want {
+			t.Fatalf("image.deleted for the bundled entry = %+v, want error %q", p, want)
+		}
+		if _, ok := ge.g.images.get(bundledHash); ok || !ge.inRegistry(bundledDigest) || ge.deletes.Load() != 0 {
+			t.Fatalf("bundled entry indexed %v, in registry %v, %d DELETEs; want it unindexed and untouched",
+				ok, ge.inRegistry(bundledDigest), ge.deletes.Load())
+		}
+		if p := got[extDigest]; !p.RegistryDeleted || ext.Deletes.Load() != 1 {
+			t.Fatalf("image.deleted for the external entry = %+v with %d DELETEs", p, ext.Deletes.Load())
+		}
+	})
+	t.Run("bundled mode, external entry", func(t *testing.T) {
+		ext := imagestest.New(t, testExtUser, testExtPW)
+		ge := newGCEnv(t, imageOp(nil))
+		useExternal(t, ge.imageEnv, ext)
+		extHash, extDigest := ge.seedExternal(ext, trueInstall, old)
+		goneHash := specHashOf(t, falseInstall)
+		seq := writeBuildResult(t, ge.testEnv, audit.TypeImageBuildResult,
+			buildResult{SpecHash: goneHash, StartSeq: 1, Outcome: buildSucceeded, Digest: goneDigest})
+		if err := ge.g.images.put(context.Background(), goneHash, imageEntry{Digest: goneDigest, BuildSeq: seq, LastUsed: old}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ge.run(); err != nil {
+			t.Fatal(err)
+		}
+		got := ge.deletedByDigest()
+		want := "built into " + ext.Host + "/" + testExtPath + ", not the current registry"
+		if p := got[extDigest]; p.RegistryDeleted || p.Error != want {
+			t.Fatalf("image.deleted for the external entry = %+v, want error %q", p, want)
+		}
+		if _, ok := ge.g.images.get(extHash); ok || ext.Deletes.Load() != 0 || !ext.Has(t, testExtPath, extDigest) {
+			t.Fatalf("external entry indexed %v, %d DELETEs; want it unindexed and untouched", ok, ext.Deletes.Load())
+		}
+		if p := got[goneDigest]; !p.RegistryDeleted || p.Error != "" {
+			t.Fatalf("image.deleted for a current-registry 404 = %+v, want registryDeleted", p)
+		}
+	})
+}
+
+func (ge *gcEnv) deletedByDigest() map[string]imageDeletedPayload {
+	_, dels, _ := ge.gcAudit()
+	got := map[string]imageDeletedPayload{}
+	for _, d := range dels {
+		got[d.Digest] = d
+	}
+	return got
+}
+
+// A resolve records the registry each build went to.
+func TestTheIndexRecordsTheRegistryOfEachBuild(t *testing.T) {
+	ie, _, repo := newExternalEnv(t)
+	if _, err := ie.resolve(toolInstall); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := ie.g.images.get(specHashOf(t, toolInstall)); e.Registry != repo {
+		t.Fatalf("entry registry = %q, want %q", e.Registry, repo)
+	}
+}
+
+// No Provider may mount a registry credential: the bundled admin and pusher
+// Secrets, or the Secrets OperatorConfig names for an external registry.
+func TestRunCommandRefusesAProviderThatNamesARegistrySecret(t *testing.T) {
+	for _, secret := range []string{testPushSecret, testPullSecret, registryAdminSecret, registryPusherSecret} {
+		t.Run(secret, func(t *testing.T) {
+			step := argvStep("s1", "true")
+			step.Providers = []string{testProvider}
+			env, in := newRunEnv(t, []lastv1alpha1.Command{step})
+			var op lastv1alpha1.OperatorConfig
+			if err := env.crd.Get(env.ctx, client.ObjectKey{Name: testConfigName}, &op); err != nil {
+				t.Fatal(err)
+			}
+			op.Spec.Registry = externalOp("reg.example/acme/x").Spec.Registry
+			op.Spec.Registry.Mode = lastv1alpha1.RegistryBundled // the names are forbidden whatever the mode
+			if err := env.crd.Update(env.ctx, &op); err != nil {
+				t.Fatal(err)
+			}
+			var prov lastv1alpha1.Provider
+			if err := env.crd.Get(env.ctx, client.ObjectKey{Name: testProvider}, &prov); err != nil {
+				t.Fatal(err)
+			}
+			prov.Spec.SecretRef.Name = secret
+			if err := env.crd.Update(env.ctx, &prov); err != nil {
+				t.Fatal(err)
+			}
+			h := in.Status.Plan.Hash
+			if _, err := env.begin(h); err != nil {
+				t.Fatal(err)
+			}
+			_, err := env.run(h, step)
+			env.wantDenied(err, codes.PermissionDenied)
+		})
+	}
+}
+
+// Back in bundled mode, a run removes the pull Secret copy an external mode left,
+// once per process.
+func TestBundledModeRemovesALeftoverPullSecret(t *testing.T) {
+	ie, in := newImageRunEnv(t, imageOp(nil), imageSteps())
+	if _, err := ie.kube.CoreV1().Secrets(testSandboxNS).Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: registryPullSecret, Namespace: testSandboxNS}, Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	h := in.Status.Plan.Hash
+	if _, err := ie.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range in.Status.Plan.Steps {
+		if _, err := ie.run(h, step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ie.kube.CoreV1().Secrets(testSandboxNS).Get(context.Background(), registryPullSecret, metav1.GetOptions{}); err == nil {
+		t.Fatal("the leftover pull Secret is still there")
+	}
+	deletes := 0
+	for _, act := range ie.kube.Actions() {
+		if da, ok := act.(k8stesting.DeleteAction); ok && act.GetResource().Resource == "secrets" && da.GetName() == registryPullSecret {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Fatalf("%d deletes of %s over two runs, want 1", deletes, registryPullSecret)
 	}
 }

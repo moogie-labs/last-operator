@@ -51,10 +51,33 @@ func (g *Gateway) ensurePullSecret(ctx context.Context, ext *lastv1alpha1.Extern
 		Type:       corev1.SecretTypeDockerConfigJson,
 		Data:       map[string][]byte{corev1.DockerConfigJsonKey: config},
 	}
+	g.pullClean = false
 	if _, err := secrets.Create(ctx, copied, metav1.CreateOptions{}); err != nil {
 		return status.Errorf(codes.Unavailable, "copy the registry pull Secret to %s/%s: %v", g.cfg.SandboxNamespace, registryPullSecret, err)
 	}
 	slog.Info("Copied the registry pull Secret", "from", g.cfg.Namespace+"/"+ext.PullSecretRef.Name,
 		"to", g.cfg.SandboxNamespace+"/"+registryPullSecret)
 	return nil
+}
+
+// removePullSecret deletes a last-registry-pull copy that an earlier external mode
+// left, so a stale pull credential does not linger in the sandbox namespace. It
+// runs before bundled-mode runs until it succeeds once (NotFound included), and again
+// after a copy. A failure is only logged: no bundled pod uses the copy, and the next
+// run retries.
+func (g *Gateway) removePullSecret(ctx context.Context) {
+	g.pullMu.Lock()
+	defer g.pullMu.Unlock()
+	if g.pullClean {
+		return
+	}
+	err := g.kube.CoreV1().Secrets(g.cfg.SandboxNamespace).Delete(ctx, registryPullSecret, metav1.DeleteOptions{})
+	switch {
+	case err == nil:
+		slog.Info("Deleted the leftover registry pull Secret", "secret", g.cfg.SandboxNamespace+"/"+registryPullSecret)
+	case !apierrors.IsNotFound(err):
+		slog.Warn("Could not delete the leftover registry pull Secret", "secret", g.cfg.SandboxNamespace+"/"+registryPullSecret, "err", err)
+		return
+	}
+	g.pullClean = true
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -85,23 +86,39 @@ func (g *Gateway) providerGetter(ctx context.Context, name string) (*lastv1alpha
 // scheduler. Its pods run on image, start the runner copied from base, the pinned
 // sandbox base (spec §11.1), and pull with pullSecrets.
 func (g *Gateway) executor(w *audit.Writer, base, image string, pullSecrets ...string) *sandbox.Executor {
+	return g.executorWith(w, base, image, pullSecrets, nil)
+}
+
+// executorWith is executor with extra Secrets no Provider may reference.
+func (g *Gateway) executorWith(w *audit.Writer, base, image string, pullSecrets, forbidden []string) *sandbox.Executor {
 	cfg := g.execCfg
 	cfg.Pod.Image = image
 	cfg.Pod.RunnerImage = base
 	cfg.Pod.ImagePullSecrets = pullSecrets
+	if len(forbidden) > 0 {
+		cfg.ForbiddenSecrets = append(slices.Clone(cfg.ForbiddenSecrets), forbidden...)
+	}
 	return sandbox.NewExecutor(g.kube, g.providerGetter, w, g.sched.Load(), g.logs, cfg)
 }
 
-// runExecutor is executor for a sandbox run. In registry.mode external it first
+// runExecutor is executor for a sandbox run. The Secrets registry.external names
+// are forbidden to Providers whatever the mode. In registry.mode external it first
 // copies the pull Secret into the sandbox namespace, and the run's pods pull with
-// it. Errors are ensurePullSecret's, or Unavailable when OperatorConfig cannot be read.
+// it; in bundled mode it removes a copy an earlier external mode left. Errors are
+// ensurePullSecret's, or Unavailable when OperatorConfig cannot be read.
 func (g *Gateway) runExecutor(ctx context.Context, w *audit.Writer, base, image string) (*sandbox.Executor, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
+	var forbidden []string
+	if op != nil && op.Spec.Registry != nil && op.Spec.Registry.External != nil {
+		ext := op.Spec.Registry.External
+		forbidden = []string{ext.PushSecretRef.Name, ext.PullSecretRef.Name}
+	}
 	if !externalRegistry(op) {
-		return g.executor(w, base, image), nil
+		g.removePullSecret(ctx)
+		return g.executorWith(w, base, image, nil, forbidden), nil
 	}
 	ext, err := externalSettings(op)
 	if err != nil {
@@ -110,7 +127,7 @@ func (g *Gateway) runExecutor(ctx context.Context, w *audit.Writer, base, image 
 	if err := g.ensurePullSecret(ctx, ext); err != nil {
 		return nil, err
 	}
-	return g.executor(w, base, image, registryPullSecret), nil
+	return g.executorWith(w, base, image, []string{registryPullSecret}, forbidden), nil
 }
 
 // operatorConfig returns the cluster OperatorConfig, or nil when none exists.

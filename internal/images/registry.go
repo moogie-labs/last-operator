@@ -67,7 +67,7 @@ func (c *Client) remoteOpts(ctx context.Context) []remote.Option {
 		if t == nil {
 			t = remote.DefaultTransport
 		}
-		t = httpsOnly{t}
+		t = httpsOnly{inner: t, host: c.host}
 	}
 	if t != nil {
 		opts = append(opts, remote.WithTransport(t))
@@ -75,14 +75,31 @@ func (c *Client) remoteOpts(ctx context.Context) []remote.Option {
 	return opts
 }
 
-// httpsOnly refuses every request that is not HTTPS.
-type httpsOnly struct{ inner http.RoundTripper }
+// httpsOnly keeps a client on HTTPS. go-containerregistry addresses loopback,
+// private and .local registries over plain HTTP until its ping picks a scheme;
+// requests to the client's own host are upgraded to HTTPS, and plain HTTP to any
+// other host (a token realm, a blob redirect) is refused.
+type httpsOnly struct {
+	inner http.RoundTripper
+	host  string
+}
 
 func (h httpsOnly) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme != "https" {
+	if req.URL.Scheme == "https" {
+		return h.inner.RoundTrip(req)
+	}
+	if req.URL.Scheme != "http" || req.URL.Host != h.host {
 		return nil, fmt.Errorf("refused a plain-HTTP request to %s: the registry is used over HTTPS only", req.URL.Host)
 	}
-	return h.inner.RoundTrip(req)
+	up := req.Clone(req.Context())
+	up.URL.Scheme = "https"
+	return h.inner.RoundTrip(up)
+}
+
+// clientAccepts reports whether go-containerregistry parses repository, strictly.
+func clientAccepts(repository string) bool {
+	_, err := name.NewRepository(repository, name.StrictValidation)
+	return err == nil
 }
 
 func (c *Client) digestRef(repo, digest string) (name.Digest, error) {

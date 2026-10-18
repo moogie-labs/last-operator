@@ -195,7 +195,7 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 				res.SidecarError = "not called: " + err.Error()
 				return err
 			}
-			if err := g.deleteImage(ctx, actx, w, deleter, target, h, entries[h].Digest, cutoff, &res); err != nil {
+			if err := g.deleteImage(ctx, actx, w, deleter, target, h, entries[h], cutoff, &res); err != nil {
 				res.SidecarError = "not called: " + err.Error()
 				return err
 			}
@@ -227,7 +227,8 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 // stays out of the index. The error is set only when image.deleted could not be
 // written.
 func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, deleter imageGCDeleter, target registryTarget,
-	specHash, digest string, cutoff time.Time, res *gcResult) error {
+	specHash string, e imageEntry, cutoff time.Time, res *gcResult) error {
+	digest, reg := e.Digest, g.entryRegistry(e)
 	dropped, err := g.images.dropUnused(actx, specHash, digest, cutoff)
 	if err != nil {
 		// The entry is gone from memory; a later leader that still loads it finds
@@ -238,8 +239,19 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 		slog.Info("Kept an image used since GC started", "specHash", specHash, "digest", digest)
 		return nil
 	}
-	g.builds.forgetHead(target.headKey(digest))
+	g.builds.forgetHead(reg + "@" + digest)
 	rec := imageDeleted{SpecHash: specHash, Digest: digest}
+	if reg != target.id() {
+		// Built before a mode switch. The current registry would answer 404, which
+		// would read as a deletion; the other registry is not the gateway's to clean.
+		rec.Error = "built into " + reg + ", not the current registry"
+		slog.Info("Dropped an unused image built into another registry; its manifest stays there",
+			"specHash", specHash, "digest", digest, "registry", reg)
+		if _, err := w.Append(actx, audit.Draft{Type: audit.TypeImageDeleted, Actor: sandbox.GatewayActor, Payload: rec}); err != nil {
+			return fmt.Errorf("gateway: write %s: %w", audit.TypeImageDeleted, err)
+		}
+		return nil
+	}
 	timeout := g.gcDeleteTimeout
 	if timeout <= 0 {
 		timeout = defaultGCDeleteTimeout

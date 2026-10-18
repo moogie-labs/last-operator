@@ -395,6 +395,12 @@ func (g *Gateway) checkIndexed(ctx context.Context, target registryTarget, specH
 		g.dropImage(ctx, specHash)
 		return false, nil
 	}
+	if reg := g.entryRegistry(e); reg != target.id() {
+		// Built before a mode switch: the current registry does not hold it.
+		slog.Info("Image was built into another registry; rebuilding", "specHash", specHash, "digest", e.Digest, "registry", reg)
+		g.dropImage(ctx, specHash)
+		return false, nil
+	}
 	key := target.headKey(e.Digest)
 	if g.builds.headCached(key) {
 		return true, nil
@@ -500,7 +506,7 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 		return "", errImageBuildFailed{Reason: failure, LogTail: logTail(out.Log)}
 	}
 	if err := g.images.put(context.WithoutCancel(ctx), specHash,
-		imageEntry{Digest: out.Digest, BuildSeq: result.Seq, LastUsed: g.builds.now()}); err != nil {
+		imageEntry{Digest: out.Digest, BuildSeq: result.Seq, LastUsed: g.builds.now(), Registry: target.id()}); err != nil {
 		// The entry is kept in memory, so this process reuses it; another rebuilds.
 		slog.Warn("Could not save the image index", "specHash", specHash, "err", err)
 	}
@@ -688,8 +694,20 @@ type registryTarget struct {
 
 func (t registryTarget) runRef(digest string) string { return t.runPrefix + "@" + digest }
 
+// id is the "host/repo" that imageEntry.Registry records.
+func (t registryTarget) id() string { return t.host + "/" + t.repo }
+
 // headKey names a manifest in the HEAD cache.
-func (t registryTarget) headKey(digest string) string { return t.host + "/" + t.repo + "@" + digest }
+func (t registryTarget) headKey(digest string) string { return t.id() + "@" + digest }
+
+// entryRegistry is the "host/repo" an index entry was pushed to; an entry without
+// one predates external mode and is in the bundled registry.
+func (g *Gateway) entryRegistry(e imageEntry) string {
+	if e.Registry != "" {
+		return e.Registry
+	}
+	return g.cfg.RegistryFrontHost + "/" + images.ImagesRepo
+}
 
 // externalRegistry reports whether OperatorConfig selects registry.mode external.
 func externalRegistry(op *lastv1alpha1.OperatorConfig) bool {

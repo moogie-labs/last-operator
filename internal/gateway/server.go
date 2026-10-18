@@ -60,8 +60,10 @@ type Gateway struct {
 	gcMu sync.Mutex
 	// gcDeleteTimeout bounds each manifest DELETE of an image GC run.
 	gcDeleteTimeout time.Duration
-	// pullMu serializes copies of the external registry's pull Secret.
-	pullMu sync.Mutex
+	// pullMu serializes copies of the external registry's pull Secret, and guards
+	// pullClean: set once a bundled-mode run has removed any copy, cleared by a copy.
+	pullMu    sync.Mutex
+	pullClean bool
 
 	rpcMu    sync.Mutex
 	draining bool
@@ -81,8 +83,11 @@ func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Si
 		Pod:               sandbox.PodConfig{Namespace: cfg.SandboxNamespace, ImagePullPolicy: corev1.PullIfNotPresent},
 		ProviderNamespace: cfg.Namespace,
 	}
+	// No Provider may mount a registry credential (runExecutor adds the external
+	// registry's Secrets) or the audit writer's.
+	g.execCfg.ForbiddenSecrets = []string{registryAdminSecret, registryPusherSecret}
 	if cfg.AuditWriterSecret != "" {
-		g.execCfg.ForbiddenSecrets = []string{cfg.AuditWriterSecret}
+		g.execCfg.ForbiddenSecrets = append(g.execCfg.ForbiddenSecrets, cfg.AuditWriterSecret)
 	}
 	return g
 }

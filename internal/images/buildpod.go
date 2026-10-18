@@ -289,13 +289,25 @@ var errBadRepository = errors.New(`repository must be "host[:port]/path": a regi
 	"with no scheme, credential, tag, whitespace, comma, quote or shell metacharacter")
 
 // ParseRepository splits an external repository ("host[:port]/path") into its
-// registry host, the first path segment, and the repository path on that host.
+// registry host, the first path segment, and the repository path on that host. The
+// host must hold a "." or a ":", so no client mistakes it for a Docker Hub namespace.
 func ParseRepository(repository string) (host, path string, err error) {
 	if len(repository) > maxRepositoryLen {
 		return "", "", errBadRepository
 	}
 	m := repositoryPattern.FindStringSubmatch(repository)
 	if m == nil {
+		return "", "", errBadRepository
+	}
+	// A first segment without "." or ":" is a Docker Hub namespace to
+	// go-containerregistry, BuildKit and kubelet alike, which would send the push
+	// credential to Docker Hub. "localhost" alone is no exception here:
+	// go-containerregistry reads "localhost/x" as Docker Hub too.
+	if !strings.ContainsAny(m[1], ".:") {
+		return "", "", errBadRepository
+	}
+	// The path must be one go-containerregistry accepts (at least two characters).
+	if !clientAccepts(repository) {
 		return "", "", errBadRepository
 	}
 	return m[1], m[2], nil

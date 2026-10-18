@@ -3,6 +3,7 @@ package images_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 
 	"github.com/moogie-labs/last-operator/internal/images"
+	"github.com/moogie-labs/last-operator/internal/images/imagestest"
 )
 
 const (
@@ -195,5 +197,55 @@ func TestDeleteReportsARegistryThatRefusesDelete(t *testing.T) {
 		Delete(context.Background(), "team/app", "sha256:"+strings.Repeat("0", 64))
 	if err == nil || errors.Is(err, images.ErrDeleteUnsupported) {
 		t.Fatalf("Delete answered 500 = %v, want an ordinary error", err)
+	}
+}
+
+// A registry at a loopback or private address is still used over HTTPS:
+// go-containerregistry addresses it over plain HTTP, and the client upgrades those
+// requests to its own host.
+func TestAnHTTPSClientReachesARegistryAtAPrivateAddress(t *testing.T) {
+	ext := imagestest.New(t, "robot", "ext-s3cret")
+	creds := &images.Credentials{Username: ext.User, Password: ext.Password}
+	c := images.NewClient(ext.Loopback, creds, false).WithTransport(ext.Transport)
+	img, err := random.Image(128, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	digest, err := c.Push(ctx, "acme/app", "v1", img)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if found, err := c.Head(ctx, "acme/app", digest); err != nil || !found {
+		t.Fatalf("Head = %v, %v; want true", found, err)
+	}
+	if err := c.Delete(ctx, "acme/app", digest); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if found, err := c.Head(ctx, "acme/app", digest); err != nil || found {
+		t.Fatalf("Head after Delete = %v, %v; want false", found, err)
+	}
+}
+
+// Only the client's own registry host is upgraded: a token realm on another host
+// over plain HTTP is refused, so the credential never reaches it.
+func TestAnHTTPSClientRefusesAPlainHTTPTokenRealm(t *testing.T) {
+	var realmHits atomic.Int32
+	realm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		realmHits.Add(1)
+		_, _ = io.WriteString(w, `{"token":"t"}`)
+	}))
+	t.Cleanup(realm.Close)
+	reg := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm.URL+`/token",service="reg"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(reg.Close)
+	c := images.NewClient(strings.TrimPrefix(reg.URL, "https://"), pusher, false).WithTransport(reg.Client().Transport)
+	if found, err := c.Head(context.Background(), "acme/app", "sha256:"+strings.Repeat("0", 64)); err == nil || found {
+		t.Fatalf("Head = %v, %v; want an error", found, err)
+	}
+	if realmHits.Load() != 0 {
+		t.Fatalf("the plain-HTTP token realm got %d requests", realmHits.Load())
 	}
 }

@@ -34,7 +34,11 @@ type refusal struct {
 type Registry struct {
 	// Host is "example.com:<port>"; only Transport reaches it.
 	Host string
-	// Transport trusts the server's certificate and dials it for Host.
+	// Loopback is "127.0.0.1:<port>", which the certificate also holds. Clients
+	// would use plain HTTP for it, as for any loopback or private address.
+	Loopback string
+	// Transport trusts the server's certificate and dials it for Host; other
+	// addresses are dialled as they are.
 	Transport      http.RoundTripper
 	User, Password string
 
@@ -79,9 +83,15 @@ func New(t testing.TB, user, password string) *Registry {
 	addr := srv.Listener.Addr().String()
 	_, port, _ := net.SplitHostPort(addr)
 	r.Host = certHost + ":" + port
+	r.Loopback = addr
 	tr := srv.Client().Transport.(*http.Transport).Clone()
-	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	// Only Host is redirected, so a gateway using this transport still reaches
+	// other registries (the bundled one in tests) as they are.
+	tr.DialContext = func(ctx context.Context, network, to string) (net.Conn, error) {
+		if to == r.Host {
+			to = addr
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, to)
 	}
 	r.Transport = tr
 	return r

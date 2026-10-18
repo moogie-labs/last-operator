@@ -1158,9 +1158,14 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
 `.dockerconfigjson`) in the gateway namespace.
 
 - **Repository.** `host[:port]/path`, where the first path segment is
-  the registry host. It may not carry a scheme, a credential, a tag,
-  whitespace, a comma, a quote or a shell metacharacter, because it
-  reaches the build script and BuildKit's comma-separated `--output`.
+  the registry host. The host must contain a `.` or a `:`: a dotless
+  first segment (`harbor/acme/x`, even `localhost/x`) is a Docker Hub
+  namespace to go-containerregistry, BuildKit and kubelet, which would
+  send the push credential to Docker Hub. The path must be one
+  go-containerregistry accepts (at least two characters). It may not
+  carry a scheme, a credential, a tag, whitespace, a comma, a quote or a
+  shell metacharacter, because it reaches the build script and
+  BuildKit's comma-separated `--output`.
   Anything else is `FailedPrecondition` naming
   `registry.external.repository`, without echoing the value.
 - **Builds** push to `<repository>:sha256-<hex>`. The push Secret's
@@ -1169,6 +1174,10 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
   front-proxy rule: `images.buildEgress` must list the registry's
   CIDRs. The builder confirms the pushed digest in `<repository>`, over
   HTTPS, with the push config's credential for the registry host.
+- **Build pods get no pull Secret.** BuildKit and the runner copy are
+  pulled in `last-build` without credentials, so the sandbox base must
+  be pullable there anonymously. A private base kept in the external
+  registry is a known limitation.
 - **Push Secret.** The gateway reads it for each resolve. A missing
   Secret, a missing `.dockerconfigjson`, or a config with no credential
   for the registry host is `FailedPrecondition` naming
@@ -1180,12 +1189,25 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
 - **Runs** use `<repository>@<digest>`. The gateway checks manifests
   with HEAD, using the push credential over HTTPS. The HEAD cache is
   keyed by registry, repository and digest.
+- **HTTPS only.** The gateway's clients for an external registry never
+  use plain HTTP. go-containerregistry addresses loopback, private and
+  `.local` registries over HTTP. Such requests to the registry's own
+  host are upgraded to HTTPS (so on-premises registries at private
+  addresses work); plain HTTP to any other host, such as a token realm,
+  is refused.
+- **No Provider may mount a registry credential.** `last-registry-admin`,
+  `last-registry-pusher` and the Secrets `pushSecretRef` and
+  `pullSecretRef` name (whatever the mode) are refused like the audit
+  Secrets.
 - **Pull Secret.** Before every sandbox run in external mode, the
   gateway copies `pullSecretRef` to `last-sandbox/last-registry-pull`.
   It creates the copy, or deletes and recreates it when it differs, so
   a rotated pull Secret reaches the next run; the `last-gateway-sandbox`
   Role has `get` on Secrets for the comparison. Every sandbox pod lists
-  the copy in `imagePullSecrets`, which covers both its containers.
+  the copy in `imagePullSecrets`, which covers both its containers. In
+  bundled mode, the first run of a gateway process (and the first after
+  a copy) deletes any leftover copy, so a stale pull credential does not
+  linger.
 - **GC** deletes manifests with the push credential over HTTPS, each
   DELETE bounded to a minute (in both modes). Many registries (ECR,
   GHCR among them) refuse DELETE with a 405 or an error code
@@ -1193,9 +1215,16 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
   `registryDeleted: false` and the refusal in `error`, and the entry
   still leaves the index; the registry's own lifecycle policy reclaims
   the storage. There is no sidecar call, so `bytesFreed` is 0.
-- **Switching modes** needs no migration. The image index and the HEAD
-  cache serve both modes. An entry whose digest the current registry
-  lacks fails its HEAD, leaves the index, and is rebuilt there.
+- **Switching modes** needs no migration. Each index entry records the
+  `host/repo` it was pushed to (`registry`; absent means the bundled
+  front host and `last/images`, as for entries written before external
+  mode). A resolve of an entry from another registry drops it and
+  rebuilds into the current one. GC never sends a DELETE for such an
+  entry, since the current registry's 404 would read as a deletion: the
+  entry leaves the index with `image.deleted`
+  `{"registryDeleted": false, "error": "built into <registry>, not the current registry"}`,
+  and its manifest stays where it was. A 404 for an entry of the
+  current registry still counts as deleted.
 
 ## 12. LLM providers
 

@@ -42,6 +42,10 @@ type imageEntry struct {
 	Digest   string    `json:"digest"`
 	BuildSeq uint64    `json:"buildSeq"`
 	LastUsed time.Time `json:"lastUsed"`
+	// Registry is the "host/repo" the image was pushed to; empty means the bundled
+	// registry (its front host and last/images), as for entries written before
+	// external mode.
+	Registry string `json:"registry,omitempty"`
 }
 
 // buildResult is the image.build.result audit payload. A digest in the index is

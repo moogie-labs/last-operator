@@ -369,6 +369,7 @@ func TestParseRepository(t *testing.T) {
 		extRef:                              {"123.dkr.ecr.us-east-1.amazonaws.com", "last-images"},
 		"ghcr.io/acme/tools.images/a__b":    {"ghcr.io", "acme/tools.images/a__b"},
 		"10.0.0.5:5000/last/images":         {"10.0.0.5:5000", "last/images"},
+		"localhost:5000/ab":                 {"localhost:5000", "ab"},
 	} {
 		host, path, err := images.ParseRepository(in)
 		if err != nil || host != want[0] || path != want[1] {
@@ -382,6 +383,10 @@ func TestParseRepository(t *testing.T) {
 		"reg.example/x`id`", "reg.example/x|y", "reg.example/x&y", "reg.example/x>y", "reg.example/x\ny",
 		"reg.example/X", "reg.example/x:tag", "reg.example/x@sha256:abc", "reg.example:port/x", "reg_example/x",
 		"reg.example/" + strings.Repeat("a", 256),
+		// A dotless first segment is a Docker Hub namespace to every client.
+		"harbor/acme/x", "localhost/x", "harbor/x",
+		// go-containerregistry needs at least two characters of path.
+		"reg.example/a",
 	} {
 		_, _, err := images.ParseRepository(in)
 		if err == nil {
