@@ -187,7 +187,7 @@ Pulls continue throughout. A sidecar failure is recorded in `image.gc.result`, a
 - **Build pods** get no ServiceAccount token, no provider credentials, the pusher credential only, limited egress plus DNS, and resource and time limits. They run in a privileged-labelled namespace, with relaxed seccomp and AppArmor and no process sandbox (D3, D4).
 - **Install steps can read the pusher credential.** It is in the build container's environment and filesystem, and with no process sandbox, a `RUN` step can read it.
   - **What that allows:** a malicious install step can push arbitrary content under any tag, which costs storage.
-  - **What it cannot do:** change what runs, since only audited digests run; or delete anything, since the pusher cannot DELETE (spike finding 4).
+  - **What it cannot do:** affect the images of other specs or anything outside its own image, since only audited digests run; or delete anything, since the pusher cannot DELETE (spike finding 4). An install step decides its own image's contents anyway, and without a process sandbox it can influence which of its own pushed digests the build result records.
   - This is new in main spec §17.2.
 - **The pull proxy is anonymous but narrow.** It allows reads of `last/images` and `last/base` by digest only. Images never contain credentials, because builds never receive any.
 - **The admin credential** stays in `last-gateway`. The operator cannot read `last-registry`, `last-build` or `last-gateway`.

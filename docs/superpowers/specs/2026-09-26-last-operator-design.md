@@ -373,7 +373,8 @@ spec:
   match:
     argv: ["aws", "ec2", "describe-*", "..."]
   install:                       # image.install commands this rule also covers (same pattern syntax)
-    - argv: ["pip", "install", "awscli==1.*"]
+    - argv: ["apt-get", "update"]  # the base has no pip and no apt package lists
+    - argv: ["apt-get", "install", "-y", "--no-install-recommends", "awscli=2.9.*"]
   egress: ["*.amazonaws.com:443"] # the command's declared egress must be a subset of this list
   source:                        # provenance, set by the CLI
     createdFrom: approval | suggestion | manual
@@ -595,7 +596,8 @@ run:
   script: "kubectl get deploy -A -o json | jq '.items | length'"   # run with /bin/sh -c
 image:                                    # optional; omitted = base image as-is
   install:                                # baked into an image at build time (§11.2)
-    - argv: ["pip", "install", "awscli==1.33.0"]
+    - argv: ["apt-get", "update"]         # the base has no pip and no apt package lists
+    - argv: ["apt-get", "install", "-y", "--no-install-recommends", "awscli=2.9.19-1"]
 files:                                    # written to /work before running
   /work/deploy.yaml: "…manifest…"
 providers: [cluster-team-x]               # credentials to inject
@@ -890,7 +892,10 @@ Every command runs in a sandbox pod:
 - **Pod.** Created by the gateway in `last-sandbox`, with no
   ServiceAccount token mounted, non-root, a read-only root filesystem
   except for a writable `emptyDir` at `/work`, CPU and memory limits,
-  and `activeDeadlineSeconds` set from `timeout`.
+  and `activeDeadlineSeconds` set from `timeout`. The runner never comes
+  from the command's image: an init container copies it from the pinned
+  base into an `emptyDir`, and the pod starts that copy, so a built
+  image's install steps (which run as root) cannot replace it.
 - **Execution.** The `files` are written, then `run` executes. `argv` is
   exec'd directly. `script` runs with `/bin/sh -c`.
 - **Credentials.** For each provider in `providers`, the gateway creates
@@ -984,9 +989,13 @@ a command with `image.install` fails with `FailedPrecondition`.
 
    At most `images.maxConcurrentBuilds` builds (default 2) run at once;
    the rest queue. Build objects are deleted whatever the outcome, and
-   the leading gateway deletes any left over when it starts leading.
+   the leading gateway deletes any left over when it starts leading and,
+   every minute while it leads, any whose expiry has passed. A gateway
+   that steps down cancels its running builds, so each records a failed
+   result before the audit writer is released.
 3. **Record.** The gateway writes `image.build.start` (spec hash, base
-   image, Containerfile and push tag) before the build, and
+   image, Containerfile, push tag, and `egress`, the build pod's egress
+   grants) before the build, and
    `image.build.result` (digest, outcome, duration and build log,
    truncated at 1 MiB with the push credential redacted) afterwards.
    Both carry the requesting Intent, stage and subject hash. Only a
@@ -1422,13 +1431,21 @@ The CRs emit standard Kubernetes Events for phase transitions.
 - **Build pods are less isolated than sandboxes.** Rootless BuildKit
   needs relaxed seccomp/AppArmor profiles and user namespaces. This is
   mitigated by giving builds no credentials and limited egress.
+- **Build DNS goes to the kube-dns pods.** The build NetworkPolicy
+  allows port 53 only to pods labelled `k8s-app: kube-dns`. Clusters
+  with NodeLocal DNSCache (a node-local resolver address), and CNIs
+  that apply policy before service DNAT, need that rule adjusted, or
+  builds cannot resolve names.
 - **Install steps can read the pusher credential.** Build pods run
   with no process sandbox, so an image install step can read the
   credential used to push the built image. That lets it push arbitrary
-  content under any tag, which costs only registry storage. It cannot
-  change what runs, since only digests named by an audited build result
-  are ever run, and it cannot delete anything, since the pusher has no
-  DELETE permission.
+  content under any tag, which costs only registry storage. An install
+  step decides its own image's contents anyway, and without a process
+  sandbox it can also influence which of its own pushed digests the
+  build result records. It cannot affect the images of other specs or
+  anything outside its image, since only digests named by an audited
+  build result are ever run, and it cannot delete anything, since the
+  pusher has no DELETE permission.
 - **Bundled registry node pulls** rely on `hostPort` and containerd's
   plain-HTTP allowance for `localhost`. Platforms that forbid either
   must use an external registry.

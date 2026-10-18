@@ -92,6 +92,10 @@ The build reaches the Debian mirrors (the demo opens ports 80 and 443 for builds
 sandbox commands of its Intents gain the same egress, not only the builds)
 and spends API credit.
 
+On a cloud cluster, `0.0.0.0/0:80` build and sandbox egress also reaches the instance
+metadata endpoint (169.254.169.254). Don't run the demo's egress settings on EKS or GKE
+nodes unless that endpoint is blocked.
+
 ## Quick start (kind)
 
 ```bash
