@@ -48,7 +48,7 @@ load_image() {
 }
 
 make images IMAGE_TAG="$TAG" IMAGE_REGISTRY="$REGISTRY" COMPONENTS="operator gateway audit-init"
-for c in operator gateway audit-init sandbox-base; do
+for c in operator gateway audit-init sandbox-base registry-gc; do
   kind load docker-image --name "$CLUSTER" "$REGISTRY/last-$c:$TAG"
 done
 load_image "$NGINX_IMAGE"

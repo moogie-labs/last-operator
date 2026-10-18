@@ -279,7 +279,7 @@ IMAGE_TAG ?= dev
 COMPONENTS ?= operator gateway audit-init
 
 .PHONY: images
-images: image-sandbox-base ## Build container images for all components.
+images: image-sandbox-base image-registry-gc ## Build container images for all components.
 	@for c in $(COMPONENTS); do \
 		$(CONTAINER_TOOL) build --build-arg CMD=$$c --build-arg VERSION=$(IMAGE_TAG) \
 			-t $(IMAGE_REGISTRY)/last-$$c:$(IMAGE_TAG) . || exit 1; \
@@ -288,6 +288,10 @@ images: image-sandbox-base ## Build container images for all components.
 .PHONY: image-sandbox-base
 image-sandbox-base: ## Build the sandbox base image.
 	$(CONTAINER_TOOL) build -f images/sandbox-base/Dockerfile -t $(IMAGE_REGISTRY)/last-sandbox-base:$(IMAGE_TAG) .
+
+.PHONY: image-registry-gc
+image-registry-gc: ## Build the registry garbage-collection sidecar image.
+	$(CONTAINER_TOOL) build -f images/registry-gc/Dockerfile -t $(IMAGE_REGISTRY)/last-registry-gc:$(IMAGE_TAG) .
 
 .PHONY: helm-crds
 helm-crds: manifests ## Copy generated CRDs into the Helm chart.
