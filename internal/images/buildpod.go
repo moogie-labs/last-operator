@@ -194,9 +194,9 @@ func buildPod(cfg BuildPodConfig, name, id, secretName string, timeoutSeconds in
 			EnableServiceLinks:           &no,
 			ActiveDeadlineSeconds:        &deadline,
 			SecurityContext: &corev1.PodSecurityContext{
+				// No pod-level seccomp or AppArmor profile: only the BuildKit container is relaxed,
+				// so the init container does not inherit Unconfined.
 				RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
-				SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
-				AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
 			},
 			InitContainers: []corev1.Container{{
 				Name:         "runner-copy",
@@ -206,10 +206,10 @@ func buildPod(cfg BuildPodConfig, name, id, secretName string, timeoutSeconds in
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser: &uid, RunAsGroup: &uid, AllowPrivilegeEscalation: &no,
 					SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-					// Unconfined, not RuntimeDefault: a node without AppArmor (kind on Docker Desktop)
-					// refuses a pod that asks for an enforced profile, but not for Unconfined.
-					AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
-					Capabilities:    &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+					// AppArmorProfile stays unset: the runtime applies its default where AppArmor exists.
+					// Setting RuntimeDefault explicitly makes kubelet reject the pod on a node without
+					// AppArmor (kind on Docker Desktop: "Cannot enforce AppArmor").
+					Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{

@@ -88,7 +88,8 @@ The M4 real-model check bakes a tool into an image:
 DEMO_REQUEST="install the AWS CLI in an image and print its version" make demo
 ```
 
-The build reaches the Debian mirrors (the demo opens ports 80 and 443 for builds)
+The build reaches the Debian mirrors (the demo opens ports 80 and 443 for builds, and the
+sandbox commands of its Intents gain the same egress, not only the builds)
 and spends API credit.
 
 ## Quick start (kind)

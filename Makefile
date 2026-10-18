@@ -370,5 +370,6 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_REGISTRY_PULL_HOST, value: "localhost:5000"'
 	helm template last charts/last-operator -n last-system | grep -q 'name: LAST_REGISTRY_FRONT_HOST, value: "last-registry-front.last-registry.svc:5000"'
 	helm template last charts/last-operator -n last-system | awk '/^kind: Role$$/{r=1} r&&/name: last-gateway-registry/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[endpointslices\]' | grep -q 'verbs: \[list\]'
+	helm template last charts/last-operator -n last-system | awk '/^kind: Role$$/{r=1} r&&/name: last-gateway-registry/{f=1} f&&/^---/{exit} f' | grep -A1 'resources: \[services\]' | grep -q 'verbs: \[get\]'
 	! helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'name: last-gateway-registry'
 	helm template last charts/last-operator -n last-system --set registry.bundled.enabled=false | grep -q 'name: last-gateway-build'

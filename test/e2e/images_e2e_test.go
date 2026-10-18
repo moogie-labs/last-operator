@@ -244,20 +244,23 @@ func TestImageBuildFailureFailsTheStep(t *testing.T) {
 		t.Fatalf("intent phase = %s, want Failed\n%s", in.Status.Phase, out)
 	}
 	// The operator replans after the failed step, so the Intent's later status is not the
-	// build error; the phase.end entry the gateway wrote for the step is.
-	var failed, ended bool
+	// build error; the audit entries the gateway wrote for the step are.
+	var buildFailed, ended *audit.Entry
 	for _, e := range auditEntries(t, sc.ns+"/bad") {
-		if e.Type == audit.TypePhaseEnd && strings.Contains(fmt.Sprint(payloadOf(e)["reason"]), "ImageBuildFailed: ") {
-			ended = true
-		}
-		if e.Type == audit.TypeImageBuildResult && payloadOf(e)["outcome"] == "failed" {
-			failed = true
+		switch {
+		case e.Type == audit.TypeCommandStart:
+			t.Errorf("command.start seq %d: the command must not run when its image build failed", e.Seq)
+		case e.Type == audit.TypeImageBuildResult && payloadOf(e)["outcome"] == "failed":
+			buildFailed = &e
+		case e.Type == audit.TypePhaseEnd && strings.HasPrefix(fmt.Sprint(payloadOf(e)["reason"]), "step s1 could not run: ImageBuildFailed: "):
+			ended = &e
 		}
 	}
-	if !ended {
-		t.Errorf("no phase.end entry whose reason starts the step failure with ImageBuildFailed\n%s", out)
+	if buildFailed == nil || ended == nil {
+		t.Fatalf("failed image.build.result = %v, phase.end with ImageBuildFailed = %v\n%s", buildFailed != nil, ended != nil, out)
 	}
-	if !failed {
-		t.Errorf("no failed image.build.result entry for the Intent")
+	if buildFailed.Intent != ended.Intent || buildFailed.SubjectHash == "" || buildFailed.SubjectHash != ended.SubjectHash {
+		t.Errorf("build result (%s, %s) and phase.end (%s, %s) differ in Intent or subject hash",
+			buildFailed.Intent, buildFailed.SubjectHash, ended.Intent, ended.SubjectHash)
 	}
 }

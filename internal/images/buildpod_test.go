@@ -107,8 +107,9 @@ func checkBuildSecurity(t *testing.T, pod *corev1.Pod, c corev1.Container) {
 		t.Fatalf("securityContext = %+v", sc)
 	}
 	psc := pod.Spec.SecurityContext
+	// Nothing relaxed at pod level, or the init container would inherit it.
 	if *psc.RunAsUser != 1000 || *psc.RunAsGroup != 1000 || *psc.FSGroup != 1000 ||
-		psc.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined || psc.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		psc.SeccompProfile != nil || psc.AppArmorProfile != nil {
 		t.Fatalf("pod securityContext = %+v", psc)
 	}
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
@@ -127,7 +128,7 @@ func checkBuildSecurity(t *testing.T, pod *corev1.Pod, c corev1.Container) {
 	}
 	init := pod.Spec.InitContainers[0]
 	is := init.SecurityContext
-	if is.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || is.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined ||
+	if is.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || is.AppArmorProfile != nil ||
 		is.AllowPrivilegeEscalation == nil || *is.AllowPrivilegeEscalation || *is.RunAsGroup != 1000 ||
 		len(is.Capabilities.Drop) != 1 || is.Capabilities.Drop[0] != "ALL" ||
 		init.Resources.Requests.Cpu().String() != "10m" || init.Resources.Requests.Memory().String() != "16Mi" || init.Resources.Limits.Memory().String() != "32Mi" {
