@@ -596,6 +596,14 @@ func TestPrepareLeadingLoadsTheImageIndexAndReapsEveryBuild(t *testing.T) {
 	}
 }
 
+func TestTheLeaderReapsOnlyExpiredBuilds(t *testing.T) {
+	ie := newImageEnv(t, imageOp(nil))
+	ie.g.reapExpiredBuilds(context.Background())
+	if !slices.Equal(ie.fb.reaps, []bool{false}) || ie.fb.cfgs[0].Namespace != testBuildNS {
+		t.Fatalf("reaps = %v (cfgs %+v), want one reap of expired builds in %s", ie.fb.reaps, ie.fb.cfgs, testBuildNS)
+	}
+}
+
 func TestResolveRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string

@@ -268,23 +268,44 @@ func TestRunProbesFailsWhenABuildCannotBeAttempted(t *testing.T) {
 	}
 }
 
-func TestDrainWaitsForADetachedBuildFlight(t *testing.T) {
+func TestDrainCancelsAnInFlightBuildAndRecordsItsResult(t *testing.T) {
 	ie := newImageEnv(t, imageOp(nil))
-	ie.fb.block = make(chan struct{})
-	ie.g.inflight.Add(1) // the RPC that waits on the build
+	ie.fb.block = make(chan struct{}) // never released: only cancellation ends the build
+	ie.g.inflight.Add(1)              // the RPC that waits on the build
 	done := make(chan error, 1)
-	go func() { _, err := ie.resolve(toolInstall); done <- err }()
+	go func() {
+		_, err := ie.resolve(toolInstall)
+		ie.g.inflight.Done()
+		done <- err
+	}()
 	ie.waitStarted()
-	ie.g.inflight.Done() // the RPC's own count ends; only the flight remains
-	if ie.g.drain(50 * time.Millisecond) {
-		t.Fatal("drain finished while a build flight was running")
+	if !ie.g.drain(5 * time.Second) {
+		t.Fatal("drain did not cancel the build within its window")
 	}
-	close(ie.fb.block)
-	if err := <-done; err != nil {
+	// drain has returned: the result must already be written.
+	results := ie.entriesOf(audit.TypeImageBuildResult)
+	if len(results) != 1 {
+		t.Fatalf("image.build.result entries = %d, want 1 before drain returned", len(results))
+	}
+	var res buildResult
+	if err := json.Unmarshal(results[0].Payload, &res); err != nil {
 		t.Fatal(err)
 	}
-	if !ie.g.drain(time.Second) {
-		t.Fatal("drain did not finish after the flight ended")
+	if res.Outcome != buildFailed || res.Error == "" {
+		t.Fatalf("image.build.result = %+v, want a failure with an error", res)
+	}
+	wantCode(t, <-done, codes.Unavailable)
+	ie.fb.mu.Lock()
+	cancelled := ie.fb.cancelled
+	ie.fb.mu.Unlock()
+	if cancelled != 1 {
+		t.Fatalf("builds that saw cancellation = %d, want 1", cancelled)
+	}
+	// A draining gateway starts no new build.
+	_, err := ie.resolve(toolInstall)
+	wantCode(t, err, codes.Unavailable)
+	if ie.fb.builds() != 1 {
+		t.Fatalf("builds = %d, want no build after drain", ie.fb.builds())
 	}
 }
 

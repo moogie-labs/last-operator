@@ -101,6 +101,7 @@ type imageBuilds struct {
 
 	mu      sync.Mutex
 	flights map[string]*imageFlight
+	stopped bool // set by stop: no new flight starts
 	sem     chan struct{}
 	heads   map[string]time.Time // digest -> when its HEAD must be repeated
 }
@@ -161,6 +162,10 @@ func (b *imageBuilds) cacheHead(digest string) {
 func (b *imageBuilds) do(ctx context.Context, key string, fn func(context.Context) (string, error)) (string, error) {
 	b.mu.Lock()
 	f, ok := b.flights[key]
+	if !ok && b.stopped {
+		b.mu.Unlock()
+		return "", status.Error(codes.Unavailable, "image resolve refused: the gateway is stepping down")
+	}
 	if !ok {
 		fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		f = &imageFlight{done: make(chan struct{}), cancel: cancel}
@@ -199,6 +204,19 @@ func (b *imageBuilds) run(ctx context.Context, key string, f *imageFlight, fn fu
 		// Only reachable when every caller has gone; keep §7's Unavailable for any
 		// caller that might still read it.
 		f.err = status.Errorf(codes.Unavailable, "image resolve cancelled: %v", f.err)
+	}
+}
+
+// stop cancels every flight and refuses new ones. The gateway calls it when it
+// starts to drain, so each build deletes its objects and records a failed
+// image.build.result while the writer is still there, instead of running past
+// the drain window and leaving image.build.start without a result.
+func (b *imageBuilds) stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.stopped = true
+	for _, f := range b.flights {
+		f.cancel()
 	}
 }
 
@@ -512,4 +530,23 @@ func (g *Gateway) prepareImages(ctx context.Context, op *lastv1alpha1.OperatorCo
 	warnBuildEgress(op)
 	slog.Info("Reaped leftover image builds", "count", reaped, "maxConcurrentBuilds", slots)
 	return nil
+}
+
+// reapExpiredBuilds runs on the leader's ticker: it deletes the objects of
+// builds whose expiry passed (a running build's has not), so a leftover push
+// Secret does not wait for the next leader. Errors are only logged.
+func (g *Gateway) reapExpiredBuilds(ctx context.Context) {
+	op, err := g.operatorConfig(ctx)
+	if err != nil {
+		slog.Warn("Could not read OperatorConfig to reap expired image builds", "err", err)
+		return
+	}
+	reaped, err := g.newBuilder(g.buildPodConfig(op, "")).ReapOrphans(ctx, false)
+	if err != nil {
+		slog.Warn("Could not reap expired image builds", "err", err)
+		return
+	}
+	if reaped > 0 {
+		slog.Info("Reaped expired image builds", "count", reaped)
+	}
 }

@@ -50,8 +50,9 @@ func (g *Gateway) beginRPC() (*audit.Writer, func(), error) {
 	return w, g.inflight.Done, nil
 }
 
-// drain refuses new side-effecting RPCs and waits up to timeout for in-flight ones,
-// so their outcome entries are written before the writer is released.
+// drain refuses new side-effecting RPCs, cancels every image build, and waits up
+// to timeout for in-flight ones, so their outcome entries are written before the
+// writer is released.
 //
 // lead runs once per process (a lost lease exits the process), so the WaitGroup
 // and draining flag are never reused across leadership terms.
@@ -59,6 +60,8 @@ func (g *Gateway) drain(timeout time.Duration) bool {
 	g.rpcMu.Lock()
 	g.draining = true
 	g.rpcMu.Unlock()
+	// A build can outlast the window; cancelled, each records its result within it.
+	g.builds.stop()
 	done := make(chan struct{})
 	go func() { g.inflight.Wait(); close(done) }()
 	select {

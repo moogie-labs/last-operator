@@ -268,6 +268,7 @@ func (g *Gateway) lead(parent context.Context) error {
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)
 			}
+			g.reapExpiredBuilds(ctx)
 		}
 	}
 }
