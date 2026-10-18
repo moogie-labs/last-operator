@@ -1,7 +1,6 @@
 package images
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +48,14 @@ type BuildPodConfig struct {
 	PullHost string
 	// FrontHost is the registry front proxy's host:port, as seen from the build pod.
 	FrontHost string
-	Timeout   time.Duration
+	// PushRef is the push target without the tag: "<FrontHost>/last/images" for the
+	// bundled registry, the configured repository for an external one.
+	PushRef string
+	// Insecure is true only for the bundled front host: it is pushed to over plain
+	// HTTP, and its pull-host bases are rewritten to FrontHost. An external registry
+	// is used over HTTPS with its bases unchanged.
+	Insecure bool
+	Timeout  time.Duration
 	// Canaries are passed to the runner's egress gate.
 	Canaries []string
 }
@@ -60,8 +66,9 @@ type BuildSpec struct {
 	// Base is the pinned base reference, as the sandbox runs it.
 	Base    string
 	Install []lastv1alpha1.ArgvCommand
-	// PushUser and PushPassword appear only in the spec Secret's config.json.
-	PushUser, PushPassword string
+	// PushConfig is a Docker config.json holding the push credential. It appears only
+	// in the spec Secret.
+	PushConfig []byte
 	// Egress holds the registry rules and the allowed buildEgress entries. BuildObjects
 	// itself adds the kube-dns rule (UDP and TCP 53), so callers must not.
 	Egress []sandbox.EgressRule
@@ -69,8 +76,12 @@ type BuildSpec struct {
 
 // BuildBase is the reference a build's FROM line uses for base: a base under
 // PullHost (the bundled registry, as nodes see it) is rewritten to FrontHost, which
-// the build pod can reach; any other base is used as is.
+// the build pod can reach; any other base is used as is. An external (not Insecure)
+// build uses every base unchanged.
 func (cfg BuildPodConfig) BuildBase(base string) string {
+	if !cfg.Insecure {
+		return base
+	}
 	pullHost := cfg.PullHost
 	if pullHost == "" {
 		pullHost = bundledPullHost
@@ -101,18 +112,20 @@ func BuildObjects(cfg BuildPodConfig, b BuildSpec, expires time.Time) (*corev1.S
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	dockerCfg, err := json.Marshal(map[string]any{"auths": map[string]any{
-		cfg.FrontHost: map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(b.PushUser + ":" + b.PushPassword))},
-	}})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("encoding registry auth: %w", err)
+	if _, err := pushSecrets(b.PushConfig); err != nil {
+		return nil, nil, nil, err
+	}
+	toml, output := "# No registry overrides: the push target is reached over HTTPS.\n", cfg.PushRef+":"+Tag(b.SpecHash)+",push=true"
+	if cfg.Insecure {
+		toml = "[registry.\"" + cfg.FrontHost + "\"]\n  http = true\n"
+		output += ",registry.insecure=true"
 	}
 	timeoutSeconds := max(int64((cfg.Timeout+time.Second-1)/time.Second), 1)
 	// buildctl's output goes to a file and the runner keeps only the first MaxOutput
 	// bytes of stderr, so emit the last ~1 MB of the log. Only meta.json reaches stdout.
 	script := "buildctl-daemonless.sh build --frontend dockerfile.v0" +
 		" --local context=/work/ctx --local dockerfile=/work/ctx" +
-		" --output type=image,name=" + cfg.FrontHost + "/last/images:" + Tag(b.SpecHash) + ",push=true,registry.insecure=true" +
+		" --output type=image,name=" + output +
 		" --metadata-file /work/meta.json --opt filename=Containerfile >/work/build.log 2>&1\n" +
 		"rc=$?\n" +
 		"tail -c 1000000 /work/build.log >&2\n" +
@@ -124,8 +137,8 @@ func BuildObjects(cfg BuildPodConfig, b BuildSpec, expires time.Time) (*corev1.S
 			ID: "build", Script: script, TimeoutSeconds: timeoutSeconds,
 			Files: map[string]string{
 				"/work/ctx/Containerfile":   containerfile,
-				"/work/buildkitd.toml":      "[registry.\"" + cfg.FrontHost + "\"]\n  http = true\n",
-				"/work/.docker/config.json": string(dockerCfg),
+				"/work/buildkitd.toml":      toml,
+				"/work/.docker/config.json": string(b.PushConfig),
 			},
 		}},
 		EgressCanaries: cfg.Canaries,

@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	pusher = &images.Credentials{Username: "pusher", Password: pusherPW}
+	pusher = &images.Credentials{Username: testPusher, Password: pusherPW}
 	admin  = &images.Credentials{Username: "admin", Password: adminPW}
 )
 

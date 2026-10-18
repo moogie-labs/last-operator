@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -393,12 +394,12 @@ func (ie *imageEnv) checkBuildInputs(hash string) {
 	t := ie.t
 	t.Helper()
 	spec, cfg := ie.fb.specs[0], ie.fb.cfgs[0]
-	if spec.SpecHash != hash || spec.Base != testBase || spec.PushUser != "pusher" || spec.PushPassword != testPusherPW ||
+	if spec.SpecHash != hash || spec.Base != testBase || !bytes.Equal(spec.PushConfig, images.DockerConfig(ie.host, "pusher", testPusherPW)) ||
 		len(spec.ID) != 16 || !slices.Equal(spec.Install[0].Argv, toolInstall[0].Argv) {
 		t.Fatalf("BuildSpec = %+v", spec)
 	}
 	if cfg.Namespace != testBuildNS || cfg.BuildKitImage != testBuildKitImg || cfg.RunnerImage != testBase ||
-		cfg.PullHost != testPullHost || cfg.FrontHost != ie.host || cfg.Timeout != images.DefaultBuildTimeout ||
+		cfg.PullHost != testPullHost || cfg.FrontHost != ie.host || cfg.PushRef != ie.host+"/last/images" || !cfg.Insecure || cfg.Timeout != images.DefaultBuildTimeout ||
 		!slices.Equal(cfg.Canaries, []string{testCanary}) {
 		t.Fatalf("BuildPodConfig = %+v", cfg)
 	}

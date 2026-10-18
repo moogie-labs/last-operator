@@ -167,11 +167,11 @@ func TestBuildFailsOnMalformedMetadata(t *testing.T) {
 func TestBuildRedactsThePushCredential(t *testing.T) {
 	reg, _ := pushed(t)
 	b := testBuild()
-	stderr := "pw=" + b.PushPassword +
-		" auth=" + base64.StdEncoding.EncodeToString([]byte(b.PushUser+":"+b.PushPassword)) +
-		" b64=" + base64.StdEncoding.EncodeToString([]byte(b.PushPassword))
+	stderr := "pw=" + testPW +
+		" auth=" + base64.StdEncoding.EncodeToString([]byte(testPusher+":"+testPW)) +
+		" b64=" + base64.StdEncoding.EncodeToString([]byte(testPW))
 	kube := buildKube(corev1.PodFailed)
-	log := envelopeLog(runnerapi.Result{ExitCode: 1, Stderr: stderr, Error: "also " + b.PushPassword})
+	log := envelopeLog(runnerapi.Result{ExitCode: 1, Stderr: stderr, Error: "also " + testPW})
 	out, err := images.NewBuilder(kube, fixedLogs(log), reg, testCfg()).Build(context.Background(), b)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestBuildRedactsThePushCredential(t *testing.T) {
 	if out.Log != want {
 		t.Fatalf("Log = %q, want %q", out.Log, want)
 	}
-	if out.Err == nil || strings.Contains(out.Err.Error(), b.PushPassword) {
+	if out.Err == nil || strings.Contains(out.Err.Error(), testPW) {
 		t.Fatalf("Err = %v, want one without the password", out.Err)
 	}
 	assertClean(t, kube)
@@ -310,4 +310,29 @@ func TestBuildReturnsAnErrorWhenASucceededPodsLogIsUnreadable(t *testing.T) {
 		t.Fatalf("Build = %+v, %v; want a returned error", out, err)
 	}
 	assertClean(t, kube)
+}
+
+func TestBuilderRedactsEveryPushConfigCredential(t *testing.T) {
+	reg, _ := pushed(t)
+	cfgJSON := []byte(`{"auths":{"a.example":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("ua:pw-one")) +
+		`"},"b.example":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("ub:pw-two")) + `"}}}`)
+	cfg := testCfg()
+	cfg.PushRef, cfg.Insecure = "a.example/last-images", false
+	b := testBuild()
+	b.PushConfig = cfgJSON
+	parts := make([]string, 0, 8)
+	for _, v := range []string{"ua:pw-one", "ub:pw-two", "pw-one", "pw-two"} {
+		parts = append(parts, v, base64.StdEncoding.EncodeToString([]byte(v)))
+	}
+	kube := buildKube(corev1.PodFailed)
+	log := envelopeLog(runnerapi.Result{ExitCode: 1, Stderr: strings.Join(parts, " "), Error: "x pw-two"})
+	out, err := images.NewBuilder(kube, fixedLogs(log), reg, cfg).Build(context.Background(), b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"pw-one", "pw-two", "dWE6cHctb25l", "dWI6cHctdHdv"} {
+		if strings.Contains(out.Log, leak) || (out.Err != nil && strings.Contains(out.Err.Error(), leak)) {
+			t.Fatalf("%q leaked: log %q err %v", leak, out.Log, out.Err)
+		}
+	}
 }

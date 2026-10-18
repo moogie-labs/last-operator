@@ -22,6 +22,7 @@ const (
 	testDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	testNS     = "last-build"
 	testPusher = "pusher"
+	testPW     = "s3cret"
 	testHash   = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
@@ -29,6 +30,7 @@ func testCfg() images.BuildPodConfig {
 	return images.BuildPodConfig{
 		Namespace: testNS, BuildKitImage: "moby/buildkit:v0.26.2-rootless",
 		RunnerImage: "sandbox@" + testDigest, FrontHost: testFront,
+		PushRef: testFront + "/" + images.ImagesRepo, Insecure: true,
 		Timeout: 15 * time.Minute, Canaries: []string{"10.0.0.1:443"},
 	}
 }
@@ -36,9 +38,9 @@ func testCfg() images.BuildPodConfig {
 func testBuild() images.BuildSpec {
 	return images.BuildSpec{
 		ID: "b1", SpecHash: testHash, Base: "localhost:5000/last/base@" + testDigest,
-		Install:  []lastv1alpha1.ArgvCommand{{Argv: []string{"apt-get", "install", "-y", "jq"}}},
-		PushUser: testPusher, PushPassword: "s3cret",
-		Egress: []sandbox.EgressRule{{CIDR: "10.96.5.5/32", Port: 5000}},
+		Install:    []lastv1alpha1.ArgvCommand{{Argv: []string{"apt-get", "install", "-y", "jq"}}},
+		PushConfig: images.DockerConfig(testFront, testPusher, testPW),
+		Egress:     []sandbox.EgressRule{{CIDR: "10.96.5.5/32", Port: 5000}},
 	}
 }
 
@@ -317,5 +319,45 @@ func TestBuildPolicyAllowsOnlyTheGrantsAndDNS(t *testing.T) {
 	}
 	if !protos[corev1.ProtocolUDP] || !protos[corev1.ProtocolTCP] {
 		t.Fatalf("dns protocols = %v", protos)
+	}
+}
+
+const extRef = "123.dkr.ecr.us-east-1.amazonaws.com/last-images"
+
+func TestBuildObjectsPushToTheExternalRepository(t *testing.T) {
+	cfg, b := testCfg(), testBuild()
+	cfg.PushRef, cfg.Insecure = extRef, false
+	b.PushConfig = images.DockerConfig("123.dkr.ecr.us-east-1.amazonaws.com", "AWS", "tok")
+	b.Base = "ghcr.io/acme/base@" + testDigest
+	cmd := buildSpec(t, cfg, b).Commands[0]
+	if !strings.Contains(cmd.Script, "name="+extRef+":"+images.Tag(testHash)+",push=true ") || strings.Contains(cmd.Script, "registry.insecure") {
+		t.Fatalf("script = %q", cmd.Script)
+	}
+	if toml := cmd.Files["/work/buildkitd.toml"]; strings.Contains(toml, "[registry") || strings.Contains(toml, "http =") {
+		t.Fatalf("buildkitd.toml = %q", toml)
+	}
+	if _, ok := cmd.Files["/work/buildkitd.toml"]; !ok {
+		t.Fatal("buildkitd.toml missing")
+	}
+	// An external build leaves the base alone, even under the pull host.
+	b.Base = "localhost:5000/last/base@" + testDigest
+	cmd = buildSpec(t, cfg, b).Commands[0]
+	if !strings.HasPrefix(cmd.Files["/work/ctx/Containerfile"], "FROM localhost:5000/last/base@") {
+		t.Fatalf("Containerfile = %q", cmd.Files["/work/ctx/Containerfile"])
+	}
+}
+
+func TestBuildObjectsRejectAMalformedPushConfig(t *testing.T) {
+	for name, cfgJSON := range map[string]string{
+		"not json": "nope", "bad base64": `{"auths":{"h":{"auth":"***"}}}`, "no colon": `{"auths":{"h":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("nocolon")) + `"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := testBuild()
+			b.PushConfig = []byte(cfgJSON)
+			_, _, _, err := images.BuildObjects(testCfg(), b, time.Unix(2000, 0))
+			if err == nil || strings.Contains(err.Error(), "nocolon") {
+				t.Fatalf("err = %v", err)
+			}
+		})
 	}
 }

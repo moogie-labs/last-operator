@@ -432,7 +432,7 @@ func (g *Gateway) build(ctx context.Context, w *audit.Writer, req imageRequest, 
 		return "", status.Errorf(codes.InvalidArgument, "image install: %v", err)
 	}
 	spec := images.BuildSpec{ID: randomBuildID(), SpecHash: specHash, Base: base, Install: req.Install,
-		PushUser: user, PushPassword: password, Egress: egress}
+		PushConfig: images.DockerConfig(g.cfg.RegistryFrontHost, user, password), Egress: egress}
 	builder := g.newBuilder(cfg)
 
 	draft := func(typ string, payload any) audit.Draft {
@@ -548,7 +548,8 @@ func (g *Gateway) pusherCredential(ctx context.Context) (string, string, error) 
 // timeout comes from OperatorConfig and the canaries from the latest prepareLeading.
 func (g *Gateway) buildPodConfig(op *lastv1alpha1.OperatorConfig, base string) images.BuildPodConfig {
 	return images.BuildPodConfig{Namespace: g.cfg.BuildNamespace, BuildKitImage: g.cfg.BuildKitImage, RunnerImage: base,
-		PullHost: g.cfg.RegistryPullHost, FrontHost: g.cfg.RegistryFrontHost, Timeout: buildTimeout(op),
+		PullHost: g.cfg.RegistryPullHost, FrontHost: g.cfg.RegistryFrontHost,
+		PushRef: g.cfg.RegistryFrontHost + "/" + images.ImagesRepo, Insecure: true, Timeout: buildTimeout(op),
 		Canaries: slices.Clone(g.execCfg.EgressCanaries)}
 }
 

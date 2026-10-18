@@ -87,7 +87,7 @@ func (b *Builder) Build(ctx context.Context, s BuildSpec) (BuildOutcome, error) 
 	if _, err := b.kube.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return BuildOutcome{}, fmt.Errorf("images: create build pod: %w", err)
 	}
-	r := newBuildRedactor(s.PushUser, s.PushPassword)
+	r := newBuildRedactor(s.PushConfig)
 	out := BuildOutcome{}
 	done, err := sandbox.WaitForPod(ctx, b.kube, ns, pod.Name, wait, b.poll, buildPullGrace)
 	if err != nil {
@@ -281,22 +281,22 @@ func describe(p *corev1.Pod) string {
 	return sb.String()
 }
 
-// buildRedactor replaces the push credential, in the raw and base64 forms a tool might
-// print, with [REDACTED].
+// buildRedactor replaces the push credential (every auth string, decoded pair and
+// password), in the raw and base64 forms a tool might print, with [REDACTED].
 type buildRedactor struct{ needles []string }
 
-func newBuildRedactor(user, password string) buildRedactor {
+func newBuildRedactor(pushConfig []byte) buildRedactor {
+	secrets, _ := pushSecrets(pushConfig) // BuildObjects already rejected a malformed config
 	var needles []string
-	if password != "" {
-		pair := []byte(user + ":" + password)
-		for _, v := range [][]byte{pair, []byte(password)} {
-			needles = append(needles, base64.StdEncoding.EncodeToString(v), base64.RawStdEncoding.EncodeToString(v))
+	for _, v := range secrets {
+		if v == "" {
+			continue
 		}
-		needles = append(needles, password)
+		needles = append(needles, v, base64.StdEncoding.EncodeToString([]byte(v)), base64.RawStdEncoding.EncodeToString([]byte(v)))
 	}
 	// Longest first, so a value contained in another is not redacted piecemeal.
 	slices.SortFunc(needles, func(a, b string) int { return len(b) - len(a) })
-	return buildRedactor{needles: needles}
+	return buildRedactor{needles: slices.Compact(needles)}
 }
 
 func (r buildRedactor) redact(s string) string {
