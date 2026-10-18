@@ -46,13 +46,21 @@ A command is:
   "files": [{"path": "/work/app.yaml", "content": "file content"}],
   "providers": ["provider-name"],
   "egress": ["10.0.0.1:443"],
-  "timeout": "5m"
+  "timeout": "5m",
+  "install": []
 }
 Set exactly one of "argv" (run directly) or "script" (run with /bin/sh -c). Step ids are
 required and unique among the steps. "timeout" is a duration such as "5m", or "" for the
 default. In steps, argv elements may use ${steps.<id>.stdout} or ${steps.<id>.json.<path>}
 to use the output of an earlier step; files, scripts and discovery commands never do.
 Use only the Providers and egress the first message lists.
+
+The sandbox image is Debian bookworm with sh, curl, kubectl, jq, git and python3, and
+no pip. For any other tool, list its install commands in "install", an array of argv
+arrays such as [["apt-get", "install", "-y", "awscli=2.9.19-1"]]; "install" is [] when
+the base image is enough. Each install argv runs as root at build time, with no
+credentials and only the build egress, so pin versions. The image is reused while
+the spec is unchanged.
 
 A resource describes one thing the plan provisions:
 {

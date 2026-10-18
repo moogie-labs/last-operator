@@ -81,6 +81,8 @@ type wireCommand struct {
 	Providers []string   `json:"providers"`
 	Egress    []string   `json:"egress"`
 	Timeout   string     `json:"timeout"`
+	// Install is the image's install argvs; empty means the default image.
+	Install [][]string `json:"install"`
 }
 
 type wireFile struct {
@@ -242,6 +244,15 @@ func (c wireCommand) command(where string) (lastv1alpha1.Command, error) {
 		}
 		cmd.Files[f.Path] = f.Content
 	}
+	if len(c.Install) > 0 {
+		cmd.Image = &lastv1alpha1.ImageSpec{}
+		for i, argv := range c.Install {
+			if len(argv) == 0 {
+				return cmd, fmt.Errorf("%s: install command %d is empty", where, i+1)
+			}
+			cmd.Image.Install = append(cmd.Image.Install, lastv1alpha1.ArgvCommand{Argv: argv})
+		}
+	}
 	if c.Timeout != "" {
 		d, err := time.ParseDuration(c.Timeout)
 		if err != nil {
@@ -317,11 +328,7 @@ func Encode(t Turn) (string, error) {
 		}
 		w.Summary = t.Plan.Summary
 		for _, s := range t.Plan.Steps {
-			c, err := commandToWire(s)
-			if err != nil {
-				return "", err
-			}
-			w.Steps = append(w.Steps, c)
+			w.Steps = append(w.Steps, commandToWire(s))
 		}
 		for _, r := range t.Plan.Resources {
 			wr, err := resourceToWire(r)
@@ -338,10 +345,7 @@ func Encode(t Turn) (string, error) {
 		if t.Command == nil {
 			return "", errors.New("agent: a command turn needs a command")
 		}
-		c, err := commandToWire(*t.Command)
-		if err != nil {
-			return "", err
-		}
+		c := commandToWire(*t.Command)
 		w.Reason, w.Command = t.Reason, &c
 	default:
 		return "", fmt.Errorf("agent: unknown turn kind %q", t.Kind)
@@ -350,19 +354,21 @@ func Encode(t Turn) (string, error) {
 	return string(b), err
 }
 
-func commandToWire(c lastv1alpha1.Command) (wireCommand, error) {
-	if c.Image != nil {
-		return wireCommand{}, errors.New("agent: image commands have no wire form")
-	}
+func commandToWire(c lastv1alpha1.Command) wireCommand {
 	w := wireCommand{ID: c.ID, Reason: c.Reason, Argv: nonNil(c.Run.Argv), Script: c.Run.Script, Files: []wireFile{},
-		Providers: nonNil(c.Providers), Egress: nonNil(c.Egress)}
+		Providers: nonNil(c.Providers), Egress: nonNil(c.Egress), Install: [][]string{}}
+	if c.Image != nil {
+		for _, install := range c.Image.Install {
+			w.Install = append(w.Install, nonNil(install.Argv))
+		}
+	}
 	for _, p := range slices.Sorted(maps.Keys(c.Files)) {
 		w.Files = append(w.Files, wireFile{Path: p, Content: c.Files[p]})
 	}
 	if c.Timeout != nil {
 		w.Timeout = c.Timeout.Duration.String()
 	}
-	return w, nil
+	return w
 }
 
 func resourceToWire(r lastv1alpha1.ManagedResourceSpec) (wireResource, error) {
@@ -377,11 +383,7 @@ func resourceToWire(r lastv1alpha1.ManagedResourceSpec) (wireResource, error) {
 		w.Desired = string(r.Desired.Raw)
 	}
 	for _, p := range r.Probes {
-		c, err := commandToWire(p.Command)
-		if err != nil {
-			return wireResource{}, err
-		}
-		w.Probes = append(w.Probes, wireProbe{ID: p.ID, Command: c, Assert: p.Assert})
+		w.Probes = append(w.Probes, wireProbe{ID: p.ID, Command: commandToWire(p.Command), Assert: p.Assert})
 	}
 	if r.OutputsSecretRef != nil {
 		w.OutputsSecret = r.OutputsSecretRef.Name
@@ -390,11 +392,7 @@ func resourceToWire(r lastv1alpha1.ManagedResourceSpec) (wireResource, error) {
 		w.Outputs = append(w.Outputs, wireOutput{Key: k, Value: r.Outputs[k]})
 	}
 	for _, t := range r.Teardown {
-		c, err := commandToWire(t)
-		if err != nil {
-			return wireResource{}, err
-		}
-		w.Teardown = append(w.Teardown, c)
+		w.Teardown = append(w.Teardown, commandToWire(t))
 	}
 	return w, nil
 }
@@ -420,6 +418,7 @@ func buildSchema() []byte {
 		"id": str, "reason": str, "argv": strs, "script": str,
 		"files":     array(object(map[string]any{"path": str, "content": str})),
 		"providers": strs, "egress": strs, "timeout": str,
+		"install": array(strs),
 	})
 	probe := object(map[string]any{"id": str, cmd: ref(cmd), "assert": str})
 	resource := object(map[string]any{

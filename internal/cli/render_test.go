@@ -117,7 +117,7 @@ func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 	c.Files = map[string]string{"/f\x1b[2K\nx": "da\x1b[8mta\u202e"}
 	c.Providers = []string{"prov\x1bp"}
 	c.Egress = []string{"1.2.3.4:1\nbad"}
-	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{}, {}}}
+	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{aptGet, "install", "-y", "pk\x1bg"}}}}
 	p := &lastv1alpha1.Plan{Hash: h2, Steps: []lastv1alpha1.Command{c}, Resources: []lastv1alpha1.ManagedResourceSpec{{
 		Description: "res\x1b[8m\ndesc",
 		Probes:      []lastv1alpha1.Probe{{ID: "pr\x1bobe", Command: argvCommand(wordKubectl), Assert: "a\nb"}},
@@ -129,7 +129,7 @@ func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 		t.Errorf("an escape sequence reached the output:\n%q", got)
 	}
 	for _, want := range []string{`/f\u001b[2K\u000ax`, `prov\u001bp`, `1.2.3.4:1\u000abad`, `res\u001b[8m\u000adesc`,
-		`probe pr\u001bobe, assert a\u000ab`, `id\u001b[1m`, "image:     2 install commands\n",
+		`probe pr\u001bobe, assert a\u000ab`, `id\u001b[1m`, `install:   apt-get install -y "pk\x1bg"` + "\n",
 		"  | da\\u001b[8mta\\u202e\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan lacks %q:\n%s", want, got)
@@ -140,5 +140,22 @@ func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 		if strings.Contains(line, "bad") && !strings.Contains(line, `\u000a`) {
 			t.Errorf("injected text on its own line: %q", line)
 		}
+	}
+}
+
+const aptGet = "apt-get"
+
+func TestRenderShowsEachInstallCommand(t *testing.T) {
+	c := argvCommand("aws", "s3", "ls")
+	c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{
+		{Argv: []string{aptGet, "update"}}, {Argv: []string{aptGet, "install", "-y", "awscli=2.9.19-1"}}}}
+	var b strings.Builder
+	renderCommand(&b, "  ", c, false)
+	want := "  run:       aws s3 ls\n  install:   apt-get update\n  install:   apt-get install -y awscli=2.9.19-1\n"
+	if b.String() != want {
+		t.Errorf("command =\n%s\nwant\n%s", b.String(), want)
+	}
+	if strings.Contains(b.String(), "install commands") {
+		t.Error("the install command count is still shown")
 	}
 }

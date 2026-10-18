@@ -78,14 +78,10 @@ func checkPlan(summary string, steps []lastv1alpha1.Command, resources []lastv1a
 	return &lastv1alpha1.Plan{Hash: hash, Summary: summary, Steps: steps, Resources: resources}, nil
 }
 
-// checkCommand mirrors the CRD's rule for commands and refuses image builds,
-// which arrive in M4.
+// checkCommand mirrors the CRD's rule for commands.
 func checkCommand(where string, c lastv1alpha1.Command) error {
 	if (len(c.Run.Argv) > 0) == (c.Run.Script != "") {
 		return fmt.Errorf("%s: set exactly one of run.argv and run.script", where)
-	}
-	if c.Image != nil {
-		return fmt.Errorf("%s: image.install is not supported yet", where)
 	}
 	return nil
 }

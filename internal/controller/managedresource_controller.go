@@ -22,7 +22,8 @@ import (
 )
 
 // probeTimeout bounds one RunProbes call, including the wait for a sandbox slot.
-const probeTimeout = 15 * time.Minute
+// It covers the longest image build (images.MaxBuildTimeout, 30m) plus the probe.
+const probeTimeout = 45 * time.Minute
 
 // ManagedResourceReconciler runs each Ready or Drifted Intent's probes on a
 // fixed interval and records the outcomes on its ManagedResources (spec §10,

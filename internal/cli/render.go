@@ -108,13 +108,18 @@ func renderPending(w io.Writer, pc *lastv1alpha1.PendingCommand, hash string, fi
 
 // renderCommand writes one command: argv or script, files by path and size
 // (with their contents if files), Providers, egress and timeout.
+// shellWords quotes an argv the way a shell would need it, one word per element.
+func shellWords(argv []string) string {
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		words[i] = shellWord(a)
+	}
+	return strings.Join(words, " ")
+}
+
 func renderCommand(w io.Writer, indent string, c lastv1alpha1.Command, files bool) {
 	if len(c.Run.Argv) > 0 {
-		words := make([]string, len(c.Run.Argv))
-		for i, a := range c.Run.Argv {
-			words[i] = shellWord(a)
-		}
-		writef(w, "%srun:       %s\n", indent, strings.Join(words, " "))
+		writef(w, "%srun:       %s\n", indent, shellWords(c.Run.Argv))
 	} else {
 		writef(w, "%sscript:\n", indent)
 		renderLines(w, indent, c.Run.Script)
@@ -132,7 +137,9 @@ func renderCommand(w io.Writer, indent string, c lastv1alpha1.Command, files boo
 		writef(w, "%segress:    %s\n", indent, clean(strings.Join(c.Egress, ", ")))
 	}
 	if c.Image != nil {
-		writef(w, "%simage:     %d install commands\n", indent, len(c.Image.Install))
+		for _, install := range c.Image.Install {
+			writef(w, "%sinstall:   %s\n", indent, shellWords(install.Argv))
+		}
 	}
 	if c.Timeout != nil {
 		writef(w, "%stimeout:   %s\n", indent, c.Timeout.Duration)

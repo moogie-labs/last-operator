@@ -22,7 +22,8 @@ import (
 
 const (
 	// stepTimeout bounds one RunCommand call, including the wait for a sandbox slot.
-	stepTimeout = 30 * time.Minute
+	// It covers the longest image build (images.MaxBuildTimeout, 30m) plus the command.
+	stepTimeout = 60 * time.Minute
 	// phaseCallTimeout bounds one BeginPhase, EndPhase or WriteOutputSecret
 	// call, so a stuck gateway never holds a worker.
 	phaseCallTimeout = time.Minute

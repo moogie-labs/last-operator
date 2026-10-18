@@ -34,6 +34,8 @@ var fullPlan = lastv1alpha1.Plan{Summary: "nginx", Steps: []lastv1alpha1.Command
 	Teardown:         []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{kubectlBin, "delete", "deploy", webName}}}},
 }}}
 
+const aptGet = "apt-get"
+
 const oneOfArgvScript = "exactly one of run.argv and run.script"
 
 const (
@@ -286,5 +288,47 @@ func TestNewNonceIs128RandomBits(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(a) || a == b {
 		t.Fatalf("nonces %q and %q", a, b)
+	}
+}
+
+func TestSchemaCommandHasInstall(t *testing.T) {
+	var root struct {
+		Defs map[string]struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(Schema(), &root); err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"items":{"items":{"type":"string"},"type":"array"},"type":"array"}`
+	if got := string(root.Defs["command"].Properties["install"]); got != want {
+		t.Errorf("command.install = %s, want an array of arrays of strings", got)
+	}
+}
+
+func TestParseTurnMapsInstallToAnImage(t *testing.T) {
+	parse := func(install string) (Turn, error) {
+		return ParseTurn(`{"kind":"plan","steps":[{"id":"s1","argv":["true"],"install":` + install + `}]}`)
+	}
+	got, err := parse(`[]`)
+	if err != nil || got.Plan.Steps[0].Image != nil {
+		t.Fatalf("empty install = %+v, %v; want no image", got, err)
+	}
+	got, err = parse(`[["apt-get","install","-y","awscli=2.9.19-1"]]`)
+	want := &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{aptGet, "install", "-y", "awscli=2.9.19-1"}}}}
+	if err != nil || !reflect.DeepEqual(got.Plan.Steps[0].Image, want) {
+		t.Fatalf("install = %+v, %v; want %+v", got, err, want)
+	}
+	if _, err = parse(`[[]]`); err == nil || !strings.Contains(err.Error(), "step s1") {
+		t.Errorf("empty install argv: err = %v, want one naming step s1", err)
+	}
+}
+
+func TestCommandToWireRoundTripsAnImage(t *testing.T) {
+	c := lastv1alpha1.Command{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{"aws", "s3", "ls"}},
+		Image: &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{aptGet, "update"}}, {Argv: []string{aptGet, "install", "-y", "awscli=2.9.19-1"}}}}}
+	back, err := commandToWire(c).command("step s1")
+	if err != nil || !reflect.DeepEqual(back, c) {
+		t.Fatalf("round trip = %+v, %v; want %+v", back, err, c)
 	}
 }
