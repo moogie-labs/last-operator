@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -22,6 +23,8 @@ import (
 const (
 	adminUser = "admin"
 	maxLog    = 64 << 10
+	// runTimeout bounds one garbage collection run.
+	runTimeout = 30 * time.Minute
 )
 
 // Config configures the handler.
@@ -84,7 +87,11 @@ func (s *server) gc(w http.ResponseWriter, r *http.Request) {
 
 	before := dirSize(s.cfg.DataDir)
 	slog.Info("Started garbage collection", "bytesBefore", before)
-	out, err := s.cfg.Run(r.Context(), "registry", "garbage-collect", s.cfg.ConfigFile)
+	// The run outlives the request: a client that times out or disconnects
+	// must not kill the sweep halfway, and the lock is held until it ends.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), runTimeout)
+	defer cancel()
+	out, err := s.cfg.Run(ctx, "registry", "garbage-collect", s.cfg.ConfigFile)
 	log := tail(out)
 	if err != nil {
 		slog.Error("Garbage collection failed", "error", err)

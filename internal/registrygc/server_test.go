@@ -1,15 +1,19 @@
 package registrygc
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -198,6 +202,139 @@ func TestGCReportsAFailedRun(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), adminPassword) {
 		t.Fatal("response leaks the password")
+	}
+}
+
+func TestNeverLogsCredentials(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	f := newFixture(t, true)
+	f.run(func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("exit status 1") })
+	h := Handler(f.cfg)
+	postAdmin(h)
+	bad := httptest.NewRequest(http.MethodPost, gcPath, nil)
+	bad.SetBasicAuth(adminUser, "wrong-password-value")
+	h.ServeHTTP(httptest.NewRecorder(), bad)
+	basic := base64.StdEncoding.EncodeToString([]byte(adminUser + ":" + adminPassword))
+	for _, secret := range []string{adminPassword, "wrong-password-value", basic, "Authorization"} {
+		if strings.Contains(buf.String(), secret) {
+			t.Fatalf("log contains %q: %s", secret, buf.String())
+		}
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected some log output")
+	}
+}
+
+func TestAuthFailsClosedOnBadHtpasswd(t *testing.T) {
+	good, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]string{
+		"garbled":            "not a valid line\n",
+		"empty":              "",
+		"non-bcrypt hash":    "admin:{SHA}5en6G6MezRroT3XKqkdPOmY/BfQ=\n",
+		"only another user":  "pusher:" + string(good) + "\n",
+		"admin without hash": "admin\n",
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, true)
+			f.run(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
+			if err := os.WriteFile(f.cfg.HtpasswdFile, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code := postAdmin(Handler(f.cfg)).Code; code != http.StatusUnauthorized {
+				t.Fatalf("status %d, want 401", code)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("Run must not be called, got %v", f.calls)
+			}
+		})
+	}
+	t.Run("missing file", func(t *testing.T) {
+		f := newFixture(t, true)
+		f.cfg.HtpasswdFile = filepath.Join(t.TempDir(), "absent")
+		if code := postAdmin(Handler(f.cfg)).Code; code != http.StatusUnauthorized {
+			t.Fatalf("status %d, want 401", code)
+		}
+	})
+}
+
+func TestLockIsReleasedAfterFailureAndAfterConflict(t *testing.T) {
+	f := newFixture(t, true)
+	var n atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	f.run(func(context.Context, string, ...string) ([]byte, error) {
+		switch n.Add(1) {
+		case 1:
+			return nil, errors.New("exit status 1")
+		case 2:
+			close(started)
+			<-release
+		}
+		return nil, nil
+	})
+	h := Handler(f.cfg)
+	if code := postAdmin(h).Code; code != http.StatusInternalServerError {
+		t.Fatalf("first run status %d, want 500", code)
+	}
+	done := make(chan int)
+	go func() { done <- postAdmin(h).Code }()
+	<-started
+	if code := postAdmin(h).Code; code != http.StatusConflict {
+		t.Fatalf("status %d, want 409", code)
+	}
+	close(release)
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("second run status %d", code)
+	}
+	if code := postAdmin(h).Code; code != http.StatusOK {
+		t.Fatalf("run after a conflict status %d, want 200", code)
+	}
+}
+
+func TestRunSurvivesClientDisconnect(t *testing.T) {
+	f := newFixture(t, true)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runErr := make(chan error, 1)
+	var first atomic.Bool
+	first.Store(true)
+	f.run(func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if first.Swap(false) {
+			close(started)
+			<-release
+			runErr <- ctx.Err()
+		}
+		return nil, nil
+	})
+	h := Handler(f.cfg)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodPost, gcPath, nil)
+	req.SetBasicAuth(adminUser, adminPassword)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	<-started
+	cancel()
+	if code := postAdmin(h).Code; code != http.StatusConflict {
+		t.Fatalf("status %d, want 409 while the abandoned run continues", code)
+	}
+	close(release)
+	<-done
+	if err := <-runErr; err != nil {
+		t.Fatalf("run context was cancelled: %v", err)
+	}
+	if code := postAdmin(h).Code; code != http.StatusOK {
+		t.Fatalf("status %d after the run ended", code)
 	}
 }
 
