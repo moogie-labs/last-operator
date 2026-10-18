@@ -57,6 +57,12 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
   - OperatorConfig is read twice per resolve.
 - **Build-failed step result:** it is not recorded in the phase's results, and its `RunId` is empty (documented as "no run started").
 
+## From the identical-replan fix (a0e39be)
+
+- **`UsedPlans` fails open, silently.** It treats a `QueryAudit` Unimplemented as "no plans used". That is safe, because the gateway still refuses replays, but nothing logs it and no spec covers it. Add a log line and a spec.
+- **The fake hides its `phase.begin` queries.** The fake gateway leaves `QueryAudit` calls for `["phase.begin"]` out of its call log, so a regression in how often `plan()` reads used plans would not show. Count those calls separately.
+- **The final message reflects only the last correction.** If the model's last attempt fails for another reason (a parse error, or an answered question), the earlier rerun refusals don't reach the final message.
+
 ## From the final re-review
 
 - **A refusal on a retry looks like the earlier Unavailable.** A FailedPrecondition that first appears when the operator retries an Unavailable RunCommand is reported as the earlier Unavailable error.
