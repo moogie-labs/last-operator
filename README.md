@@ -133,12 +133,13 @@ treat it as a security incident.
 
 ## Image retention and garbage collection
 
-The gateway keeps each built image's last-used time. Once a day (`gateway.imageGCInterval`)
-it deletes images unused for longer than `OperatorConfig.spec.images.unusedRetention`
-(default 30 days) that no Intent plan or ManagedResource still references, pausing builds
-while it runs and auditing every deletion. With the bundled registry, the `registry-gc`
-sidecar then reclaims the blobs' disk space. External registries are not swept: their
-storage relies on the registry's own lifecycle policy.
+The gateway keeps each built image's last-used time. Once a day
+(`gateway.imageGCInterval`) it deletes images unused for longer than
+`OperatorConfig.spec.images.unusedRetention` (default 30 days) that no Intent
+plan or ManagedResource still references, pausing builds while it runs and
+auditing every deletion. With the bundled registry, the `registry-gc` sidecar
+then reclaims the blobs' disk space. External registries: GC deletes the
+manifests, but blob storage relies on the registry's own lifecycle policy.
 
 ## Checking the bundled registry
 

@@ -85,10 +85,10 @@ func TestImageGCReclaimsUnusedImages(t *testing.T) {
 	for _, e := range auditEntries(t, "") {
 		marker = max(marker, e.Seq)
 	}
-	setRetention(t, scA.crc, &metav1.Duration{Duration: time.Second})
+	restoreRetention := setRetention(t, scA.crc, &metav1.Duration{Duration: time.Second})
 
 	var result *audit.Entry
-	var deleted = map[string]bool{}
+	var deleted map[string]bool
 	waitFor(t, 4*time.Minute, "an image.gc.result that deleted an image", func() (bool, string) {
 		deleted = map[string]bool{}
 		result = nil
@@ -148,6 +148,9 @@ func TestImageGCReclaimsUnusedImages(t *testing.T) {
 		return ok, fmt.Sprintf("lastProbe %v, conditions %v", mr.Status.LastProbeTime, mr.Status.Conditions)
 	})
 
+	// Restore the retention first, so a GC tick cannot collect the fresh image.
+	restoreRetention()
+
 	// A new Intent with A's install rebuilds A's image.
 	scC := newImageScenario(t, "e2e-gcc-", installA, "again")
 	if out, err := scC.request("again"); err != nil {
@@ -163,7 +166,7 @@ func TestImageGCReclaimsUnusedImages(t *testing.T) {
 }
 
 // setRetention sets images.unusedRetention and restores the previous value in cleanup.
-func setRetention(t *testing.T, crc client.Client, d *metav1.Duration) {
+func setRetention(t *testing.T, crc client.Client, d *metav1.Duration) (restore func()) {
 	t.Helper()
 	ctx := context.Background()
 	update := func(f func(*lastv1alpha1.OperatorConfig)) error {
@@ -191,11 +194,17 @@ func setRetention(t *testing.T, crc client.Client, d *metav1.Duration) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := update(func(op *lastv1alpha1.OperatorConfig) { op.Spec.Images.UnusedRetention = prev }); err != nil {
-			t.Errorf("cleanup: restore unusedRetention: %v", err)
+	restore = func() {
+		if err := update(func(op *lastv1alpha1.OperatorConfig) {
+			if op.Spec.Images != nil {
+				op.Spec.Images.UnusedRetention = prev
+			}
+		}); err != nil {
+			t.Errorf("restore unusedRetention: %v", err)
 		}
-	})
+	}
+	t.Cleanup(restore) // the safety net; restoring twice is harmless
+	return restore
 }
 
 // pointModelAt makes sc's scripted model the OperatorConfig's LLM provider.
