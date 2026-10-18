@@ -23,6 +23,11 @@ const (
 	specVolume            = "spec"
 	workVolume            = "work"
 	tmpVolume             = "tmp"
+	binVolume             = "last-bin"
+	// runnerPath is where the sandbox base image holds the runner, and
+	// runnerBinPath where a sandbox pod's init container copies it.
+	runnerPath    = "/last/sandbox-runner"
+	runnerBinPath = "/last-bin/sandbox-runner"
 )
 
 // DefaultSandboxResources returns the default CPU, memory, and storage limits for a sandbox pod.
@@ -98,8 +103,15 @@ func SpecSecret(namespace, runID string, spec runnerapi.Spec) (*corev1.Secret, e
 
 // PodConfig is the per-installation sandbox pod configuration.
 type PodConfig struct {
-	Namespace       string
-	Image           string
+	Namespace string
+	// Image is the image the command runs in: the sandbox base, or an image
+	// built from it whose install steps ran as root and may have replaced
+	// anything in it, the runner included.
+	Image string
+	// RunnerImage is the pinned sandbox base the runner is copied from, so a
+	// built image never decides what runs as the runner (spec §11.1). For a
+	// command without install steps it equals Image.
+	RunnerImage     string
 	ImagePullPolicy corev1.PullPolicy
 	Resources       corev1.ResourceRequirements
 }
@@ -124,17 +136,20 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 		maps.Copy(resources.Limits, cfg.Resources.Limits)
 	}
 
-	mounts := make([]corev1.VolumeMount, 0, 3+len(creds.Mounts))
+	binLimit := resource.MustParse("64Mi")
+	mounts := make([]corev1.VolumeMount, 0, 4+len(creds.Mounts))
 	mounts = append(mounts,
 		corev1.VolumeMount{Name: workVolume, MountPath: "/work"},
 		corev1.VolumeMount{Name: tmpVolume, MountPath: "/tmp"},
 		corev1.VolumeMount{Name: specVolume, MountPath: "/last/spec", ReadOnly: true},
+		corev1.VolumeMount{Name: binVolume, MountPath: "/last-bin", ReadOnly: true},
 	)
 	mounts = append(mounts, creds.Mounts...)
-	volumes := make([]corev1.Volume, 0, 3+len(creds.Volumes))
+	volumes := make([]corev1.Volume, 0, 4+len(creds.Volumes))
 	volumes = append(volumes,
 		corev1.Volume{Name: workVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &workLimit}}},
 		corev1.Volume{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpLimit}}},
+		corev1.Volume{Name: binVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &binLimit}}},
 		corev1.Volume{Name: specVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: "last-run-" + runID + "-spec", DefaultMode: ptrInt32(0o440),
 		}}},
@@ -158,10 +173,38 @@ func SandboxPod(cfg PodConfig, runID string, creds Materialized, activeDeadline 
 				RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
+			// The runner comes from the pinned base, never from cfg.Image: a built
+			// image's install steps ran as root and could have replaced
+			// /last/sandbox-runner with one that skips the egress gate.
+			InitContainers: []corev1.Container{{
+				Name:            "runner-copy",
+				Image:           cfg.RunnerImage,
+				ImagePullPolicy: cfg.ImagePullPolicy,
+				Command:         []string{"cp", runnerPath, runnerBinPath},
+				VolumeMounts:    []corev1.VolumeMount{{Name: binVolume, MountPath: "/last-bin"}},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("10m"),
+						corev1.ResourceMemory: resource.MustParse("16Mi"),
+					},
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Mi")},
+				},
+				SecurityContext: &corev1.SecurityContext{
+					RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid,
+					AllowPrivilegeEscalation: &no,
+					ReadOnlyRootFilesystem:   &yes,
+					SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+					// AppArmorProfile stays unset, as on the build pod's init container: an
+					// explicit RuntimeDefault makes kubelet reject the pod on a node without
+					// AppArmor (kind on Docker Desktop: "Cannot enforce AppArmor").
+					Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+			}},
 			Containers: []corev1.Container{{
 				Name:            RunnerContainer,
 				Image:           cfg.Image,
 				ImagePullPolicy: cfg.ImagePullPolicy,
+				Command:         []string{runnerBinPath},
 				Env:             env,
 				VolumeMounts:    mounts,
 				Resources:       resources,

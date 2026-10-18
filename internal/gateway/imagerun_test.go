@@ -49,6 +49,23 @@ func (e *testEnv) podImages() []string {
 	return out
 }
 
+// podRunners is, for every sandbox pod created so far, the image its runner is
+// copied from; it fails the test unless every pod starts that copy.
+func (e *testEnv) podRunners() []string {
+	e.t.Helper()
+	var out []string
+	for _, act := range e.kube.Actions() {
+		if ca, ok := act.(k8stesting.CreateAction); ok && act.GetResource().Resource == "pods" {
+			spec := ca.GetObject().(*corev1.Pod).Spec
+			if len(spec.InitContainers) != 1 || !slices.Equal(spec.Containers[0].Command, []string{"/last-bin/sandbox-runner"}) {
+				e.t.Fatalf("pod does not start the copied runner: init %+v, command %v", spec.InitContainers, spec.Containers[0].Command)
+			}
+			out = append(out, spec.InitContainers[0].Image)
+		}
+	}
+	return out
+}
+
 func (e *testEnv) startPayloads(typ string) []map[string]any {
 	var out []map[string]any
 	for _, en := range e.entries() {
@@ -97,6 +114,10 @@ func TestRunCommandRunsOnTheResolvedImage(t *testing.T) {
 	}
 	if pods := ie.podImages(); len(pods) != 2 || pods[1] != testBase {
 		t.Fatalf("pod images = %v", pods)
+	}
+	// Both pods, the built image's included, start the base's runner.
+	if runners := ie.podRunners(); !slices.Equal(runners, []string{testBase, testBase}) {
+		t.Fatalf("runner images = %v, want the base for both", runners)
 	}
 }
 
@@ -206,6 +227,9 @@ func TestRunProbesGroupsByImage(t *testing.T) {
 	// 1 step pod + 3 probe pods.
 	if pods := ie.podImages(); len(pods) != 4 {
 		t.Fatalf("pod images = %v", pods)
+	}
+	if runners := ie.podRunners(); !slices.Equal(runners, []string{testBase, testBase, testBase, testBase}) {
+		t.Fatalf("runner images = %v, want the base for every pod", runners)
 	}
 }
 

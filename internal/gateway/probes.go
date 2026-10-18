@@ -167,7 +167,7 @@ func (g *Gateway) runProbeImages(ctx context.Context, w *audit.Writer, base, act
 	var ran []sandbox.ProbeOutcome
 	if len(runnable) > 0 {
 		var err error
-		ran, err = g.executor(w, base).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: actor, Intent: intent, Probes: runnable, Images: refs})
+		ran, err = g.executor(w, base, base).RunProbes(ctx, sandbox.ProbeRunRequest{Actor: actor, Intent: intent, Probes: runnable, Images: refs})
 		if err != nil {
 			return nil, err
 		}

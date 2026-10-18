@@ -226,6 +226,11 @@ func (g *Gateway) resolveImage(ctx context.Context, w *audit.Writer, req imageRe
 	if err != nil {
 		return "", err
 	}
+	return g.resolveImageOn(ctx, w, base, req)
+}
+
+// resolveImageOn is resolveImage for a sandbox base the caller already read.
+func (g *Gateway) resolveImageOn(ctx context.Context, w *audit.Writer, base string, req imageRequest) (string, error) {
 	if len(req.Install) == 0 {
 		return base, nil
 	}

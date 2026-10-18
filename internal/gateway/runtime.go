@@ -78,10 +78,13 @@ func (g *Gateway) providerGetter(ctx context.Context, name string) (*lastv1alpha
 	return &p, nil
 }
 
-// executor builds a sandbox executor for one RPC; every executor shares the scheduler.
-func (g *Gateway) executor(w *audit.Writer, image string) *sandbox.Executor {
+// executor builds a sandbox executor for one RPC; every executor shares the
+// scheduler. Its pods run on image and start the runner copied from base, the
+// pinned sandbox base (spec §11.1).
+func (g *Gateway) executor(w *audit.Writer, base, image string) *sandbox.Executor {
 	cfg := g.execCfg
 	cfg.Pod.Image = image
+	cfg.Pod.RunnerImage = base
 	return sandbox.NewExecutor(g.kube, g.providerGetter, w, g.sched.Load(), g.logs, cfg)
 }
 
@@ -201,7 +204,7 @@ func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 		maxConcurrent = int(op.Spec.Sandbox.MaxConcurrent)
 	}
 	g.sched.Store(sandbox.NewScheduler(maxConcurrent))
-	reaped, err := g.executor(w, "").ReapOrphans(ctx, 0, time.Now())
+	reaped, err := g.executor(w, "", "").ReapOrphans(ctx, 0, time.Now())
 	if err != nil {
 		return fmt.Errorf("gateway: reap orphaned sandbox runs: %w", err)
 	}

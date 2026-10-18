@@ -400,7 +400,7 @@ func WaitForPod(ctx context.Context, kube kubernetes.Interface, ns, name string,
 				return pod, nil
 			}
 			pulling := false
-			for _, cs := range pod.Status.ContainerStatuses {
+			for _, cs := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
 				w := cs.State.Waiting
 				if w == nil {
 					continue
@@ -522,7 +522,7 @@ func describePod(p *corev1.Pod) string {
 	if p.Status.Reason != "" {
 		desc.WriteString(", reason " + p.Status.Reason)
 	}
-	for _, cs := range p.Status.ContainerStatuses {
+	for _, cs := range slices.Concat(p.Status.InitContainerStatuses, p.Status.ContainerStatuses) {
 		switch {
 		case cs.State.Terminated != nil:
 			fmt.Fprintf(&desc, ", container %s terminated: %s (exit %d)", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)

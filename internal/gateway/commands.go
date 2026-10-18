@@ -132,8 +132,13 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	if expected.Image != nil {
 		install = expected.Image.Install
 	}
-	image, err := g.resolveImage(ctx, w, imageRequest{Intent: key, Stage: string(p.stage), Subject: p.subject,
-		Actor: actor, Install: install, Policy: eff})
+	// The runner always comes from the base, whatever image the command runs on (spec §11.1).
+	base, err := g.sandboxImage(ctx)
+	image := ""
+	if err == nil {
+		image, err = g.resolveImageOn(ctx, w, base, imageRequest{Intent: key, Stage: string(p.stage), Subject: p.subject,
+			Actor: actor, Install: install, Policy: eff})
+	}
 	if failed, ok := errors.AsType[errImageBuildFailed](err); ok {
 		p.failed = true
 		return &gatewayv1.RunCommandResponse{Result: &gatewayv1.CommandResult{ExitCode: -1, Error: failed.Error(),
@@ -144,7 +149,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = refused // anything else (Unavailable, context) can be retried
 		return nil, out
 	}
-	res, err := g.executor(w, image).Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
+	res, err := g.executor(w, base, image).Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
 		SubjectHash: p.subject, AuthorizedBy: p.auth, Command: expected, Priority: priorityFor(p.stage)})
 	if err != nil {
 		// The outcome may not be recorded: withhold any output, and stop the phase.

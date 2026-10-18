@@ -775,6 +775,27 @@ func TestRunFailsFastOnInvalidImageNameDespiteTheGrace(t *testing.T) {
 	assertCleaned(t, kube)
 }
 
+func TestRunFailsFastWhenTheRunnerCopyCannotStart(t *testing.T) {
+	kube, _ := fakeCluster(corev1.PodPending)
+	kube.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Status.InitContainerStatuses = waiting("InvalidImageName")
+		return false, nil, nil
+	})
+	aud, _ := newAudit(t)
+	c := cmd(nil, nil)
+	c.Timeout = &metav1.Duration{Duration: time.Minute}
+	start := time.Now()
+	_, err := newExecPullGrace(time.Minute, kube, aud, envelopeLogs(), envProvider(), k8sProvider(clusterName)).
+		Run(context.Background(), sandbox.RunRequest{Actor: testActor, Command: c})
+	if err == nil || !strings.Contains(err.Error(), "InvalidImageName") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("did not fail fast: %s", time.Since(start))
+	}
+	assertCleaned(t, kube)
+}
+
 func TestRunFailsFastWhenThePodIsDeletedExternally(t *testing.T) {
 	kube, _ := fakeCluster(corev1.PodPending)
 	kube.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {

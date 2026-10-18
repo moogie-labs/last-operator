@@ -2,6 +2,7 @@ package sandbox_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ const (
 	testRunID     = "run1"
 	testImage     = "img:tag"
 	workDir       = "/work"
+	dropAll       = "ALL"
 )
 
 func TestRunnerSpecConvertsCommands(t *testing.T) {
@@ -96,7 +98,7 @@ func TestSandboxPodIsLockedDown(t *testing.T) {
 	}
 	c := ps.Containers[0]
 	if c.Name != "runner" || c.Image != testImage || *c.SecurityContext.AllowPrivilegeEscalation || !*c.SecurityContext.ReadOnlyRootFilesystem ||
-		len(c.SecurityContext.Capabilities.Drop) != 1 || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		len(c.SecurityContext.Capabilities.Drop) != 1 || c.SecurityContext.Capabilities.Drop[0] != dropAll {
 		t.Fatalf("container = %+v", c)
 	}
 	mounts := map[string]bool{}
@@ -115,6 +117,52 @@ func TestSandboxPodIsLockedDown(t *testing.T) {
 	}
 	if pod.Labels[sandbox.LabelRun] != testRunID || pod.Labels[sandbox.LabelName] != sandbox.NameValue || pod.Name != "last-run-"+testRunID {
 		t.Fatalf("meta = %+v", pod.ObjectMeta)
+	}
+}
+
+func TestSandboxPodStartsTheRunnerFromTheBase(t *testing.T) {
+	const built, base = "registry/last/images@sha256:built", "base@sha256:pinned"
+	pod := sandbox.SandboxPod(sandbox.PodConfig{Namespace: lastSandboxNS, Image: built, RunnerImage: base,
+		ImagePullPolicy: corev1.PullIfNotPresent}, testRunID, sandbox.Materialized{}, time.Minute)
+	ps := pod.Spec
+	if len(ps.InitContainers) != 1 {
+		t.Fatalf("init containers = %+v", ps.InitContainers)
+	}
+	init := ps.InitContainers[0]
+	if init.Image != base || init.ImagePullPolicy != corev1.PullIfNotPresent ||
+		!slices.Equal(init.Command, []string{"cp", "/last/sandbox-runner", "/last-bin/sandbox-runner"}) {
+		t.Fatalf("init container = %+v", init)
+	}
+	checkRunnerCopySecurity(t, init.SecurityContext)
+	if init.Resources.Limits.Memory().IsZero() || init.Resources.Requests.Cpu().IsZero() {
+		t.Fatalf("init resources = %+v", init.Resources)
+	}
+	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].MountPath != "/last-bin" || init.VolumeMounts[0].ReadOnly {
+		t.Fatalf("init mounts = %+v", init.VolumeMounts)
+	}
+	c := ps.Containers[0]
+	if c.Image != built || !slices.Equal(c.Command, []string{"/last-bin/sandbox-runner"}) || len(c.Args) != 0 {
+		t.Fatalf("runner container image %q command %v args %v", c.Image, c.Command, c.Args)
+	}
+	i := slices.IndexFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/last-bin" })
+	if i < 0 || !c.VolumeMounts[i].ReadOnly || c.VolumeMounts[i].Name != init.VolumeMounts[0].Name {
+		t.Fatalf("runner mounts = %+v", c.VolumeMounts)
+	}
+	v := slices.IndexFunc(ps.Volumes, func(v corev1.Volume) bool { return v.Name == init.VolumeMounts[0].Name })
+	if v < 0 || ps.Volumes[v].EmptyDir == nil || ps.Volumes[v].EmptyDir.SizeLimit == nil {
+		t.Fatalf("volumes = %+v", ps.Volumes)
+	}
+}
+
+// checkRunnerCopySecurity checks the runner-copy init container: non-root,
+// RuntimeDefault seccomp, AppArmor left to the runtime, nothing to escalate.
+func checkRunnerCopySecurity(t *testing.T, sc *corev1.SecurityContext) {
+	t.Helper()
+	if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot || *sc.RunAsUser != 65532 || *sc.RunAsGroup != 65532 ||
+		*sc.AllowPrivilegeEscalation || !*sc.ReadOnlyRootFilesystem ||
+		sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || sc.AppArmorProfile != nil ||
+		len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != dropAll {
+		t.Fatalf("init security = %+v", sc)
 	}
 }
 
@@ -240,7 +288,7 @@ func assertPodSecurity(t *testing.T, pod *corev1.Pod) {
 	// Container-level security
 	if !*c.SecurityContext.RunAsNonRoot || *c.SecurityContext.AllowPrivilegeEscalation ||
 		!*c.SecurityContext.ReadOnlyRootFilesystem || len(c.SecurityContext.Capabilities.Drop) != 1 ||
-		c.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		c.SecurityContext.Capabilities.Drop[0] != dropAll {
 		t.Fatalf("container security context = %+v", c.SecurityContext)
 	}
 
