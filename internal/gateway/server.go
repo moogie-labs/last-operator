@@ -46,9 +46,11 @@ type Gateway struct {
 	state   *StateStore
 	phases  phaseTable
 	probing sync.Map // intent key -> in-flight probe run
-	index   auditIndex
-	images  *imageIndex // built-image digest cache
-	builds  *imageBuilds
+	// tornDown maps an Intent key to the UID whose record a succeeded Delete dropped.
+	tornDown sync.Map
+	index    auditIndex
+	images   *imageIndex // built-image digest cache
+	builds   *imageBuilds
 	// registry is an anonymous client for the bundled front proxy: manifest HEADs.
 	registry *images.Client
 	// newBuilder returns the builder for one build's pod configuration; tests replace it.

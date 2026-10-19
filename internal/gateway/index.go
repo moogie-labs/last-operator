@@ -3,11 +3,17 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 )
 
@@ -108,12 +114,48 @@ func (g *Gateway) saveIndexLocked(ctx context.Context, intent string) error {
 		g.index.restore(intent, es)
 		return err
 	}
+	if rec.cm == nil {
+		uid, drop, err := g.afterTeardown(ctx, intent)
+		if err != nil {
+			g.index.restore(intent, es)
+			return err
+		}
+		if drop { // the audit log keeps them
+			return nil
+		}
+		if uid != "" {
+			rec.IntentUID = uid
+		}
+	}
 	rec.AddIndex(es)
 	if err := g.saveRecord(ctx, rec); err != nil {
 		g.index.restore(intent, es)
 		return err
 	}
 	return nil
+}
+
+// afterTeardown decides who owns the entries a flush holds for an Intent without
+// a record. When a succeeded Delete dropped that record, drop is true while the
+// torn-down Intent, or no Intent, holds the name: saving the entries would bring
+// the record back. A recreated Intent's UID comes back as uid, to own the new record.
+func (g *Gateway) afterTeardown(ctx context.Context, intent string) (uid string, drop bool, err error) {
+	gone, ok := g.tornDown.Load(intent)
+	if !ok {
+		return "", false, nil
+	}
+	ns, name, _ := strings.Cut(intent, "/")
+	var in lastv1alpha1.Intent
+	switch err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &in); {
+	case apierrors.IsNotFound(err):
+		return "", true, nil
+	case err != nil:
+		return "", false, fmt.Errorf("gateway: read intent %s: %w", intent, err)
+	case string(in.UID) == gone:
+		return "", true, nil
+	}
+	g.tornDown.CompareAndDelete(intent, gone)
+	return string(in.UID), false, nil
 }
 
 // saveRecord saves rec. The QueryAudit index is best-effort: when the record would

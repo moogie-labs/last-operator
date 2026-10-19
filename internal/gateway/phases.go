@@ -374,6 +374,42 @@ func subjectNoun(stage lastv1alpha1.Stage) string {
 	return "plan"
 }
 
+// openableStages are the stages this gateway opens phases for.
+var openableStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageDelete, lastv1alpha1.StageDiscovery}
+
+// checkDeletePlan applies a Delete phase's own rules: the Intent is being deleted,
+// and the plan has no resources, since it only orders the executed plan's teardown.
+func checkDeletePlan(d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, body plan.Body) error {
+	switch {
+	case stage != lastv1alpha1.StageDelete:
+		return nil
+	case intent.DeletionTimestamp == nil:
+		return d.deny(codes.FailedPrecondition, "intent is not being deleted; a Delete phase opens only for an Intent being deleted")
+	case len(body.Resources) > 0:
+		return d.deny(codes.FailedPrecondition, "a Delete plan has no resources; this one has %d", len(body.Resources))
+	}
+	return nil
+}
+
+// checkReplay refuses a subject that must not run again. A Delete is exempt from
+// run-once: a retried or interrupted teardown replans a permutation of the same
+// commands, often the same plan, and the UID-bound, unexpired approval of that
+// Delete subject authorizes the re-run. A succeeded Delete drops the record and
+// its used subjects, so run-once cannot stop a replay there; an Intent being
+// deleted opens no Create phase at all.
+func checkReplay(d denial, rec *LoadedRecord, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) error {
+	if stage != lastv1alpha1.StageDelete && rec.WasUsed(subject) {
+		if stage == lastv1alpha1.StageDiscovery {
+			return d.deny(codes.FailedPrecondition, "this discovery command already ran, and its approval is used up; ask for it again to run it again")
+		}
+		return d.deny(codes.FailedPrecondition, "this plan already opened a phase; a plan runs only once, so plan a different one")
+	}
+	if intent.DeletionTimestamp != nil && stage != lastv1alpha1.StageDelete && stage != lastv1alpha1.StageDiscovery {
+		return d.deny(codes.FailedPrecondition, "intent is being deleted; only a Delete or Discovery phase can open")
+	}
+	return nil
+}
+
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
 	w, release, err := g.beginRPC()
 	if err != nil {
@@ -392,8 +428,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	defer unlock()
 	actor := CallerFrom(ctx)
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, stage: string(stage), subject: subject, rpc: "BeginPhase"}
-	if stage != lastv1alpha1.StageCreate && stage != lastv1alpha1.StageDiscovery {
-		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create and Discovery phases only", stage)
+	if !slices.Contains(openableStages, stage) {
+		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create, Delete and Discovery phases only", stage)
 	}
 
 	var intent lastv1alpha1.Intent
@@ -402,6 +438,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 	body, canonical, nonce, err := verifySubject(d, &intent, stage, subject)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkDeletePlan(d, &intent, stage, body); err != nil {
 		return nil, err
 	}
 
@@ -422,11 +461,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, err
 		}
 	}
-	if rec.WasUsed(subject) {
-		if stage == lastv1alpha1.StageDiscovery {
-			return nil, d.deny(codes.FailedPrecondition, "this discovery command already ran, and its approval is used up; ask for it again to run it again")
-		}
-		return nil, d.deny(codes.FailedPrecondition, "this plan already opened a phase; a plan runs only once, so plan a different one")
+	if err := checkReplay(d, rec, &intent, stage, subject); err != nil {
+		return nil, err
 	}
 	if stage == lastv1alpha1.StageCreate {
 		if err := recordFits(rec, stage, subject, canonical); err != nil {
@@ -611,18 +647,39 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		p.endSeq, p.outcome, p.closed = end.Seq, want, true
 	}
 	rec.Open = nil
-	// A Discovery phase ran one inspection command; probes and later stages keep
-	// following the last executed Create plan.
-	if p.outcome == outcomeSucceeded && p.stage != lastv1alpha1.StageDiscovery {
+	// A Discovery phase ran one inspection command, and a Delete phase only tears
+	// down; probes and later stages keep following the last executed Create plan.
+	if p.outcome == outcomeSucceeded && p.stage != lastv1alpha1.StageDiscovery && p.stage != lastv1alpha1.StageDelete {
 		canonical, err := plan.Canonical(p.body)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
 		}
 		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq}
 	}
+	// The record is saved without the open phase before a succeeded Delete drops
+	// it, so a failed deletion never leaves a phase for the next leader to interrupt.
 	if err := g.saveRecord(ctx, rec); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
+	if p.outcome == outcomeSucceeded && p.stage == lastv1alpha1.StageDelete {
+		if err := g.dropRecord(ctx, key, p.uid); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "%v", err)
+		}
+	}
 	g.phases.remove(key)
 	return &gatewayv1.EndPhaseResponse{EndSeq: p.endSeq}, nil
+}
+
+// dropRecord deletes the record of an Intent whose teardown succeeded, with the
+// index entries still pending for it, and remembers its UID so that no later
+// index flush recreates the record. The caller holds the Intent's lock, which
+// every record writer takes; phase.end is already in the audit log, the source
+// of truth the record only indexes.
+func (g *Gateway) dropRecord(ctx context.Context, key, uid string) error {
+	if err := g.state.Delete(ctx, key); err != nil {
+		return err
+	}
+	g.tornDown.Store(key, uid)
+	g.index.take(key)
+	return nil
 }

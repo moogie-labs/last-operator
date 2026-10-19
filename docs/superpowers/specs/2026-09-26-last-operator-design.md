@@ -665,13 +665,24 @@ is `status.pendingCommand.hash`, the SHA-256 of the canonical JSON of
 the gateway records each subject as used, so an approval runs at most once
 while its subject is remembered: the gateway keeps the last 200 Discovery
 subjects and the last 50 plan subjects per Intent, separately, so discovery
-never evicts a plan subject. Approvals are not yet tied to the Intent's UID
-or a freshness bound (tracked as the approval-replay follow-up, before M5).
+never evicts a plan subject. An approval counts only for the Intent UID it
+names and until it is older than `approvals.maxAge` (§5.2, §5.6).
 The gateway checks that the
 hash matches the pending command and its nonce, that the command's step ID
 is `discovery`, and that it is at most 64 KiB. A Discovery phase never
 becomes the executed plan: probes and later stages keep following the last
 executed Create plan.
+
+**Delete phases** (stage `Delete`) open only for an Intent being deleted.
+The subject is the plan in `status.plan`, as for Create, and its `resources`
+must be empty: a Delete plan only orders the executed plan's teardown
+commands. In M5a a Delete is authorized by approval only; Auto arrives in
+M5c. A Delete is exempt from run-once. A failed or interrupted teardown is
+retried by replanning, and the only valid Delete plans are permutations of
+the same commands, so a one-command teardown could otherwise never run
+again; the approval of that Delete subject, bound to the Intent's UID and
+its age limit, authorizes the re-run. Every other stage stays run-once, and
+an Intent being deleted opens no Create phase.
 
 Any mismatch produces a `policy.denied` audit entry and an error to the
 operator. If a step fails, the Intent returns to **Planning** with the
@@ -690,6 +701,11 @@ ConfigMap in `last-gateway`, written only after the matching
 gateway restart closes an open phase as `interrupted` rather than
 resuming it. The record is bounded (about 900 KiB), so the
 gateway refuses at `BeginPhase` a plan too large to record once executed.
+A succeeded Delete phase deletes the record, after its `phase.end` is in the
+audit log, together with the in-memory phase and the Intent's unsaved
+index entries; no later index flush recreates it. A failed or aborted Delete
+keeps the record and its executed plan. The output Secrets are not the
+gateway's to delete: they belong to their ManagedResources and go with them.
 
 - **Auto-mode remediation** is limited to re-running commands from that
   plan. If the remediation plan contains any other command, it needs
