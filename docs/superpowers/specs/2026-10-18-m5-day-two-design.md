@@ -72,7 +72,7 @@ Probes follow an adaptive interval with jitter and a floor.
   - a refusal of a later Delete phase call because the gateway already tore this Intent UID down (`gatewayv1.MsgTornDown`) also counts as success: the answer to the ending EndPhase was lost.
 - **On failure:** `Failed` / `TeardownFailed`. The `last.moogie-labs.com/retry` annotation, with any value change, replans the Delete.
 - **Gateway:** BeginPhase accepts stage `Delete`. The subject is the plan in `status.plan` (as for Create), and `resources` must be empty. Authorization in M5a is approval only; Auto arrives in M5c.
-- **Plan checks:** `plan.Validate` and `agent.Parse` apply the argv-xor-script rule to teardown commands (M2c follow-up).
+- **Plan checks:** `plan.Validate` and `agent.Parse` apply the argv-xor-script rule to teardown commands (M2c follow-up). They also refuse a teardown command whose argv or script holds a `${steps.` reference: a Delete phase has no Create step results to resolve it from, so the Intent could never be torn down. The model gets the refusal as a correction.
 
 ### 3.5 CLI
 - `follow` shows `TearingDown`.

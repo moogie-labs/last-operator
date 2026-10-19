@@ -150,6 +150,7 @@ func TestParseTurnRefusesMalformedTurns(t *testing.T) {
 		"probe no assert":   {resource(`"probes":[{"id":"p","command":{"argv":["true"]}}]`), `probe "p" has no assert`},
 		"probe bad command": {resource(`"probes":[{"id":"p","command":{},"assert":"true"}]`), oneOfArgvScript},
 		"teardown both":     {resource(`"teardown":[{"id":"t1","argv":["a"],"script":"b"}]`), oneOfArgvScript},
+		"teardown ref":      {resource(`"teardown":[{"id":"t1","argv":["kubectl","delete","ns","${steps.s1.stdout}"]}]`), "write the value itself"},
 		"identity array":    {resource(`"identity":"[1]"`), "JSON object"},
 		"desired garbage":   {resource(`"desired":"{nope"`), "JSON object"},
 		"literal output":    {resource(`"outputsSecret":"o","outputs":[{"key":"k","value":"hunter2"}]`), "not a single step reference"},

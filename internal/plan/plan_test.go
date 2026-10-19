@@ -95,6 +95,11 @@ func TestValidate(t *testing.T) {
 			{Teardown: []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{"a"}, Script: "b"}}}}}}, "exactly one of run.argv and run.script"},
 		{"teardown with neither", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Teardown: []lastv1alpha1.Command{{ID: "t1"}}}}}, "exactly one of run.argv and run.script"},
+		{"teardown argv with a step reference", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{Teardown: []lastv1alpha1.Command{step("t1", "kubectl", "delete", "ns", "${steps.s1.stdout}")}}}}, "teardown command 0 uses a ${steps…} reference"},
+		{"teardown script with a step reference", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{}, {Teardown: []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Script: "kubectl delete ns ${steps.s1.json.name}"}}}}}},
+			"resource 1 teardown command 0 uses a ${steps…} reference"},
 		{"outputs without secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Outputs: map[string]string{"k": s1StdoutRef}}}}, "has outputs but no outputsSecretRef"},
 		{"literal output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{

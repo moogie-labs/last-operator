@@ -82,7 +82,11 @@ func Validate(b Body) error {
 			probes[p.ID] = true
 		}
 		for j, c := range r.Teardown {
-			if err := CheckCommand(fmt.Sprintf("plan: resource %d teardown command %d", i, j), c); err != nil {
+			where := fmt.Sprintf("plan: resource %d teardown command %d", i, j)
+			if err := CheckCommand(where, c); err != nil {
+				return err
+			}
+			if err := checkNoStepRefs(where, c); err != nil {
 				return err
 			}
 		}
@@ -122,6 +126,22 @@ func Validate(b Body) error {
 func CheckCommand(where string, c lastv1alpha1.Command) error {
 	if (len(c.Run.Argv) > 0) == (c.Run.Script != "") {
 		return fmt.Errorf("%s: set exactly one of run.argv and run.script", where)
+	}
+	return nil
+}
+
+// checkNoStepRefs refuses a teardown command with a ${steps…} reference: it runs
+// in a Delete phase, when the Create steps' results are gone, so it could never
+// resolve and the Intent could never be deleted. The error never repeats the
+// command's text: a mistaken literal could be a credential.
+func checkNoStepRefs(where string, c lastv1alpha1.Command) error {
+	refs := strings.Contains(c.Run.Script, "${steps.")
+	for _, a := range c.Run.Argv {
+		refs = refs || strings.Contains(a, "${steps.")
+	}
+	if refs {
+		return fmt.Errorf("%s uses a ${steps…} reference; a teardown runs when the Intent is deleted, "+
+			"without the plan's step results, so write the value itself", where)
 	}
 	return nil
 }
