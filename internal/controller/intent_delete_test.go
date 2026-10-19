@@ -17,6 +17,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
+	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
@@ -237,7 +238,7 @@ var _ = Describe("Intent deletion", func() {
 			s.queryHook = func(types []string) error {
 				typ := strings.Join(types, ",")
 				defer func() { previous = typ }()
-				if typ == "phase.end" && previous == "phase.end" {
+				if typ == audit.TypePhaseEnd && previous == audit.TypePhaseEnd {
 					return status.Error(codes.Unavailable, "audit log unavailable")
 				}
 				return nil

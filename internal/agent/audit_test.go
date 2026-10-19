@@ -279,7 +279,11 @@ func TestExecutedPlanReturnsGatewayErrors(t *testing.T) {
 
 // endedPhase returns a phase.end of stage for subject that ran stepsRun steps.
 func endedPhase(seq uint64, stage, subject, outcome string, stepsRun int) *gatewayv1.AuditEntry {
-	return entry(seq, audit.TypePhaseEnd, stage, subject, map[string]any{"beginSeq": seq - 1, "outcome": outcome, "stepsRun": stepsRun})
+	return entry(seq, audit.TypePhaseEnd, stage, subject, struct {
+		BeginSeq uint64 `json:"beginSeq"`
+		Outcome  string `json:"outcome"`
+		StepsRun int    `json:"stepsRun"`
+	}{seq - 1, outcome, stepsRun})
 }
 
 func TestPartialCreateIsTheNewestCreateThatRanStepsAndFailed(t *testing.T) {
