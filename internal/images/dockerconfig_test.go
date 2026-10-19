@@ -14,13 +14,16 @@ func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) 
 
 func TestCredentialsFor(t *testing.T) {
 	cfg := []byte(`{"auths":{"reg.example":{"auth":"` + b64("u:p:w") + `"},"https://ghcr.io":{"auth":"` + b64("g:t") + `"},` +
-		`"docker.example/v1/":{"auth":"` + b64("d:x") + `"},"empty.example":{}}}`)
+		`"docker.example/v1/":{"auth":"` + b64("d:x") + `"},"empty.example":{},` +
+		`"https://index.docker.io/v1/":{"auth":"` + b64("hub:pat") + `"}}}`)
 	for host, want := range map[string]*images.Credentials{
 		exampleHost:       {Username: "u", Password: "p:w"},
 		"ghcr.io":         {Username: "g", Password: "t"},
 		"docker.example":  {Username: "d", Password: "x"},
 		"missing.example": nil,
 		"empty.example":   nil,
+		// Docker Hub's standard key normalises to index.docker.io.
+		"index.docker.io": {Username: "hub", Password: "pat"},
 	} {
 		got, err := images.CredentialsFor(cfg, host)
 		if err != nil || (got == nil) != (want == nil) || (got != nil && *got != *want) {
@@ -69,6 +72,14 @@ func TestCredentialsForIsDeterministic(t *testing.T) {
 			if strings.Contains(err.Error(), leak) {
 				t.Fatalf("error %q leaks %q", err, leak)
 			}
+		}
+	}
+	// An exact key without a usable credential (an empty entry, or only a token) does
+	// not hide a normalised key that has one.
+	for _, exactEntry := range []string{`{}`, `{"identitytoken":"idtok"}`} {
+		cfg := []byte(`{"auths":{"reg.example":` + exactEntry + `,"https://reg.example":{"auth":"` + b64("u:p") + `"}}}`)
+		if got, err := images.CredentialsFor(cfg, exampleHost); err != nil || got == nil || *got != (images.Credentials{Username: "u", Password: "p"}) {
+			t.Fatalf("exact entry %s beside a normalised credential: %+v, %v", exactEntry, got, err)
 		}
 	}
 	// An empty entry holds no credential, so it conflicts with nothing.

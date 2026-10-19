@@ -58,17 +58,21 @@ func keyHost(key string) string {
 
 // CredentialsFor returns the basic credentials a Docker config JSON holds for host
 // ("auths"[key].auth, base64 "user:pass", or plain username and password), or nil
-// when it has none. An exact key match wins. Otherwise the keys that are host with an
-// "http(s)://" scheme and/or a path ("https://host", "host/v1/") are tried in sorted
-// order; two of them holding different credentials is an error. The password may
-// contain colons. Error text never includes a credential.
+// when it has none. An exact key with a credential wins. Otherwise (no exact key, or
+// one without a usable credential) the keys that are host with an "http(s)://" scheme
+// and/or a path ("https://host", "host/v1/", so "https://index.docker.io/v1/" for
+// index.docker.io) are tried in sorted order; two of them holding different
+// credentials is an error. The password may contain colons. Error text never
+// includes a credential.
 func CredentialsFor(dockerConfig []byte, host string) (*Credentials, error) {
 	var cfg dockerConfigFile
 	if err := json.Unmarshal(dockerConfig, &cfg); err != nil {
 		return nil, errors.New("docker config is not valid JSON")
 	}
 	if entry, ok := cfg.Auths[host]; ok {
-		return entryCredentials(entry, host)
+		if c, err := entryCredentials(entry, host); err != nil || c != nil {
+			return c, err
+		}
 	}
 	keys := make([]string, 0, len(cfg.Auths))
 	for key := range cfg.Auths {

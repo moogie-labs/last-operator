@@ -339,6 +339,9 @@ func TestBuildObjectsPushToTheExternalRepository(t *testing.T) {
 	if _, ok := cmd.Files["/work/buildkitd.toml"]; !ok {
 		t.Fatal("buildkitd.toml missing")
 	}
+	if got := cmd.Files["/work/.docker/config.json"]; got != string(b.PushConfig) {
+		t.Fatalf("config.json = %q, want the supplied push config", got)
+	}
 	// An external build leaves the base alone, even under the pull host.
 	b.Base = "localhost:5000/last/base@" + testDigest
 	cmd = buildSpec(t, cfg, b).Commands[0]

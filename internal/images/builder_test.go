@@ -316,7 +316,8 @@ func TestBuildReturnsAnErrorWhenASucceededPodsLogIsUnreadable(t *testing.T) {
 func TestBuilderRedactsEveryPushConfigCredential(t *testing.T) {
 	reg, _ := pushed(t)
 	cfgJSON := []byte(`{"auths":{"a.example":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("ua:pw-one")) +
-		`"},"b.example":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("ub:pw-two")) + `"}}}`)
+		`"},"b.example":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("ub:pw-two")) + `"},` +
+		`"c.example":{"username":"uc","password":"pw-three","identitytoken":"idtok-four","registrytoken":"regtok-five"}}}`)
 	cfg := testCfg()
 	cfg.PushRef, cfg.Insecure = "a.example/last-images", false
 	b := testBuild()
@@ -326,12 +327,13 @@ func TestBuilderRedactsEveryPushConfigCredential(t *testing.T) {
 		parts = append(parts, v, base64.StdEncoding.EncodeToString([]byte(v)))
 	}
 	kube := buildKube(corev1.PodFailed)
-	log := envelopeLog(runnerapi.Result{ExitCode: 1, Stderr: strings.Join(parts, " "), Error: "x pw-two"})
+	parts = append(parts, "pw-three", "idtok-four", "regtok-five")
+	log := envelopeLog(runnerapi.Result{ExitCode: 1, Stderr: strings.Join(parts, " "), Error: "x pw-two regtok-five"})
 	out, err := images.NewBuilder(kube, fixedLogs(log), reg, cfg).Build(context.Background(), b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leak := range []string{"pw-one", "pw-two", "dWE6cHctb25l", "dWI6cHctdHdv"} {
+	for _, leak := range []string{"pw-one", "pw-two", "dWE6cHctb25l", "dWI6cHctdHdv", "pw-three", "idtok-four", "regtok-five"} {
 		if strings.Contains(out.Log, leak) || (out.Err != nil && strings.Contains(out.Err.Error(), leak)) {
 			t.Fatalf("%q leaked: log %q err %v", leak, out.Log, out.Err)
 		}
