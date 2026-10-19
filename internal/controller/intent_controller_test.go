@@ -88,14 +88,63 @@ var _ = Describe("Intent planning", func() {
 
 	It("fails when the plan is denied, even next to an approval", func() {
 		gw.setScript(key, &script{llm: turns(answer(steps))})
-		// Both decisions exist before the Intent does, so one reconcile sees both.
-		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionApprove)
-		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionDeny)
+		// Approvals name the Intent's UID, so they come after it. The Deny comes first:
+		// a Deny wins over an Approve whenever the reconcile sees both.
 		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionDeny)
+		createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionApprove)
 
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
 		Consistently(func() []string { return gw.calls(key) }).ShouldNot(ContainElement("BeginPhase"))
+	})
+
+	It("ignores foreign-UID and stale decisions", func() {
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		h := hashOf(steps)
+
+		By("ignoring a Deny and an Approve for a previous Intent of the same name")
+		createApprovalForUID(key, "a-previous-intent", lastv1alpha1.StageCreate, h, lastv1alpha1.DecisionDeny)
+		createApprovalForUID(key, "a-previous-intent", lastv1alpha1.StageCreate, h, lastv1alpha1.DecisionApprove)
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.calls(key)).NotTo(ContainElement(beginPhase))
+
+		By("ignoring a stale Approve alone")
+		DeferCleanup(resetClock)
+		advanceClock(25 * time.Hour) // the operator's clock runs ahead, so the next Approve is already stale
+		createApproval(key, lastv1alpha1.StageCreate, h, lastv1alpha1.DecisionApprove)
+		Expect(intentReconciler.awaitApproval(ctx, getIntent(key))).Error().NotTo(HaveOccurred())
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.calls(key)).NotTo(ContainElement(beginPhase))
+	})
+
+	It("counts a valid Approve despite a stale Deny", func() {
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		createIntent(key, "list namespaces")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		in := getIntent(key)
+		h := hashOf(steps)
+		// Server timestamps have one-second resolution: the Approve is a whole second younger than the Deny.
+		createApprovalForUID(key, string(in.UID), lastv1alpha1.StageCreate, h, lastv1alpha1.DecisionDeny)
+		time.Sleep(2100 * time.Millisecond)
+		createApproval(key, lastv1alpha1.StageCreate, h, lastv1alpha1.DecisionApprove)
+		var list lastv1alpha1.IntentApprovalList
+		Expect(k8sClient.List(ctx, &list, client.InNamespace(key.Namespace))).To(Succeed())
+		var denyAt time.Time
+		for _, a := range list.Items {
+			if a.Spec.Decision == lastv1alpha1.DecisionDeny {
+				denyAt = a.CreationTimestamp.Time
+			}
+		}
+		r := directReconciler(k8sClient)
+		r.Now = func() time.Time { return denyAt.Add(lastv1alpha1.DefaultApprovalMaxAge + time.Second) }
+		approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageCreate, h)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(denial).To(BeNil())
+		Expect(approved).To(BeTrue())
 	})
 
 	It("fails when the API server rejects the plan", func() {

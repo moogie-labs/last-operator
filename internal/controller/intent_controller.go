@@ -22,6 +22,16 @@ import (
 // IntentReconciler drives an Intent through its lifecycle (spec §7). It acts
 // only by calling the gateway, the one component that can cause side effects
 // (spec §3).
+// operatorConfigName is the OperatorConfig singleton.
+const operatorConfigName = "default"
+
+func (r *IntentReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
 type IntentReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -33,6 +43,8 @@ type IntentReconciler struct {
 	Reader client.Reader
 	// RetryDelay is the pause between retries of a gateway call within one reconcile.
 	RetryDelay time.Duration
+	// Now is the clock approvals age by; nil means time.Now. Tests inject one.
+	Now func() time.Time
 
 	// sessions holds planning conversations in memory (M3 spec §4.3).
 	sessions sessionStore

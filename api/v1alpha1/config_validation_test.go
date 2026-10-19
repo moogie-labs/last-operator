@@ -115,3 +115,26 @@ func TestLLMProviderScriptedNeedsConfigMapNotSecret(t *testing.T) {
 		Type: lastv1alpha1.LLMAnthropic, Model: "claude"}}
 	expectInvalid(t, k8sClient.Create(ctx, noSecret), "secretRef is required unless type is scripted")
 }
+
+func TestOperatorConfigApprovalsMaxAgeBounds(t *testing.T) {
+	for _, tc := range []struct {
+		age string
+		ok  bool
+	}{{"30s", false}, {"721h", false}, {"1m", true}, {"720h", true}} {
+		d, err := time.ParseDuration(tc.age)
+		if err != nil {
+			t.Fatal(err)
+		}
+		obj := &lastv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: nameDefault}, Spec: lastv1alpha1.OperatorConfigSpec{
+			Approvals: &lastv1alpha1.ApprovalsConfig{MaxAge: &metav1.Duration{Duration: d}}}}
+		err = k8sClient.Create(ctx, obj)
+		if tc.ok {
+			if err != nil {
+				t.Fatalf("maxAge %s: %v", tc.age, err)
+			}
+			_ = k8sClient.Delete(ctx, obj)
+			continue
+		}
+		expectInvalid(t, err, "maxAge must be between 1m and 720h")
+	}
+}

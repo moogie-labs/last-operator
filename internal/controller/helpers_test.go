@@ -90,8 +90,12 @@ func intentUID(key types.NamespacedName) string {
 }
 
 func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject string, decision lastv1alpha1.Decision) {
+	createApprovalForUID(key, intentUID(key), stage, subject, decision)
+}
+
+func createApprovalForUID(key types.NamespacedName, uid string, stage lastv1alpha1.Stage, subject string, decision lastv1alpha1.Decision) {
 	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: intentUID(key), Stage: stage,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: uid, Stage: stage,
 			SubjectHash: subject, Decision: decision, ApprovedBy: "alice"}}
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }

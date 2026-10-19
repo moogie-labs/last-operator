@@ -462,3 +462,63 @@ func TestEndPhaseWhileAStepRunsIsAbortedAndWritesNothing(t *testing.T) {
 		t.Fatalf("EndPhase once the step finished = %v", err)
 	}
 }
+
+func TestRunCommandRefusesWhenTheApprovalAgesOutMidPhase(t *testing.T) {
+	s1, s2 := argvStep("s1", "true"), argvStep("s2", "true")
+	env, in := newRunEnv(t, []lastv1alpha1.Command{s1, s2})
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, s1); err != nil {
+		t.Fatal(err)
+	}
+	env.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	_, err := env.run(h, s2)
+	env.wantDenied(err, codes.PermissionDenied)
+	if !strings.Contains(err.Error(), "approval withdrawn") {
+		t.Fatalf("error = %v, want approval withdrawn", err)
+	}
+	if !env.g.phases.get(envKey).failed {
+		t.Fatal("the phase was not marked failed")
+	}
+}
+
+func TestRunCommandRefusesWhenTheApprovalIsForAnotherUID(t *testing.T) {
+	s1, s2 := argvStep("s1", "true"), argvStep("s2", "true")
+	env, in := newRunEnv(t, []lastv1alpha1.Command{s1, s2})
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	// The Intent is deleted and recreated under the same name: a new UID.
+	var cur lastv1alpha1.Intent
+	if err := env.crd.Get(env.ctx, client.ObjectKeyFromObject(in), &cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.UID = "recreated"
+	if err := env.crd.Update(env.ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.run(h, s1)
+	env.wantDenied(err, codes.PermissionDenied)
+	if !strings.Contains(err.Error(), "approval withdrawn") || !env.g.phases.get(envKey).failed {
+		t.Fatalf("error = %v, failed = %v", err, env.g.phases.get(envKey).failed)
+	}
+}
+
+func TestRunCommandDeniesAnIntentThatVanished(t *testing.T) {
+	s1 := argvStep("s1", "true")
+	env, in := newRunEnv(t, []lastv1alpha1.Command{s1})
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.crd.Delete(env.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.run(h, s1)
+	if status.Code(err) != codes.NotFound || !env.g.phases.get(envKey).failed {
+		t.Fatalf("RunCommand = %v, failed = %v, want NotFound and a failed phase", err, env.g.phases.get(envKey).failed)
+	}
+}

@@ -225,9 +225,6 @@ func checkPlanPolicy(eff policy.Effective, b plan.Body) error {
 	return nil
 }
 
-// defaultApprovalMaxAge is how long an approval counts when OperatorConfig sets no approvals.maxAge.
-const defaultApprovalMaxAge = 24 * time.Hour
-
 // clock is the gateway's time source, the one the image builds use, so tests age approvals.
 func (g *Gateway) clock() time.Time {
 	if g.builds != nil && g.builds.now != nil {
@@ -243,11 +240,7 @@ func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent,
 	if err != nil {
 		return nil, err
 	}
-	maxAge := defaultApprovalMaxAge
-	if op != nil && op.Spec.Approvals != nil && op.Spec.Approvals.MaxAge != nil {
-		maxAge = op.Spec.Approvals.MaxAge.Duration
-	}
-	cutoff := g.clock().Add(-maxAge)
+	maxAge, now := lastv1alpha1.ApprovalMaxAge(op), g.clock()
 	var list lastv1alpha1.IntentApprovalList
 	if err := g.crd.List(ctx, &list, client.InNamespace(intent.Namespace)); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "list IntentApprovals: %v", err)
@@ -259,7 +252,7 @@ func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent,
 			continue
 		}
 		// A foreign-UID or stale decision, Deny included, is ignored.
-		if a.Spec.IntentUID != string(intent.UID) || a.CreationTimestamp.Time.Before(cutoff) {
+		if !lastv1alpha1.ApprovalApplies(a, intent, now, maxAge) {
 			continue
 		}
 		if a.Spec.Decision == lastv1alpha1.DecisionDeny {

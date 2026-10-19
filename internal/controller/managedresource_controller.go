@@ -143,7 +143,7 @@ func (r *ManagedResourceReconciler) forget(key types.NamespacedName) {
 // interval resolves the namespace's fixed probe interval (spec §10.1).
 func (r *ManagedResourceReconciler) interval(ctx context.Context, ns string) (time.Duration, error) {
 	op := &lastv1alpha1.OperatorConfig{}
-	if err := r.Get(ctx, client.ObjectKey{Name: "default"}, op); apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
 		op = nil
 	} else if err != nil {
 		return 0, err

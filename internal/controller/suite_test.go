@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	intentReconciler = &IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw, Reader: mgr.GetAPIReader(),
 		Planner: &agent.Planner{LLM: gw}, Recorder: mgr.GetEventRecorder("last-operator"),
-		RetryDelay: 10 * time.Millisecond}
+		RetryDelay: 10 * time.Millisecond, Now: clockNow}
 	Expect(intentReconciler.SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()
@@ -122,4 +123,28 @@ func getFirstFoundEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+var (
+	clockMu     sync.Mutex
+	clockOffset time.Duration
+)
+
+// clockNow is the suite controller's clock: real time plus an offset specs can advance.
+func clockNow() time.Time {
+	clockMu.Lock()
+	defer clockMu.Unlock()
+	return time.Now().Add(clockOffset)
+}
+
+func advanceClock(d time.Duration) {
+	clockMu.Lock()
+	defer clockMu.Unlock()
+	clockOffset += d
+}
+
+func resetClock() {
+	clockMu.Lock()
+	defer clockMu.Unlock()
+	clockOffset = 0
 }

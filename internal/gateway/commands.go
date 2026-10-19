@@ -117,16 +117,8 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 		return nil, d.deny(codes.PermissionDenied, "policy: %v", err)
 	}
-	approval, err := g.findApprovalFor(ctx, ns, name, p.stage, p.subject)
-	switch {
-	case errors.Is(err, errApprovalDenied):
-		p.failed = true
-		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this %s", approval.Name, subjectNoun(p.stage))
-	case err != nil:
+	if err := g.recheckApproval(ctx, d, p, ns, name); err != nil {
 		return nil, err
-	case approval == nil:
-		p.failed = true
-		return nil, d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
 	}
 	var install []lastv1alpha1.ArgvCommand
 	if expected.Image != nil {
@@ -175,4 +167,23 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 	}
 	return &gatewayv1.RunCommandResponse{Result: toProtoResult(res.RunID, res.Result)}, nil
+}
+
+// recheckApproval refuses the step, failing the phase, when the phase's approval no longer stands.
+func (g *Gateway) recheckApproval(ctx context.Context, d denial, p *phase, ns, name string) error {
+	approval, err := g.findApprovalFor(ctx, ns, name, p.stage, p.subject)
+	switch {
+	case status.Code(err) == codes.NotFound:
+		p.failed = true
+		return d.deny(codes.NotFound, "approval withdrawn: %v", err)
+	case errors.Is(err, errApprovalDenied):
+		p.failed = true
+		return d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this %s", approval.Name, subjectNoun(p.stage))
+	case err != nil:
+		return err
+	case approval == nil:
+		p.failed = true
+		return d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
+	}
+	return nil
 }

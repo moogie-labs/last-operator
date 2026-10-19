@@ -594,3 +594,35 @@ func TestDenyForThisUIDWins(t *testing.T) {
 		t.Fatalf("BeginPhase = %v, want a denial", err)
 	}
 }
+
+func TestApprovalAgeBoundaryIsInclusive(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cfg := allowAll()
+	cfg.Spec.Approvals = &lastv1alpha1.ApprovalsConfig{MaxAge: &metav1.Duration{Duration: time.Hour}}
+	try := func(age time.Duration) error {
+		return beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+			a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+			a.CreationTimestamp = metav1.NewTime(base)
+			return []runtime.Object{a}
+		}, cfg.DeepCopy(), func(e *testEnv) { e.g.builds.now = func() time.Time { return base.Add(age) } })
+	}
+	if err := try(time.Hour); err != nil {
+		t.Fatalf("an approval exactly maxAge old = %v, want accepted", err)
+	}
+	if err := try(time.Hour + time.Second); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("an approval maxAge+1s old = %v, want ignored", err)
+	}
+}
+
+func TestStaleDenyIsIgnored(t *testing.T) {
+	cfg := allowAll()
+	cfg.Spec.Approvals = &lastv1alpha1.ApprovalsConfig{MaxAge: &metav1.Duration{Duration: time.Hour}}
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		d := approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+		d.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+		return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver), d}
+	}, cfg, nil)
+	if err != nil {
+		t.Fatalf("a stale Deny stopped a valid Approve: %v", err)
+	}
+}

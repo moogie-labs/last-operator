@@ -111,7 +111,7 @@ var errBadPolicy = errors.New("the namespace's effective policy is invalid")
 // session starts is current.
 func (r *IntentReconciler) environment(ctx context.Context, ns string) (agent.Environment, error) {
 	op := &lastv1alpha1.OperatorConfig{}
-	if err := r.Reader.Get(ctx, client.ObjectKey{Name: "default"}, op); apierrors.IsNotFound(err) {
+	if err := r.Reader.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
 		op = nil
 	} else if err != nil {
 		return agent.Environment{}, err

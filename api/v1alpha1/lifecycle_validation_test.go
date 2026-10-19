@@ -92,6 +92,12 @@ func TestIntentApprovalRejectsMalformedHash(t *testing.T) {
 	expectInvalid(t, k8sClient.Create(ctx, obj), "spec.subjectHash")
 }
 
+func TestIntentApprovalRequiresIntentUID(t *testing.T) {
+	obj := validApproval()
+	obj.Spec.IntentUID = ""
+	expectInvalid(t, k8sClient.Create(ctx, obj), "spec.intentUID")
+}
+
 func TestIntentApprovalIsImmutable(t *testing.T) {
 	obj := validApproval()
 	if err := k8sClient.Create(ctx, obj); err != nil {

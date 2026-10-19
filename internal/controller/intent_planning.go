@@ -271,12 +271,22 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 // to try. A Deny wins over any Approve, as in the gateway.
 func (r *IntentReconciler) decision(ctx context.Context, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage,
 	subject string) (approved bool, denial *lastv1alpha1.IntentApproval, err error) {
+	op := &lastv1alpha1.OperatorConfig{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
+		op = nil
+	} else if err != nil {
+		return false, nil, err
+	}
+	maxAge, now := lastv1alpha1.ApprovalMaxAge(op), r.now()
 	var list lastv1alpha1.IntentApprovalList
 	if err := r.List(ctx, &list, client.InNamespace(in.Namespace)); err != nil {
 		return false, nil, err
 	}
 	for i := range list.Items {
 		s := list.Items[i].Spec
+		if !lastv1alpha1.ApprovalApplies(&list.Items[i], in, now, maxAge) {
+			continue
+		}
 		if s.IntentRef.Name != in.Name || s.Stage != stage || s.SubjectHash != subject {
 			continue
 		}

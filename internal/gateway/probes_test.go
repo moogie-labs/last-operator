@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -195,4 +196,18 @@ func TestRunProbesNeedsAnApprovalToExist(t *testing.T) {
 	}
 	_, err := env.probe()
 	env.wantDenied(err, codes.PermissionDenied)
+}
+
+func TestRunProbesIgnoresAStaleApproval(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	env.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	before := len(env.entries())
+	_, err := env.probe()
+	env.wantDenied(err, codes.PermissionDenied)
+	for _, e := range env.entries()[before:] {
+		if e.Type == audit.TypeProbeStart {
+			t.Fatal("a probe ran on a stale approval")
+		}
+	}
 }
