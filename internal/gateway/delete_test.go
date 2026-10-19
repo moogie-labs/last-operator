@@ -664,6 +664,15 @@ func TestATornDownIntentAnswersEveryPhaseCallAsTornDown(t *testing.T) {
 	if !gatewayv1.TornDown(err) {
 		t.Fatalf("EndPhase after the teardown = %v, want the torn-down refusal", err)
 	}
+	// The operator matches the refusal by its exact text: pin it, and the audited reason.
+	if msg := status.Convert(err).Message(); msg != "intent was already torn down; no phase opens for it again" {
+		t.Fatalf("torn-down refusal = %q", msg)
+	}
+	var denied policyDenied
+	if last := env.last(); last.Type != audit.TypePolicyDenied || json.Unmarshal(last.Payload, &denied) != nil ||
+		denied.Reason != gatewayv1.MsgTornDown {
+		t.Fatalf("policy.denied = %+v %s", last, last.Payload)
+	}
 	_, err = env.run(h, steps[0])
 	env.wantDenied(err, codes.FailedPrecondition)
 	if !gatewayv1.TornDown(err) {

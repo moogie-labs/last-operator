@@ -335,7 +335,7 @@ func (r *IntentReconciler) finishTeardown(ctx context.Context, in *lastv1alpha1.
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		setExecuted(in, metav1.ConditionTrue, ReasonPhaseEnded, "Teardown plan "+in.Status.Plan.Hash+" executed")
 	}); err != nil {
-		return ctrl.Result{}, err // the next attempt finds the phase ended (FailedPrecondition) and fails the teardown
+		return ctrl.Result{}, err // the next attempt's EndPhase is refused as torn down, which releases the Intent
 	}
 	return ctrl.Result{}, r.release(ctx, in, "Teardown succeeded")
 }

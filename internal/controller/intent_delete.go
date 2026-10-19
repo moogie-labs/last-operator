@@ -67,6 +67,7 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 	}
 	td, err := r.teardown(ctx, in)
 	if err != nil {
+		r.teardownBlocked(in, err)
 		return ctrl.Result{}, err // the audit log or the API server: retried, never released on an error
 	}
 	switch {
@@ -159,7 +160,7 @@ func (r *IntentReconciler) planTeardown(ctx context.Context, in *lastv1alpha1.In
 	first, err := agent.TeardownMessage(agent.Teardown{Namespace: in.Namespace, Name: in.Name, Text: in.Spec.Request,
 		Commands: td.commands, Feedback: replanFeedback(in)})
 	if err != nil {
-		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
+		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error()+"; "+retryTeardownHint)
 	}
 	pctx, pcancel := context.WithTimeout(ctx, planTimeout)
 	defer pcancel()
@@ -350,6 +351,13 @@ func (r *IntentReconciler) release(ctx context.Context, in *lastv1alpha1.Intent,
 	return nil
 }
 
+// teardownBlocked tells the user why an Intent being deleted waits: what it
+// executed could not be read. The deletion is retried.
+func (r *IntentReconciler) teardownBlocked(in *lastv1alpha1.Intent, err error) {
+	r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonTeardownBlocked, "Teardown",
+		"Could not read what the Intent executed, so the deletion waits and is retried: %s", describe(err))
+}
+
 // releaseUnexecuted releases an Intent with no executed plan and no
 // ManagedResources (D6). A Create phase that ran steps and then failed may still
 // have created something no teardown covers, so the release warns about it. An
@@ -357,6 +365,7 @@ func (r *IntentReconciler) release(ctx context.Context, in *lastv1alpha1.Intent,
 func (r *IntentReconciler) releaseUnexecuted(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
 	subject, steps, found, err := agent.PartialCreate(ctx, r.Gateway, intentRef(in))
 	if err != nil {
+		r.teardownBlocked(in, err)
 		return err
 	}
 	if found {

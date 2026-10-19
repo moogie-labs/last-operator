@@ -281,8 +281,11 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 	case err != nil:
 		return ctrl.Result{}, err
 	case denial != nil:
-		return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied,
-			fmt.Sprintf("IntentApproval %s denied the plan: %s", denial.Name, denial.Spec.Reason))
+		msg := fmt.Sprintf("IntentApproval %s denied the plan: %s", denial.Name, denial.Spec.Reason)
+		if stage == lastv1alpha1.StageDelete {
+			msg += "; " + retryTeardownHint
+		}
+		return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied, msg)
 	case !approved:
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}

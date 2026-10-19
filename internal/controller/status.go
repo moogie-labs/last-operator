@@ -56,6 +56,9 @@ const (
 	// ReasonPartialCreateNotTornDown warns that a Create plan that ran steps and
 	// failed left no executed plan, so the Intent is released with nothing torn down.
 	ReasonPartialCreateNotTornDown = "PartialCreateNotTornDown"
+	// ReasonTeardownBlocked warns that what the Intent executed could not be read,
+	// so its deletion waits and is retried.
+	ReasonTeardownBlocked = "TeardownBlocked"
 )
 
 // Planned reasons.

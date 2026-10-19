@@ -364,6 +364,18 @@ var _ = Describe("Intent deletion", func() {
 		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(teardown)))
 	})
 
+	It("tells the user how to plan the teardown again when its Delete plan is denied", func() {
+		executed(&script{}, turns(deletePlan))
+		awaitingDelete()
+		in := getIntent(key)
+		createApproval(key, lastv1alpha1.StageDelete, in.Status.Plan.Hash, lastv1alpha1.DecisionDeny)
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
+		Expect(readyCondition(key).Message).To(ContainSubstring(lastv1alpha1.AnnotationRetry))
+		Expect(getIntent(key).Finalizers).To(ContainElement(lastv1alpha1.FinalizerTeardown))
+	})
+
 	It("keeps the finalizer and reports TeardownFailed when a teardown step fails", func() {
 		executed(&script{exit: map[string]int32{"t1": 1}}, turns(deletePlan))
 		awaitingDelete()
@@ -422,6 +434,8 @@ var _ = Describe("Intent deletion", func() {
 		gw.updateScript(key, func(s *script) { s.queryErr = status.Error(codes.Unavailable, "audit log unavailable") })
 		deleteIntent(key)
 		Consistently(gone(key)).Should(BeFalse())
+		Eventually(func() []string { return eventNotes(key, ReasonTeardownBlocked) }).Should(
+			ContainElement(ContainSubstring("audit log unavailable")), "a stuck terminating Intent says why")
 
 		By("finding the Create phase an earlier operator process opened")
 		gw.setOpen(key, subject)

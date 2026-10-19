@@ -20,9 +20,6 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
-// IntentReconciler drives an Intent through its lifecycle (spec §7). It acts
-// only by calling the gateway, the one component that can cause side effects
-// (spec §3).
 // operatorConfigName is the OperatorConfig singleton.
 const operatorConfigName = "default"
 
@@ -33,6 +30,9 @@ func (r *IntentReconciler) now() time.Time {
 	return time.Now()
 }
 
+// IntentReconciler drives an Intent through its lifecycle (spec §7). It acts
+// only by calling the gateway, the one component that can cause side effects
+// (spec §3).
 type IntentReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
