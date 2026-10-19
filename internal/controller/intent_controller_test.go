@@ -8,8 +8,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -145,6 +147,33 @@ var _ = Describe("Intent planning", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(denial).To(BeNil())
 		Expect(approved).To(BeTrue())
+	})
+
+	It("fails when the API server rejects the plan", func() {
+		createIntent(key, "bad plan") // no script yet: the suite's controller fails it and leaves it alone
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+
+		// An injected rejection of the write that records the plan, and of no other write.
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+		Expect(err).NotTo(HaveOccurred())
+		rejecting := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if in, ok := obj.(*lastv1alpha1.Intent); ok && in.Status.Plan != nil {
+					return apierrors.NewInvalid(lastv1alpha1.GroupVersion.WithKind("Intent").GroupKind(), in.Name,
+						field.ErrorList{field.Invalid(field.NewPath("status", "plan"), "plan", "refused")})
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}})
+		in := getIntent(key)
+		in.Status.Phase = lastv1alpha1.PhasePlanning
+		_, err = directReconciler(rejecting).plan(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("rejected the plan"))
+		Expect(getIntent(key).Status.Plan).To(BeNil())
 	})
 
 	It("plans again when the spec changes before approval", func() {
