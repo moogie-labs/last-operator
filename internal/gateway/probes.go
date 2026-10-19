@@ -64,15 +64,13 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
 	}
-	// The approval must still stand: a Deny after execution stops the probes too.
-	approval, err := g.findApproval(ctx, &existing, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash)
-	switch {
-	case errors.Is(err, errApprovalDenied):
-		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", approval.Name)
-	case err != nil:
+	// Probes are part of the executed plan: the record that its approved phase
+	// succeeded authorizes them, with no standing Approve and no age limit. A Deny
+	// of the executed plan for this Intent's UID, at any age, still stops them.
+	if deny, err := g.findDeny(ctx, &existing, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash); err != nil {
 		return nil, err
-	case approval == nil:
-		return nil, d.deny(codes.PermissionDenied, "no IntentApproval approves this plan")
+	} else if deny != nil {
+		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", deny.Name)
 	}
 	var probes []lastv1alpha1.Probe
 	for _, r := range body.Resources {
@@ -131,6 +129,26 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		resp.Outcomes = append(resp.Outcomes, &gatewayv1.ProbeOutcome{Id: o.ID, Passed: o.Passed, Result: toProtoResult("", o.Result), Error: o.Error})
 	}
 	return resp, nil
+}
+
+// findDeny returns a Deny of subject for the Intent's UID, whatever its age, or nil.
+func (g *Gateway) findDeny(ctx context.Context, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+	var list lastv1alpha1.IntentApprovalList
+	if err := g.crd.List(ctx, &list, client.InNamespace(intent.Namespace)); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "list IntentApprovals: %v", err)
+	}
+	var found *lastv1alpha1.IntentApproval
+	for i := range list.Items {
+		a := &list.Items[i]
+		if a.Spec.IntentRef.Name != intent.Name || a.Spec.Stage != stage || a.Spec.SubjectHash != subject ||
+			a.Spec.Decision != lastv1alpha1.DecisionDeny || a.Spec.IntentUID != string(intent.UID) {
+			continue
+		}
+		if found == nil || a.Name < found.Name {
+			found = a
+		}
+	}
+	return found, nil
 }
 
 // resolveProbeImages resolves each distinct image spec of probes once, before any probe

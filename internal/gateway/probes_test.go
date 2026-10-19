@@ -169,45 +169,82 @@ func TestRunProbesRefusesATamperedExecutedRecord(t *testing.T) {
 	}
 }
 
-func TestRunProbesRechecksTheApproval(t *testing.T) {
-	env, in := newRunEnv(t, twoSteps(), probedResource())
-	executeAll(t, env, in)
-	if _, err := env.probe(); err != nil {
-		t.Fatalf("RunProbes with the approval in place = %v", err)
+// runsProbes asserts that a RunProbes call ran both probes of probedResource.
+func (e *testEnv) runsProbes() {
+	e.t.Helper()
+	before := len(e.entries())
+	resp, err := e.probe()
+	if err != nil || len(resp.GetOutcomes()) != 2 {
+		e.t.Fatalf("RunProbes = %v, %v", resp, err)
 	}
-	if err := env.crd.Create(env.ctx, approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")); err != nil {
-		t.Fatal(err)
+	ran := 0
+	for _, en := range e.entries()[before:] {
+		if en.Type == audit.TypeProbeStart {
+			ran++
+		}
 	}
-	before := len(env.entries())
-	_, err := env.probe()
-	env.wantDenied(err, codes.PermissionDenied)
-	for _, e := range env.entries()[before:] {
-		if e.Type == audit.TypeProbeStart {
-			t.Fatal("a probe ran without an approval")
+	if ran == 0 {
+		e.t.Fatal("RunProbes ran no probe")
+	}
+}
+
+// refusesProbes asserts that a RunProbes call was denied and ran nothing.
+func (e *testEnv) refusesProbes() {
+	e.t.Helper()
+	before := len(e.entries())
+	_, err := e.probe()
+	e.wantDenied(err, codes.PermissionDenied)
+	if !strings.Contains(err.Error(), "denies") {
+		e.t.Fatalf("refusal = %v; want the Deny named", err)
+	}
+	for _, en := range e.entries()[before:] {
+		if en.Type == audit.TypeProbeStart {
+			e.t.Fatal("a probe ran after a Deny")
 		}
 	}
 }
 
-func TestRunProbesNeedsAnApprovalToExist(t *testing.T) {
+func TestRunProbesStopsOnADenyForTheIntent(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	env.runsProbes()
+	env.approve(approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob"))
+	env.refusesProbes()
+	// A Deny for the live UID counts at any age.
+	env.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	env.refusesProbes()
+}
+
+func TestRunProbesIgnoresADenyForAnotherUID(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	foreign := approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+	foreign.Spec.IntentUID = recreatedUID
+	env.approve(foreign)
+	legacy := approvalFor("no-legacy", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+	legacy.Spec.IntentUID = ""
+	env.approve(legacy)
+	env.runsProbes()
+}
+
+// Probes are part of the executed plan: the gateway's own record that an approved
+// phase succeeded authorizes them, not a standing Approve.
+func TestRunProbesNeedNoStandingApproval(t *testing.T) {
 	env, in := newRunEnv(t, twoSteps(), probedResource())
 	executeAll(t, env, in)
 	if err := env.crd.Delete(env.ctx, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := env.probe()
-	env.wantDenied(err, codes.PermissionDenied)
+	// A pre-M5a approval names no UID and authorizes nothing new; probes still run.
+	legacy := approvalFor("legacy", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+	legacy.Spec.IntentUID = ""
+	env.approve(legacy)
+	env.runsProbes()
 }
 
-func TestRunProbesIgnoresAStaleApproval(t *testing.T) {
+func TestRunProbesRunAfterTheApprovalAges(t *testing.T) {
 	env, in := newRunEnv(t, twoSteps(), probedResource())
 	executeAll(t, env, in)
 	env.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
-	before := len(env.entries())
-	_, err := env.probe()
-	env.wantDenied(err, codes.PermissionDenied)
-	for _, e := range env.entries()[before:] {
-		if e.Type == audit.TypeProbeStart {
-			t.Fatal("a probe ran on a stale approval")
-		}
-	}
+	env.runsProbes()
 }

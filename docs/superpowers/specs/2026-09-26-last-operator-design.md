@@ -342,6 +342,12 @@ spec:
   the gateway ignores an approval older than `approvals.maxAge`
   (OperatorConfig, default 24h) by its `creationTimestamp`. Both rules
   hold for a `Deny` too: a foreign or stale Deny is ignored.
+- Probes are the exception: an executed plan's probes need no standing
+  approval and never expire. The gateway runs them on its own record that
+  the plan's approved phase succeeded (§8.3), so they keep running after
+  `approvals.maxAge` and for approvals made before approvals named a UID.
+  A `Deny` of the executed plan that names the Intent's UID stops them at
+  any age; a Deny for another UID is ignored.
 - A `Deny` on a discovery command is returned to the agent. The agent
   may propose a different command, ask a clarifying question, or give
   up with a reason.
@@ -742,7 +748,13 @@ audit log, together with the in-memory phase and the Intent's unsaved
 index entries; no later index flush recreates it, and no phase opens again
 for that Intent (a guard the gateway keeps in memory: after a restart, the
 Intent's deletion still keeps Create shut). A failed or aborted Delete
-keeps the record and its executed plan. The output Secrets are not the
+keeps the record and its executed plan.
+
+`RunProbes` is authorized by that record alone: the executed plan of the
+Intent's current UID means an approved phase of it succeeded, which needs no
+standing `Approve` and no age check. The gateway still refuses probes when an
+`IntentApproval` with decision `Deny` for the executed subject names the
+Intent's current UID, whatever its age: a Deny wins. The output Secrets are not the
 gateway's to delete: they belong to their ManagedResources and go with them.
 
 - **Auto-mode remediation** is limited to re-running commands from that
