@@ -49,6 +49,7 @@ type phase struct {
 	outcome  string     // outcome recorded by that phase.end
 	stage    lastv1alpha1.Stage
 	subject  string
+	uid      string // the Intent's UID when the phase opened
 	body     plan.Body
 	auth     *audit.Authorization
 	beginSeq uint64
@@ -404,6 +405,11 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, err
 	}
 
+	// A record of a previous Intent with this name may hold an open phase; close
+	// it before the reset would drop it without a phase.end.
+	if err := g.closePredecessorPhase(ctx, w, key, string(intent.UID)); err != nil {
+		return nil, err
+	}
 	rec, err := g.state.Load(ctx, key, string(intent.UID))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
@@ -471,8 +477,22 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		}
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	g.phases.put(key, &phase{stage: stage, subject: subject, body: body, auth: auth, beginSeq: begin.Seq, results: plan.Results{}})
+	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, beginSeq: begin.Seq, results: plan.Results{}})
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
+}
+
+// closePredecessorPhase ends the open phase of a record that belongs to another
+// UID (the Intent was recreated), so the record's reset never drops a phase.begin
+// without its phase.end.
+func (g *Gateway) closePredecessorPhase(ctx context.Context, w *audit.Writer, key, uid string) error {
+	stale, err := g.state.LoadAny(ctx, key)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if stale.Open == nil || stale.IntentUID == "" || stale.IntentUID == uid {
+		return nil
+	}
+	return g.closeInterrupted(ctx, w, key, stale)
 }
 
 // closeInterrupted ends a phase that an earlier gateway process opened. Its
@@ -544,7 +564,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 			return nil, d.deny(codes.FailedPrecondition, "the phase cannot succeed: %d of %d steps succeeded", p.next, len(p.body.Steps))
 		}
 	}
-	rec, err := g.state.LoadAny(ctx, key) // BeginPhase already bound the record to the Intent's UID
+	rec, err := g.state.Load(ctx, key, p.uid)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}

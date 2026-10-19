@@ -277,8 +277,8 @@ func (g *Gateway) closeInterruptedPhases(ctx context.Context, w *audit.Writer) e
 		unlock := g.locks.lock(rec.Intent)
 		err := g.closeInterrupted(ctx, w, rec.Intent, rec)
 		unlock()
-		if err != nil {
-			return fmt.Errorf("gateway: close interrupted phase of %s: %w", rec.Intent, err)
+		if err != nil { // BeginPhase closes it lazily later
+			slog.Error("Could not close interrupted phase", "intent", rec.Intent, "err", err)
 		}
 	}
 	return nil

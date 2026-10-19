@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -148,15 +149,20 @@ func recordName(intent string) string {
 // comes back empty (the Intent was recreated); its ConfigMap is kept so the next
 // Save overwrites it. A record with no stored UID adopts uid.
 func (s *StateStore) Load(ctx context.Context, intent, uid string) (*LoadedRecord, error) {
+	if uid == "" {
+		return nil, errors.New("gateway: load intent record: the Intent's UID is empty; use LoadAny when it is unknown")
+	}
 	r, err := s.LoadAny(ctx, intent)
 	if err != nil {
 		return nil, err
 	}
-	if uid == "" {
-		return r, nil
-	}
 	if r.IntentUID != "" && r.IntentUID != uid {
-		r.IntentRecord = IntentRecord{Intent: intent}
+		// Entries dropped with the old record must still count as truncation.
+		floor := r.IndexFloor
+		if n := len(r.Index); n > 0 {
+			floor = max(floor, r.Index[n-1].Seq)
+		}
+		r.IntentRecord = IntentRecord{Intent: intent, IndexFloor: floor}
 	}
 	r.IntentUID = uid
 	return r, nil
@@ -195,7 +201,8 @@ func (s *StateStore) Delete(ctx context.Context, intent string) error {
 	return nil
 }
 
-// List returns every intent record in the gateway namespace.
+// List returns every intent record in the gateway namespace; records that
+// cannot be decoded are logged and skipped.
 func (s *StateStore) List(ctx context.Context) ([]*LoadedRecord, error) {
 	l, err := s.kube.CoreV1().ConfigMaps(s.ns).List(ctx, metav1.ListOptions{LabelSelector: labelComponent + "=" + stateComponent})
 	if err != nil {
@@ -205,7 +212,12 @@ func (s *StateStore) List(ctx context.Context) ([]*LoadedRecord, error) {
 	for i := range l.Items {
 		r, err := decodeRecord(&l.Items[i], "")
 		if err != nil {
-			return nil, err
+			slog.Error("Skipped undecodable intent record", "configMap", l.Items[i].Name, "err", err)
+			continue
+		}
+		if recordName(r.Intent) != l.Items[i].Name {
+			slog.Error("Skipped intent record under a foreign name", "configMap", l.Items[i].Name, "intent", r.Intent)
+			continue
 		}
 		out = append(out, r)
 	}

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,10 +14,14 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
-const testHashA = "sha256:a"
+const (
+	testHashA  = "sha256:a"
+	testOldUID = "old-uid"
+)
 
 func TestStateStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -230,32 +235,136 @@ func TestDeleteRemovesTheRecord(t *testing.T) {
 	}
 }
 
+func phaseEndsFor(env *testEnv, intent string) []audit.Entry {
+	var out []audit.Entry
+	for _, e := range env.entries() {
+		if e.Type == audit.TypePhaseEnd && e.Intent == intent {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func endBeginSeq(t *testing.T, e audit.Entry) uint64 {
+	t.Helper()
+	var p phaseEnd
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Outcome != outcomeInterrupted {
+		t.Fatalf("phase.end outcome = %q, want interrupted", p.Outcome)
+	}
+	return p.BeginSeq
+}
+
+func TestBeginPhaseClosesAPredecessorsOpenPhase(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+			in := intentWithPlan(t, twoSteps())
+			h := in.Status.Plan.Hash
+			env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+			ctx := context.Background()
+			var oldSeq uint64
+			if live {
+				if _, err := env.begin(h); err != nil {
+					t.Fatal(err)
+				}
+				rec, _ := env.g.state.LoadAny(ctx, envKey)
+				oldSeq = rec.Open.BeginSeq
+				rec.IntentUID = testOldUID
+				if err := env.g.state.Save(ctx, rec); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				oldSeq = 99
+				rec, _ := env.g.state.LoadAny(ctx, envKey)
+				rec.IntentUID = testOldUID
+				rec.Open = &OpenPhase{Stage: string(testStage), SubjectHash: h, BeginSeq: oldSeq, Epoch: "other-epoch"}
+				if err := env.g.state.Save(ctx, rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := env.begin(h); err != nil {
+				t.Fatalf("BeginPhase for the recreated Intent = %v", err)
+			}
+			ends := phaseEndsFor(env, envKey)
+			if len(ends) != 1 || endBeginSeq(t, ends[0]) != oldSeq {
+				t.Fatalf("phase.end entries = %d, want one interrupted end of beginSeq %d", len(ends), oldSeq)
+			}
+			rec, _ := env.g.state.LoadAny(ctx, envKey)
+			if rec.IntentUID != envIntentUID || rec.Open == nil || rec.Open.BeginSeq == oldSeq {
+				t.Fatalf("record = %+v", rec.IntentRecord)
+			}
+		})
+	}
+}
+
+func TestAResetRecordReportsTruncationAndHidesThePredecessorsIndex(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	env := newTestEnv(t, in, allowAll())
+	ctx := context.Background()
+	rec, _ := env.g.state.LoadAny(ctx, envKey)
+	rec.IntentUID = testOldUID
+	rec.AddIndex([]IndexEntry{{Seq: 5, Type: audit.TypePhaseBegin}, {Seq: 8, Type: audit.TypePhaseBegin}})
+	if err := env.g.state.Save(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := env.g.state.Load(ctx, envKey, envIntentUID)
+	if err != nil || got.IndexFloor != 8 || len(got.Index) != 0 {
+		t.Fatalf("reset record = %+v, %v; want floor 8 and no index", got.IntentRecord, err)
+	}
+	resp, err := env.query(&gatewayv1.QueryAuditRequest{Intent: &gatewayv1.IntentRef{Namespace: envNS, Name: envIntent}})
+	if err != nil || len(resp.Entries) != 0 || !resp.Truncated {
+		t.Fatalf("QueryAudit = %+v, %v; want no entries, truncated", resp, err)
+	}
+}
+
+func TestLoadRefusesAnEmptyUID(t *testing.T) {
+	s := NewStateStore(fake.NewClientset(), GRPCAudience)
+	if _, err := s.Load(context.Background(), "a/b", ""); err == nil {
+		t.Fatal("Load with an empty UID must fail")
+	}
+}
+
 func TestLeadClosesInterruptedPhases(t *testing.T) {
 	ie := newImageEnv(t, imageOp(nil))
 	ctx := context.Background()
-	for i, k := range []string{"team-x/one", "team-x/two"} {
+	save := func(k string, open *OpenPhase) {
 		r, _ := ie.g.state.LoadAny(ctx, k)
-		r.Open = &OpenPhase{Stage: string(testStage), SubjectHash: testHashA, BeginSeq: uint64(i + 1), Epoch: "old-epoch"}
+		r.Open = open
 		if err := ie.g.state.Save(ctx, r); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := ie.g.prepareLeading(ctx, ie.g.writer.Load()); err != nil {
-		t.Fatal(err)
+	save("team-x/one", &OpenPhase{Stage: string(testStage), SubjectHash: testHashA, BeginSeq: 11, Epoch: "old-epoch"})
+	save("team-x/two", &OpenPhase{Stage: string(testStage), SubjectHash: testHashA, BeginSeq: 12, Epoch: "old-epoch"})
+	save("team-x/same", &OpenPhase{Stage: string(testStage), SubjectHash: testHashA, BeginSeq: 13, Epoch: ie.g.epoch})
+	save("team-x/idle", nil)
+	// A corrupt record and a ConfigMap that is no record must not stop the lead.
+	for name, data := range map[string]string{recordName("team-x/bad"): "{not json", "someone-elses": "x"} {
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: GRPCAudience}, Data: map[string]string{stateKey: data}}
+		if name == recordName("team-x/bad") {
+			cm.Labels = map[string]string{labelComponent: stateComponent}
+		}
+		if _, err := ie.kube.CoreV1().ConfigMaps(GRPCAudience).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, k := range []string{"team-x/one", "team-x/two"} {
+	idleBefore, _ := ie.g.state.LoadAny(ctx, "team-x/idle")
+	if err := ie.g.prepareLeading(ctx, ie.g.writer.Load()); err != nil {
+		t.Fatalf("prepareLeading = %v; a bad record must not fail the lead", err)
+	}
+	for k, seq := range map[string]uint64{"team-x/one": 11, "team-x/two": 12} {
 		r, _ := ie.g.state.LoadAny(ctx, k)
-		if r.Open != nil {
-			t.Fatalf("%s still has an open phase", k)
+		ends := phaseEndsFor(ie.testEnv, k)
+		if r.Open != nil || len(ends) != 1 || endBeginSeq(t, ends[0]) != seq {
+			t.Fatalf("%s: open = %v, phase.end entries = %d; want closed as interrupted for beginSeq %d", k, r.Open, len(ends), seq)
 		}
-		found := false
-		for _, e := range ie.entries() {
-			if e.Type == audit.TypePhaseEnd && e.Intent == k && strings.Contains(string(e.Payload), "interrupted") {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("no interrupted phase.end for %s", k)
-		}
+	}
+	if r, _ := ie.g.state.LoadAny(ctx, "team-x/same"); r.Open == nil || len(phaseEndsFor(ie.testEnv, "team-x/same")) != 0 {
+		t.Fatal("a phase of this epoch must be left alone")
+	}
+	if r, _ := ie.g.state.LoadAny(ctx, "team-x/idle"); r.cm.ResourceVersion != idleBefore.cm.ResourceVersion {
+		t.Fatal("a record with no open phase must not be rewritten")
 	}
 }

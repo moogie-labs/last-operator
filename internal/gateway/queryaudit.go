@@ -7,6 +7,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
@@ -26,7 +29,7 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 		return nil, err
 	}
 	defer release()
-	_, _, key, err := intentKey(req.GetIntent())
+	ns, name, key, err := intentKey(req.GetIntent())
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +53,11 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 	if err := g.flushIndex(ctx, key); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "could not save the audit index: %v", err)
 	}
-	rec, err := g.state.LoadAny(ctx, key)
+	var in lastv1alpha1.Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &in); err != nil {
+		return nil, notFoundOr(err, "intent")
+	}
+	rec, err := g.state.Load(ctx, key, string(in.UID))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}

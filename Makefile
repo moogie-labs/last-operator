@@ -319,7 +319,7 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-sandbox-default-deny'
 	helm template last charts/last-operator -n last-system | grep -q 'value: "system:serviceaccount:last-system:last-operator"'
 	helm template last charts/last-operator -n last-system | grep -q 'containerPort: 9090'
-	helm template last charts/last-operator -n last-system | grep -q "verbs: \[get, list, create, update, delete\]"
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: Role\n/ && doc ~ /\nmetadata:\n  name: last-gateway\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[configmaps\]' | grep -q 'verbs: \[get, list, create, update, delete\]'
 	helm template last charts/last-operator -n last-system | grep -q 'resources: \["tokenreviews"\]'
 	helm template last charts/last-operator -n last-system | awk '/name: last-sandbox-runner/{f=1} f&&/^---/{exit} f' | grep -q '^automountServiceAccountToken: false'
 	@# The sandbox egress gate uses the gateway's http port as a canary: the last-gateway NetworkPolicy
