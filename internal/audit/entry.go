@@ -29,6 +29,9 @@ const (
 	TypePolicyDenied      = "policy.denied"
 	// output Secret written; values recorded as SHA-256 (spec §15)
 	TypeOutputWritten = "output.written"
+	// a ManagedResource a succeeded Update dropped, deleted by the gateway; its
+	// output Secret goes with it by garbage collection (spec §15)
+	TypeManagedResourceDeleted = "managedresource.deleted"
 )
 
 // GenesisHash is the prevHash of the entry at seq 0.

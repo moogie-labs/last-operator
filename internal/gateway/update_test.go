@@ -1,17 +1,29 @@
 package gateway
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
 const (
@@ -291,4 +303,267 @@ func TestAnIntentBeingDeletedOpensNoUpdateOrRemediate(t *testing.T) {
 	before = len(env.entries())
 	_, err = env.beginStage(lastv1alpha1.StageRemediate, h)
 	env.refusedWith(err, codes.FailedPrecondition, "intent is being deleted", before)
+}
+
+// controlledMR is a ManagedResource in the env's namespace controlled by the
+// object with UID controller, or only owned by it when controls is false.
+func controlledMR(name string, controller types.UID, controls bool) *lastv1alpha1.ManagedResource {
+	return &lastv1alpha1.ManagedResource{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS, UID: types.UID("uid-" + name),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: "Intent",
+				Name: envIntent, UID: controller, Controller: new(controls)}}},
+		Spec: lastv1alpha1.ManagedResourceSpec{IntentRef: &lastv1alpha1.LocalRef{Name: envIntent}},
+	}
+}
+
+// createMRs creates the env's ManagedResources: web-0 to web-<owned-1> controlled
+// by the Intent, web-9 controlled by another object, and web-8 owned by the
+// Intent without controlling it.
+func (e *testEnv) createMRs(owned int) {
+	e.t.Helper()
+	mrs := make([]*lastv1alpha1.ManagedResource, 0, owned+2)
+	mrs = append(mrs, controlledMR(lastv1alpha1.ManagedResourceName(envIntent, 9), "other-uid", true),
+		controlledMR(lastv1alpha1.ManagedResourceName(envIntent, 8), envIntentUID, false))
+	for i := range owned {
+		mrs = append(mrs, controlledMR(lastv1alpha1.ManagedResourceName(envIntent, i), envIntentUID, true))
+	}
+	for _, mr := range mrs {
+		if err := e.crd.Create(e.ctx, mr); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+}
+
+// mrExists reports whether the ManagedResource is still in the cluster.
+func (e *testEnv) mrExists(name string) bool {
+	e.t.Helper()
+	err := e.crd.Get(e.ctx, client.ObjectKey{Namespace: envNS, Name: name}, &lastv1alpha1.ManagedResource{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		e.t.Fatal(err)
+	}
+	return err == nil
+}
+
+// wantMRs asserts which of web-0 to web-9 remain.
+func (e *testEnv) wantMRs(remaining ...int) {
+	e.t.Helper()
+	for i := range 10 {
+		name := lastv1alpha1.ManagedResourceName(envIntent, i)
+		if want := slices.Contains(remaining, i); e.mrExists(name) != want {
+			e.t.Fatalf("ManagedResource %s exists = %t, want %t", name, !want, want)
+		}
+	}
+}
+
+// deletedMRs returns the managedresource.deleted payloads written for subject
+// since entry from, failing on any that is not the Update's.
+func (e *testEnv) deletedMRs(from int, subject string) []map[string]string {
+	e.t.Helper()
+	var out []map[string]string
+	for _, en := range e.entries()[from:] {
+		if en.Type != audit.TypeManagedResourceDeleted {
+			continue
+		}
+		if en.Intent != envKey || en.Stage != string(lastv1alpha1.StageUpdate) || en.SubjectHash != subject ||
+			en.Actor != testOperator || en.AuthorizedBy == nil {
+			e.t.Fatalf("managedresource.deleted = %+v", en)
+		}
+		var p map[string]string
+		if err := json.Unmarshal(en.Payload, &p); err != nil {
+			e.t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func deletedPayload(i int) map[string]string {
+	name := lastv1alpha1.ManagedResourceName(envIntent, i)
+	return map[string]string{"managedResource": name, "uid": "uid-" + name}
+}
+
+// countType counts the entries of type typ since entry from.
+func (e *testEnv) countType(from int, typ string) int {
+	e.t.Helper()
+	n := 0
+	for _, en := range e.entries()[from:] {
+		if en.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// oneResourceUpdate records and approves an Update plan of one step and the
+// executed plan's one resource, and returns its subject and steps.
+func (e *testEnv) oneResourceUpdate() (string, []lastv1alpha1.Command) {
+	e.t.Helper()
+	steps := []lastv1alpha1.Command{argvStep("u1", kubectlBin, "delete", "deployment", "web-extra", "-n", envNS)}
+	h := e.recordPlan(lastv1alpha1.StageUpdate, plan.Body{Steps: steps, Resources: executedResources()})
+	e.approve(stageApproval("update", lastv1alpha1.StageUpdate, h))
+	return h, steps
+}
+
+// An Update that drops resources leaves no ManagedResource of the Intent behind
+// beyond the new plan's, each deletion audited (ruling R1, Review Focus 3).
+func TestASucceededUpdateDeletesStaleManagedResources(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(3)
+	h, steps := env.oneResourceUpdate()
+	before := len(env.entries())
+	env.runPhase(lastv1alpha1.StageUpdate, h, steps)
+
+	env.wantMRs(0, 8, 9)
+	got := env.deletedMRs(before, h)
+	if want := []map[string]string{deletedPayload(1), deletedPayload(2)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads = %v, want %v", got, want)
+	}
+	// Each deletion follows the phase.end that made the Update the executed plan.
+	es := env.entries()[before:]
+	end := slices.IndexFunc(es, func(en audit.Entry) bool { return en.Type == audit.TypePhaseEnd })
+	first := slices.IndexFunc(es, func(en audit.Entry) bool { return en.Type == audit.TypeManagedResourceDeleted })
+	if end < 0 || first < end {
+		t.Fatalf("phase.end at %d, first managedresource.deleted at %d", end, first)
+	}
+	if env.g.phases.get(envKey) != nil {
+		t.Fatal("the Update phase is still in memory")
+	}
+}
+
+// Only a succeeded Update deletes: a failed one and a succeeded Remediate,
+// which carries the executed resources unchanged, delete nothing.
+func TestAFailedUpdateDeletesNothing(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(3)
+	h, _ := env.oneResourceUpdate()
+	before := len(env.entries())
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, false); err != nil {
+		t.Fatalf("EndPhase(Update, failed) = %v", err)
+	}
+	env.wantMRs(0, 1, 2, 8, 9)
+
+	fix := env.remediation("fix", nonce1)
+	env.runPhase(lastv1alpha1.StageRemediate, fix, repairSteps())
+	env.wantMRs(0, 1, 2, 8, 9)
+	if n := env.countType(before, audit.TypeManagedResourceDeleted); n != 0 {
+		t.Fatalf("%d managedresource.deleted entries, want none", n)
+	}
+}
+
+func TestStaleManagedResourceDeletionIsRetried(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(5)
+	h, steps := env.oneResourceUpdate()
+	var deletes atomic.Int32
+	env.g.crd = interceptor.NewClient(env.crd.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*lastv1alpha1.ManagedResource); !ok {
+				return c.Delete(ctx, obj, opts...)
+			}
+			switch n := deletes.Add(1); {
+			case n == 2: // web-2, the first attempt
+				return errors.New("api server unavailable")
+			case obj.GetName() == lastv1alpha1.ManagedResourceName(envIntent, 3):
+				// Deleted concurrently: the gateway's own delete finds it gone.
+				if err := c.Delete(ctx, obj, opts...); err != nil {
+					return err
+				}
+				return apierrors.NewNotFound(lastv1alpha1.GroupVersion.WithResource("managedresources").GroupResource(), obj.GetName())
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+
+	_, err := env.end(h, true)
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase with a failing delete = %v, want Unavailable", err)
+	}
+	if env.g.phases.get(envKey) == nil {
+		t.Fatal("the Update phase left memory before its stale ManagedResources were deleted")
+	}
+	env.wantMRs(0, 2, 3, 4, 8, 9)
+	if got := env.executed(); got.PlanHash != h {
+		t.Fatalf("executed = %s, want the Update %s", got.PlanHash, h)
+	}
+	// No phase opens while the Update's EndPhase has work left.
+	fix := env.remediation("fix", nonce1)
+	_, err = env.beginStage(lastv1alpha1.StageRemediate, fix)
+	env.wantDenied(err, codes.AlreadyExists)
+
+	if _, err := env.end(h, true); err != nil {
+		t.Fatalf("EndPhase retry = %v", err)
+	}
+	env.wantMRs(0, 8, 9)
+	if n := env.countType(before, audit.TypePhaseEnd); n != 1 {
+		t.Fatalf("%d phase.end entries, want 1", n)
+	}
+	got := env.deletedMRs(before, h)
+	if want := []map[string]string{deletedPayload(1), deletedPayload(2), deletedPayload(4)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads = %v, want %v (web-3 was already gone)", got, want)
+	}
+	if env.g.phases.get(envKey) != nil {
+		t.Fatal("the Update phase is still in memory")
+	}
+}
+
+// A deletion whose audit entry could not be written is audited by the retry,
+// once, and never deleted again.
+func TestAStaleDeletionIsAuditedWhenItsEntryFailed(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	h, steps := env.oneResourceUpdate()
+	env.g.crd = interceptor.NewClient(env.crd.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if err := c.Delete(ctx, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*lastv1alpha1.ManagedResource); ok {
+				env.sink.SetFailPuts(true) // the deletion went through; its entry will not
+			}
+			return nil
+		},
+	})
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase with the audit log down = %v, want Unavailable", err)
+	}
+	env.wantMRs(0, 8, 9)
+	if n := env.countType(before, audit.TypeManagedResourceDeleted); n != 0 {
+		t.Fatalf("%d managedresource.deleted entries, want none yet", n)
+	}
+
+	// The broken writer fails closed; give the same gateway a healthy one.
+	env.sink.SetFailPuts(false)
+	w, err := audit.Open(context.Background(), env.sink, env.signer,
+		audit.WriterConfig{ChainID: testChainID, Retention: time.Hour, Actor: sandbox.GatewayActor}, func(audit.StartInfo) any { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.g.writer.Store(w)
+	env.g.crd = env.crd
+	if _, err := env.end(h, true); err != nil {
+		t.Fatalf("EndPhase retry = %v", err)
+	}
+	if got, want := env.deletedMRs(before, h), []map[string]string{deletedPayload(1)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads = %v, want %v", got, want)
+	}
+	if n := env.countType(before, audit.TypePhaseEnd); n != 1 {
+		t.Fatalf("%d phase.end entries, want 1", n)
+	}
 }

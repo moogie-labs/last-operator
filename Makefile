@@ -351,6 +351,9 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -A1 'kubernetes.io/metadata.name: last-system' | grep -q '^          podSelector:'
 	@# The operator never gets Secrets or ManagedResource deletes (spec §4.1; test/admission checks the full list).
 	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|delete)' charts/last-operator/files/operator-clusterrole.yaml
+	@# The gateway deletes, and audits, the ManagedResources an Update dropped: delete on managedresources alone, in its own rule.
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[managedresources\]' | grep -q 'verbs: \[delete\]'
+	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[.*,.*\]' | grep -q 'verbs: \[.*delete'
 	@# The bundled registry: namespaces, credentials, and a front proxy that picks the realm and user file per method.
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-front'
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-auth'

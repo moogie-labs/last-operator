@@ -19,16 +19,13 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
-// managedResourceName names the ManagedResource for resource i of an Intent's plan.
-func managedResourceName(intent string, i int) string { return fmt.Sprintf("%s-%d", intent, i) }
-
 // ensureManagedResources creates or updates one ManagedResource per plan
 // resource. Each is controlled by the Intent and names it in spec.intentRef:
 // the gateway requires both before it writes outputs (spec §15). A new plan
 // voids what earlier probe runs observed, so each one's probe status is cleared.
 func (r *IntentReconciler) ensureManagedResources(ctx context.Context, in *lastv1alpha1.Intent) error {
 	for i, res := range in.Status.Plan.Resources {
-		mr := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: managedResourceName(in.Name, i), Namespace: in.Namespace}}
+		mr := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: lastv1alpha1.ManagedResourceName(in.Name, i), Namespace: in.Namespace}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, mr, func() error {
 			if owner := metav1.GetControllerOf(mr); owner != nil && owner.UID != in.UID {
 				return fmt.Errorf("managed resource %s is controlled by another object", mr.Name)
@@ -77,7 +74,7 @@ func planManagedResources(ctx context.Context, c client.Reader, in *lastv1alpha1
 	var mrs []lastv1alpha1.ManagedResource
 	for i := range in.Status.Plan.Resources {
 		var mr lastv1alpha1.ManagedResource
-		err := c.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: managedResourceName(in.Name, i)}, &mr)
+		err := c.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: lastv1alpha1.ManagedResourceName(in.Name, i)}, &mr)
 		switch {
 		case apierrors.IsNotFound(err):
 			continue

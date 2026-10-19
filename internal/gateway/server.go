@@ -32,7 +32,7 @@ var Version = "dev"
 type Gateway struct {
 	cfg     Config
 	kube    kubernetes.Interface
-	crd     client.Reader
+	crd     client.Client // uncached; its one write deletes the ManagedResources an Update dropped (RBAC allows no other)
 	sink    audit.Sink
 	signer  *audit.Signer
 	metrics *Metrics
@@ -72,7 +72,7 @@ type Gateway struct {
 	inflight sync.WaitGroup
 }
 
-func New(cfg Config, kube kubernetes.Interface, crd client.Reader, sink audit.Sink, signer *audit.Signer) *Gateway {
+func New(cfg Config, kube kubernetes.Interface, crd client.Client, sink audit.Sink, signer *audit.Signer) *Gateway {
 	g := &Gateway{cfg: cfg, kube: kube, crd: crd, sink: sink, signer: signer, metrics: NewMetrics(),
 		epoch: newEpoch(), logs: sandbox.KubeLogReader(kube), state: NewStateStore(kube, cfg.Namespace),
 		images: newImageIndex(kube, cfg.Namespace), builds: newImageBuilds(),

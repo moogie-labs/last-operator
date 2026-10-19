@@ -197,7 +197,7 @@ func (r *IntentReconciler) writeOutputs(ctx context.Context, in *lastv1alpha1.In
 		if len(res.Outputs) == 0 {
 			continue
 		}
-		name := managedResourceName(in.Name, i)
+		name := lastv1alpha1.ManagedResourceName(in.Name, i)
 		req := &gatewayv1.WriteOutputSecretRequest{Intent: intentRef(in), SubjectHash: in.Status.Plan.Hash,
 			ManagedResource: name, Values: res.Outputs}
 		for attempt := 1; ; attempt++ {

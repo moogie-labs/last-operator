@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -32,6 +34,11 @@ type ManagedResourceSpec struct {
 	// +optional
 	Teardown []Command `json:"teardown,omitempty"`
 }
+
+// ManagedResourceName names the ManagedResource for resource i of an Intent's
+// plan. Names are positional: the operator creates them, and after an Update the
+// gateway deletes the ones the Intent controls beyond the new plan's resources.
+func ManagedResourceName(intent string, i int) string { return fmt.Sprintf("%s-%d", intent, i) }
 
 // ManagedResourceStatus holds the latest probe observations.
 type ManagedResourceStatus struct {

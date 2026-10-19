@@ -217,7 +217,7 @@ func (r *IntentReconciler) teardown(ctx context.Context, in *lastv1alpha1.Intent
 }
 
 // ownedManagedResources returns the ManagedResources the Intent controls, in
-// resource order: by the index managedResourceName gives them, then by name.
+// resource order: by the index lastv1alpha1.ManagedResourceName gives them, then by name.
 func (r *IntentReconciler) ownedManagedResources(ctx context.Context, in *lastv1alpha1.Intent) ([]lastv1alpha1.ManagedResource, error) {
 	var list lastv1alpha1.ManagedResourceList
 	if err := r.Reader.List(ctx, &list, client.InNamespace(in.Namespace)); err != nil {
@@ -225,7 +225,7 @@ func (r *IntentReconciler) ownedManagedResources(ctx context.Context, in *lastv1
 	}
 	mrs := slices.DeleteFunc(list.Items, func(mr lastv1alpha1.ManagedResource) bool { return !metav1.IsControlledBy(&mr, in) })
 	index := func(mr lastv1alpha1.ManagedResource) int {
-		if i, err := strconv.Atoi(strings.TrimPrefix(mr.Name, in.Name+"-")); err == nil && mr.Name == managedResourceName(in.Name, i) {
+		if i, err := strconv.Atoi(strings.TrimPrefix(mr.Name, in.Name+"-")); err == nil && mr.Name == lastv1alpha1.ManagedResourceName(in.Name, i) {
 			return i
 		}
 		return math.MaxInt

@@ -154,6 +154,9 @@ rules:
   - apiGroups: [last.moogie-labs.com]
     resources: [intents, intentapprovals, managedresources, intentpolicies, operatorconfigs, providers, llmproviders]
     verbs: [get, list, watch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [managedresources]
+    verbs: [delete]                      # the ManagedResources a succeeded Update dropped, each audited (spec §15)
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update]         # output Secrets in Intent namespaces (spec §15)

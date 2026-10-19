@@ -167,7 +167,8 @@ leader election):
   another finalizer.
 - get/list/watch/create/update/patch on `ManagedResource` and its status.
   **No delete**: deleting a ManagedResource garbage-collects its output
-  Secret with no audit entry.
+  Secret with no audit entry. The gateway deletes the ones an Update
+  drops, and audits each (§4.2, §15).
 - get/list/watch on `IntentApproval`, `IntentPolicy`, `OperatorConfig`,
   and `Provider`. The first message of a planning session lists the
   Providers the namespace may use (M3).
@@ -227,6 +228,21 @@ the authenticated caller.
 
 A single active replica, chosen by leader election, is the only audit
 writer.
+
+**RBAC.** Namespaced Roles (the table in §3), plus one ClusterRole,
+`last-gateway-lifecycle` in `charts/last-operator/templates/gateway.yaml`,
+for its work in Intent namespaces (cluster-wide):
+
+- get/list/watch on `Intent`, `IntentApproval`, `ManagedResource`,
+  `IntentPolicy`, `OperatorConfig`, `Provider`, and `LLMProvider`.
+- delete on `ManagedResource`, in a rule of its own. The gateway's one
+  write to the CRDs: after an Update succeeds, it deletes the
+  ManagedResources the new plan dropped, each audited as
+  `managedresource.deleted` (§15). `make helm-lint` checks that the
+  verb stays in that rule and that the operator never has it.
+- get/create/update on Secrets, for output Secrets in Intent namespaces
+  (§15).
+- get on Services and list on Nodes, for the egress canaries.
 
 ### 4.3 Sandbox pods
 
@@ -1454,7 +1470,9 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 `image.gc.start`, `image.gc.result` (§11.2, §11.3),
 `approval.observed`, `rule.observed` (a rule created, changed, or
 deleted, seen via watch), `suggestion.decided`, `policy.denied`,
-`output.written` (records a WriteOutputSecret with each value as its SHA-256).
+`output.written` (records a WriteOutputSecret with each value as its SHA-256),
+`managedresource.deleted` (a ManagedResource a succeeded Update dropped,
+deleted by the gateway with its output Secret; §15).
 
 `phase.end` records an outcome: `succeeded` (every step ran and exited 0),
 `failed` (the operator ended a phase whose step failed or was refused),
@@ -1589,6 +1607,16 @@ configuration.
   writes exactly the declared outputs and refuses any other values.
 - The operator can create Secrets only through this RPC, never
   directly.
+- An output Secret goes with its ManagedResource, by owner-reference
+  garbage collection. A ManagedResource goes when its Intent is deleted
+  (after the Delete phase) or when a succeeded Update drops it. The
+  operator cannot delete a ManagedResource (§4.1), so the gateway deletes
+  those an Update dropped at EndPhase(Update, succeeded), once the Update
+  is the executed plan. They are the ManagedResources the Intent controls
+  whose names are not among the new plan's (`<intent>-<i>`, one per
+  resource). Each deletion is audited as `managedresource.deleted`, with
+  the ManagedResource's name and UID and never its Secret's contents. A
+  failed or aborted Update deletes nothing.
 
 ## 16. Observability
 

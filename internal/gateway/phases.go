@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -16,6 +17,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -57,6 +60,16 @@ type phase struct {
 	next     int          // index of the next step to run; also the count of steps that succeeded
 	results  plan.Results // results of steps that ran, by step ID
 	failed   bool         // a step failed or could not run; only EndPhase(failed) remains
+	// stale holds a succeeded Update's deletions of the ManagedResources its plan
+	// dropped, by UID, so an EndPhase retry repeats only what is left.
+	stale map[types.UID]staleDeletion
+}
+
+// staleDeletion is a stale ManagedResource the gateway deleted; audited is false
+// while its managedresource.deleted entry is still to be written.
+type staleDeletion struct {
+	name    string
+	audited bool
 }
 
 type phaseTable struct {
@@ -98,6 +111,13 @@ type phaseEnd struct {
 	Outcome  string `json:"outcome"`
 	Reason   string `json:"reason,omitempty"`
 	StepsRun int    `json:"stepsRun"`
+}
+
+// managedResourceDeleted is the managedresource.deleted payload. It names the
+// ManagedResource only; its output Secret's contents never reach the audit log.
+type managedResourceDeleted struct {
+	ManagedResource string `json:"managedResource"`
+	UID             string `json:"uid"`
 }
 
 type approvalObserved struct {
@@ -567,6 +587,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, err
 		}
 	}
+	if err := g.checkEnding(d, key, string(intent.UID)); err != nil {
+		return nil, err
+	}
 	if err := checkReplay(d, rec, &intent, stage, subject); err != nil {
 		return nil, err
 	}
@@ -614,6 +637,19 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, beginSeq: begin.Seq,
 		began: began, results: plan.Results{}})
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
+}
+
+// checkEnding refuses a phase while the Intent's succeeded Update still has
+// stale ManagedResources to delete. Its record is saved without the open phase,
+// but the phase stays in memory until its EndPhase retry finishes; a new phase
+// would replace it and leave them behind. The caller holds the Intent's lock,
+// under which endSeq and outcome are written.
+func (g *Gateway) checkEnding(d denial, key, uid string) error {
+	p := g.phases.get(key)
+	if p == nil || p.endSeq == 0 || p.outcome != outcomeSucceeded || p.stage != lastv1alpha1.StageUpdate || p.uid != uid {
+		return nil
+	}
+	return d.deny(codes.AlreadyExists, "the previous phase (subject %s) is still ending; its EndPhase must be retried", p.subject)
 }
 
 // closePredecessorPhase ends the open phase of a record that belongs to another
@@ -762,13 +798,96 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 	if err := g.saveRecord(ctx, rec); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if p.outcome == outcomeSucceeded && p.stage == lastv1alpha1.StageDelete {
-		if err := g.dropRecord(ctx, key); err != nil {
-			return nil, status.Errorf(codes.Unavailable, "%v", err)
-		}
+	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	g.phases.remove(key)
 	return &gatewayv1.EndPhaseResponse{EndSeq: p.endSeq}, nil
+}
+
+// afterSave finishes a succeeded phase once its record is saved without the open
+// phase: a Delete drops the record, and an Update, now the executed plan,
+// deletes the ManagedResources it dropped. On an error EndPhase keeps the phase,
+// and the operator's retry saves again and repeats what is left.
+func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns, name string, p *phase) error {
+	if p.outcome != outcomeSucceeded {
+		return nil
+	}
+	switch p.stage {
+	case lastv1alpha1.StageDelete:
+		return g.dropRecord(ctx, key)
+	case lastv1alpha1.StageUpdate:
+		return g.deleteStaleManagedResources(ctx, w, actor, key, ns, name, p)
+	}
+	return nil
+}
+
+// deleteStaleManagedResources deletes the ManagedResources a succeeded Update
+// dropped (ruling R1): those in the Intent's namespace whose controller is the
+// Intent, named other than ManagedResourceName(intent, i) for the new plan's
+// resources. The operator cannot delete them (spec §4.1): each deletion
+// garbage-collects an output Secret, so each is audited as
+// managedresource.deleted once the delete succeeds. A ManagedResource already
+// gone counts as deleted and writes no entry. The caller holds the Intent's lock
+// and p.mu. p.stale makes an EndPhase retry repeat only what is left: a deletion
+// whose entry could not be written is audited first, and one already audited is
+// never deleted or audited again, even while it is still terminating.
+func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writer, actor, key, ns, intent string, p *phase) error {
+	if p.stale == nil {
+		p.stale = map[types.UID]staleDeletion{}
+	}
+	record := func(uid types.UID) error {
+		del := p.stale[uid]
+		if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeManagedResourceDeleted, Actor: actor, Intent: key, Stage: string(p.stage),
+			SubjectHash: p.subject, AuthorizedBy: p.auth, Payload: managedResourceDeleted{ManagedResource: del.name, UID: string(uid)}}); err != nil {
+			return fmt.Errorf("record %s: %w", audit.TypeManagedResourceDeleted, err)
+		}
+		del.audited = true
+		p.stale[uid] = del
+		return nil
+	}
+	pending := slices.SortedFunc(maps.Keys(p.stale), func(a, b types.UID) int { return strings.Compare(p.stale[a].name, p.stale[b].name) })
+	for _, uid := range pending {
+		if !p.stale[uid].audited {
+			if err := record(uid); err != nil {
+				return err
+			}
+		}
+	}
+
+	keep := make(map[string]bool, len(p.body.Resources))
+	for i := range p.body.Resources {
+		keep[lastv1alpha1.ManagedResourceName(intent, i)] = true
+	}
+	var list lastv1alpha1.ManagedResourceList
+	if err := g.crd.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return fmt.Errorf("list ManagedResources: %w", err)
+	}
+	slices.SortFunc(list.Items, func(a, b lastv1alpha1.ManagedResource) int { return strings.Compare(a.Name, b.Name) })
+	for i := range list.Items {
+		mr := &list.Items[i]
+		owner := metav1.GetControllerOf(mr)
+		if owner == nil || owner.UID != types.UID(p.uid) || keep[mr.Name] {
+			continue
+		}
+		if _, done := p.stale[mr.UID]; done {
+			continue
+		}
+		// The UID precondition deletes only the object listed, never one recreated under its name.
+		err := g.crd.Delete(ctx, mr, client.Preconditions{UID: &mr.UID})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("delete ManagedResource %s: %w", mr.Name, err)
+		}
+		slog.Info("Deleted ManagedResource the Update dropped", "intent", key, "name", mr.Name)
+		p.stale[mr.UID] = staleDeletion{name: mr.Name}
+		if err := record(mr.UID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // endOpenPhase writes the phase's phase.end and marks it closed; the caller holds
