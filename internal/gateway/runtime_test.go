@@ -240,3 +240,32 @@ func TestReadyzIsUnreadyWhileDraining(t *testing.T) {
 		t.Fatalf("readyz while draining = %d, want 503", code)
 	}
 }
+
+func TestLeadSweepsTheRecordsOfGoneIntents(t *testing.T) {
+	sink := audittest.NewMemSink()
+	sink.SetLockConfig(audit.LockConfig{Enabled: true, Mode: testLockMode, DefaultRetention: 365 * 24 * time.Hour})
+	g := testGateway(t, sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec, _ := g.state.LoadAny(ctx, "team-x/gone")
+	rec.IntentUID = testOldUID
+	if err := g.state.Save(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- g.lead(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if recs, err := g.state.List(ctx); err == nil && len(recs) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if recs, _ := g.state.List(ctx); len(recs) != 0 {
+		t.Fatalf("records after lead = %d; want the gone Intent's swept", len(recs))
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("lead = %v", err)
+	}
+}

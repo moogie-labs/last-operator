@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -439,5 +441,111 @@ func TestARecreatedIntentDoesNotSeeThePredecessorsPendingIndex(t *testing.T) {
 		if e.GetSeq() <= ends[0].Seq { // the predecessor's phase.begin and interrupted phase.end
 			t.Fatalf("predecessor entry %d served to the recreated Intent", e.GetSeq())
 		}
+	}
+}
+
+// deleteIntent deletes the env's Intent; it holds no finalizer, so it is gone at once.
+func (e *testEnv) deleteIntent() {
+	e.t.Helper()
+	if err := e.crd.Delete(e.ctx, &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Namespace: envNS, Name: envIntent}}); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestSweepDeletesTheRecordOfAGoneIntent(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	env.deleteIntent()
+	env.indexedEntry() // a pending index entry of the gone Intent
+	env.g.sweepRecords(env.ctx)
+	if env.recordExists() {
+		t.Fatal("the record of a deleted Intent survived the sweep")
+	}
+	if pending := env.pendingIndex(); len(pending) != 0 {
+		t.Fatalf("pending index entries of the gone Intent = %v", pending)
+	}
+	env.g.flushIndexes(env.ctx)
+	if env.recordExists() {
+		t.Fatal("a flush recreated the swept record")
+	}
+}
+
+func TestSweepDeletesTheRecordOfAnotherUID(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	env.deleteIntent()
+	recreated := intentWithPlan(t, twoSteps())
+	recreated.UID = recreatedUID
+	if err := env.crd.Create(env.ctx, recreated); err != nil {
+		t.Fatal(err)
+	}
+	env.g.sweepRecords(env.ctx)
+	if env.recordExists() {
+		t.Fatal("the predecessor's record survived the sweep")
+	}
+}
+
+func TestSweepKeepsALiveIntentsRecord(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	env.g.sweepRecords(env.ctx)
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted the record of the live Intent")
+	}
+	// A record with no UID yet is adopted by the Intent's next Load; it stays too.
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.IntentUID = ""
+	if err := env.g.state.Save(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	env.g.sweepRecords(env.ctx)
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted an unbound record of an existing Intent")
+	}
+}
+
+func TestSweepKeepsARecordWithAnOpenPhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	if _, err := env.begin(in.Status.Plan.Hash); err != nil {
+		t.Fatal(err)
+	}
+	env.deleteIntent()
+	env.g.sweepRecords(env.ctx)
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted a record with an open phase")
+	}
+}
+
+func TestSweepKeepsTheRecordWhenTheIntentCannotBeRead(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	env.deleteIntent()
+	env.g.crd = interceptor.NewClient(env.crd.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("api server unavailable")
+		},
+	})
+	env.g.sweepRecords(env.ctx)
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted a record whose Intent it could not read")
+	}
+}
+
+func TestSweepSkipsABusyIntent(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	executeAll(t, env, in)
+	env.deleteIntent()
+	unlock := env.g.locks.lock(envKey)
+	env.g.sweepRecords(env.ctx)
+	unlock()
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted a record while its Intent's lock was held")
+	}
+	env.g.sweepRecords(env.ctx)
+	if env.recordExists() {
+		t.Fatal("the next sweep kept the record of the deleted Intent")
 	}
 }

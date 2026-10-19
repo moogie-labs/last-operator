@@ -284,6 +284,65 @@ func (g *Gateway) closeInterruptedPhases(ctx context.Context, w *audit.Writer) e
 	return nil
 }
 
+// recordSweepInterval is how often the leader sweeps the records of gone Intents.
+const recordSweepInterval = time.Hour
+
+// sweepRecords deletes the records no Intent owns any more: only a succeeded
+// Delete drops a record, so an Intent released without one (nothing executed,
+// a finalizer removed by hand) would leave its record behind. It runs in the
+// leader loop, so like flushIndexes it skips a busy Intent; the next sweep
+// retries. Failures are logged.
+func (g *Gateway) sweepRecords(ctx context.Context) {
+	recs, err := g.state.List(ctx)
+	if err != nil {
+		slog.Warn("Could not list Intent records", "err", err)
+		return
+	}
+	for _, rec := range recs {
+		unlock, ok := g.locks.tryLock(rec.Intent)
+		if !ok {
+			continue
+		}
+		err := g.sweepRecordLocked(ctx, rec.Intent)
+		unlock()
+		if err != nil {
+			slog.Warn("Could not sweep Intent record", "intent", rec.Intent, "err", err)
+		}
+	}
+}
+
+// sweepRecordLocked deletes the Intent's record when the Intent is gone, or a
+// recreated Intent of another UID holds the name, and no phase is open in it.
+// A record with no UID yet is kept while its Intent exists: the next Load
+// adopts it. The caller holds the Intent's lock, which every record writer takes.
+func (g *Gateway) sweepRecordLocked(ctx context.Context, key string) error {
+	rec, err := g.state.LoadAny(ctx, key) // the listed copy may be stale
+	if err != nil || rec.cm == nil || rec.Open != nil {
+		return err
+	}
+	ns, name, _ := strings.Cut(key, "/")
+	var in lastv1alpha1.Intent
+	reason, gone := "", false
+	switch err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &in); {
+	case apierrors.IsNotFound(err):
+		reason, gone = "the Intent no longer exists", true
+	case err != nil:
+		return fmt.Errorf("gateway: read intent %s: %w", key, err)
+	case in.UID != "" && rec.IntentUID != "" && string(in.UID) != rec.IntentUID:
+		reason = "a recreated Intent holds the name"
+	default:
+		return nil
+	}
+	if err := g.state.Delete(ctx, key); err != nil {
+		return err
+	}
+	if gone { // a recreated Intent's pending entries are its own
+		g.index.take(key)
+	}
+	slog.Info("Deleted Intent record", "intent", key, "uid", rec.IntentUID, "reason", reason)
+	return nil
+}
+
 // keyedMutex serializes work per key (per Intent).
 type keyedMutex struct {
 	mu sync.Mutex

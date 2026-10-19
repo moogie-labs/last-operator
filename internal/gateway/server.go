@@ -281,6 +281,9 @@ func (g *Gateway) lead(parent context.Context) error {
 	}
 	gc := time.NewTicker(gcEvery)
 	defer gc.Stop()
+	g.sweepRecords(ctx)
+	sweep := time.NewTicker(recordSweepInterval)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -292,6 +295,8 @@ func (g *Gateway) lead(parent context.Context) error {
 			g.flushIndexes(ctx)
 		case <-gc.C:
 			g.startImageGC(gcCtx, w)
+		case <-sweep.C:
+			g.sweepRecords(ctx)
 		case <-ticker.C:
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)

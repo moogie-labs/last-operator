@@ -748,7 +748,11 @@ audit log, together with the in-memory phase and the Intent's unsaved
 index entries; no later index flush recreates it, and no phase opens again
 for that Intent (a guard the gateway keeps in memory: after a restart, the
 Intent's deletion still keeps Create shut). A failed or aborted Delete
-keeps the record and its executed plan.
+keeps the record and its executed plan. A record whose Intent went without a
+succeeded Delete (nothing executed, or the finalizer was removed by hand) is
+deleted by the leader's record sweep, at lead and then hourly: under the
+Intent's lock, and only with no open phase, when a live read finds the Intent
+gone or a recreated Intent of another UID holding the name.
 
 `RunProbes` is authorized by that record alone: the executed plan of the
 Intent's current UID means an approved phase of it succeeded, which needs no
