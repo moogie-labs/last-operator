@@ -93,7 +93,7 @@ func TestDiscoveryResultReturnsGatewayErrorsUnchanged(t *testing.T) {
 
 func TestResultTurnClipsEachStream(t *testing.T) {
 	big := strings.Repeat("é", maxResultBytes) // two bytes each
-	got := resultTurn(commandResult{Stdout: big, Error: "timed out"})
+	got := resultTurn(commandResult{Stdout: big, Error: timedOut})
 	if !strings.HasPrefix(got, "The command could not finish: timed out\nstdout (truncated):\n") ||
 		!strings.HasSuffix(got, "\nstderr: empty\n") || !utf8.ValidString(got) || len(got) > maxResultBytes+100 {
 		t.Fatalf("resultTurn = %d bytes: %.120q", len(got), got)
@@ -312,5 +312,32 @@ func TestPartialCreateNotFound(t *testing.T) {
 	}
 	if _, _, _, err := PartialCreate(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref); err == nil {
 		t.Error("PartialCreate hid a gateway error")
+	}
+}
+
+func TestPhaseSucceededPairsBeginAndEnd(t *testing.T) {
+	hash := func(argv string) string { h, _ := plan.Hash(planBody(argv)); return h }
+	entries := append(executedPhase(t, 1, "Remediate", planBody("ok"), outcomeSucceeded),
+		executedPhase(t, 3, "Remediate", planBody("bad"), "failed")...)
+	entries = append(entries, executedPhase(t, 5, "Update", planBody("upd"), outcomeSucceeded)...)
+	for name, c := range map[string]struct {
+		a       *fakeAuditor
+		stage   lastv1alpha1.Stage
+		subject string
+		want    bool
+	}{
+		"succeeded":       {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("ok"), true},
+		"failed":          {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("bad"), false},
+		"another subject": {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("other"), false},
+		"another stage":   {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("upd"), false},
+		"truncated":       {&fakeAuditor{entries: entries, truncated: true}, lastv1alpha1.StageRemediate, hash("ok"), false},
+	} {
+		got, err := PhaseSucceeded(context.Background(), c.a, ref, c.stage, c.subject)
+		if err != nil || got != c.want {
+			t.Errorf("%s: PhaseSucceeded = %v, %v, want %v", name, got, err, c.want)
+		}
+	}
+	if _, err := PhaseSucceeded(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref, "Remediate", "x"); err == nil {
+		t.Error("PhaseSucceeded hid a gateway error")
 	}
 }

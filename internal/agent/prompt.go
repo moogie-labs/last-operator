@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // systemPrompt teaches the turn protocol (M3 spec §4.1; spec §8.1, §8.2, §10, §15).
@@ -83,7 +85,9 @@ run again on a schedule to detect drift. Sensitive values go in outputs, never i
 files, or the summary. "teardown" lists the commands that remove what the resource
 created, or [] when nothing needs removing. They run only when the Intent is deleted,
 long after the plan's steps, in an order you are asked for then and a human approves,
-so they never use ${steps…} references.`
+so they never use ${steps…} references.
+
+A later message may ask for an Update or a Remediate of a plan that already ran, and a Remediate answer always has "resources": [].`
 
 // Environment is what the namespace's effective policy lets commands use (M3
 // spec §4.4). The gateway enforces the policy; this only tells the model.
@@ -114,6 +118,17 @@ func FirstMessage(r Request) string {
 	}
 	b.WriteString("\n")
 	r.Env.describe(&b)
+	if r.Executed != nil {
+		raw, err := executedJSON(*r.Executed)
+		if err == nil {
+			fmt.Fprintf(&b, "\nThis Intent already executed this plan:\n%s\n\n"+
+				"Plan an Update: steps that take the cluster from what that plan created to what the request now asks, "+
+				"and resources that list everything the Intent manages afterwards. "+
+				"Your steps must remove the real objects of any resource you drop.\n", raw)
+		} else {
+			fmt.Fprintf(&b, "\nThis Intent already executed a plan, but it cannot be shown: %v\n", err)
+		}
+	}
 	if r.Feedback != "" {
 		fmt.Fprintf(&b, "\nThe previous plan failed and was not completed:\n%s\n"+
 			"Plan again; the new plan must succeed from the cluster's current state.\n", r.Feedback)
@@ -227,14 +242,14 @@ func resultTurn(r commandResult) string {
 	} else {
 		fmt.Fprintf(&b, "The command exited %d.\n", r.ExitCode)
 	}
-	writeStream(&b, "stdout", r.Stdout, r.StdoutTruncated)
-	writeStream(&b, "stderr", r.Stderr, r.StderrTruncated)
+	writeStream(&b, "stdout", r.Stdout, r.StdoutTruncated, maxResultBytes)
+	writeStream(&b, "stderr", r.Stderr, r.StderrTruncated, maxResultBytes)
 	return b.String()
 }
 
-// writeStream writes one output stream, clipped to maxResultBytes.
-func writeStream(b *strings.Builder, name, s string, truncated bool) {
-	s, clipped := head(s, maxResultBytes)
+// writeStream writes one output stream, clipped to limit bytes.
+func writeStream(b *strings.Builder, name, s string, truncated bool, limit int) {
+	s, clipped := head(s, limit)
 	switch {
 	case s == "" && !truncated:
 		fmt.Fprintf(b, "%s: empty\n", name)
@@ -266,4 +281,70 @@ func head(s string, n int) (string, bool) {
 // be read back.
 func ResultLostTurn(why string) string {
 	return "The command ran, but its result could not be read back: " + why
+}
+
+// maxProbeBytes bounds each of a failing probe's stdout and stderr in a
+// Remediate message.
+const maxProbeBytes = 2 << 10
+
+// ProbeFailure is a probe that failed when the Remediate was confirmed.
+type ProbeFailure struct {
+	Resource, ProbeID string
+	Assert            string // the probe's CEL assert
+	Result            *gatewayv1.CommandResult
+	Error             string // why the probe gave no result, if it did not
+}
+
+// Remediation is what a Remediate planning session starts from.
+type Remediation struct {
+	Namespace, Name string
+	Text            string // spec.request
+	Executed        plan.Body
+	Failures        []ProbeFailure
+	Env             Environment
+	Feedback        string // why the previous remediation failed, if it did
+}
+
+// RemediateMessage is a Remediate planning session's first user message: the
+// executed plan, the probes that fail and the environment. It has no Answers:
+// a Remediate asks no questions.
+func RemediateMessage(r Remediation) (string, error) {
+	raw, err := executedJSON(r.Executed)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Intent %s/%s, in namespace %s, has drifted from its executed plan.\n\nRequest:\n%s\n\n", r.Namespace, r.Name, r.Namespace, r.Text)
+	fmt.Fprintf(&b, "Executed plan:\n%s\n\nProbes that fail:\n", raw)
+	for _, f := range r.Failures {
+		fmt.Fprintf(&b, "- %s, probe %s, assert: %s\n", f.Resource, f.ProbeID, f.Assert)
+		res := f.Result
+		switch {
+		case f.Error != "":
+			fmt.Fprintf(&b, "The probe could not finish: %s\n", f.Error)
+		case res.GetError() != "":
+			fmt.Fprintf(&b, "The probe could not finish: %s\n", res.GetError())
+		default:
+			fmt.Fprintf(&b, "The probe exited %d.\n", res.GetExitCode())
+		}
+		if res != nil {
+			writeStream(&b, "stdout", res.GetStdout(), res.GetStdoutTruncated(), maxProbeBytes)
+			writeStream(&b, "stderr", res.GetStderr(), res.GetStderrTruncated(), maxProbeBytes)
+		}
+	}
+	b.WriteString("\n")
+	r.Env.describe(&b)
+	if r.Feedback != "" {
+		fmt.Fprintf(&b, "\nThe previous remediation failed and was not completed:\n%s\n"+
+			"Plan again; the new plan must succeed from the cluster's current state.\n", r.Feedback)
+	}
+	b.WriteString("\nPlan a Remediate: steps that bring what the executed plan manages back to its desired state. " +
+		"Answer with \"resources\": []; what is managed does not change. " +
+		"You may run discovery commands; you may not ask questions.\n")
+	return b.String(), nil
+}
+
+// executedJSON writes a plan in the wire form of a plan turn, without its nonce.
+func executedJSON(b plan.Body) (string, error) {
+	return Encode(Turn{Kind: KindPlan, Plan: &lastv1alpha1.Plan{Steps: b.Steps, Resources: b.Resources}})
 }

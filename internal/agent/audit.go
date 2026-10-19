@@ -264,3 +264,32 @@ func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session ui
 	}
 	return nil, fmt.Errorf("%w: no answer since llm.request %d matches the Intent's state", ErrNoReload, session)
 }
+
+// PhaseSucceeded reports whether the Intent has a phase.begin of stage and
+// subject whose phase.end, paired by beginSeq, has outcome succeeded. A
+// truncated index gives false. Gateway errors are returned unchanged.
+func PhaseSucceeded(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, stage lastv1alpha1.Stage, subject string) (bool, error) {
+	begins := map[uint64]bool{}
+	truncated, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
+		if e.GetStage() == string(stage) && e.GetSubjectHash() == subject {
+			begins[e.GetSeq()] = true
+		}
+	})
+	if err != nil {
+		return false, err
+	}
+	found := false
+	endTruncated, err := scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
+		var end struct {
+			BeginSeq uint64 `json:"beginSeq"`
+			Outcome  string `json:"outcome"`
+		}
+		if json.Unmarshal(e.GetPayload(), &end) == nil && end.Outcome == outcomeSucceeded && begins[end.BeginSeq] {
+			found = true
+		}
+	})
+	if err != nil {
+		return false, err
+	}
+	return found && !truncated && !endTruncated, nil
+}

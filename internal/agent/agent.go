@@ -14,6 +14,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // Caps on one turn and one planning session (M3 spec §4.1, D7).
@@ -72,6 +73,9 @@ type Request struct {
 	Feedback        string // why the previous plan failed, if it did
 	Note            string // why the session started over, if it did
 	Env             Environment
+	// Executed is the plan the Intent already executed; set, it makes this an
+	// Update session.
+	Executed *plan.Body
 }
 
 // Planner asks the LLM for turns.

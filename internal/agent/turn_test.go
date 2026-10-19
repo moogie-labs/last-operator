@@ -19,8 +19,8 @@ import (
 
 // fullPlan uses every field the wire format carries.
 var fullPlan = lastv1alpha1.Plan{Summary: "nginx", Steps: []lastv1alpha1.Command{
-	{ID: "apply", Reason: "create it", Run: lastv1alpha1.CommandRun{Argv: []string{kubectlBin, "apply", "-f", "/work/a.yaml"}},
-		Files:     map[string]string{"/work/a.yaml": "kind: Deployment", "/work/b.yaml": "kind: Service"},
+	{ID: applyVerb, Reason: "create it", Run: lastv1alpha1.CommandRun{Argv: []string{kubectlBin, applyVerb, "-f", manifestPath}},
+		Files:     map[string]string{manifestPath: "kind: Deployment", "/work/b.yaml": "kind: Service"},
 		Providers: []string{"k8s"}, Egress: []string{"10.0.0.1:443"}, Timeout: &metav1.Duration{Duration: 2 * time.Minute}},
 	{ID: "svc", Run: lastv1alpha1.CommandRun{Script: "kubectl get svc web -o json"}},
 }, Resources: []lastv1alpha1.ManagedResourceSpec{{
@@ -28,7 +28,7 @@ var fullPlan = lastv1alpha1.Plan{Summary: "nginx", Steps: []lastv1alpha1.Command
 	Identity:    &runtime.RawExtension{Raw: []byte(`{"kind":"Deployment","name":"web"}`)},
 	Desired:     &runtime.RawExtension{Raw: []byte(`{"replicas":2}`)},
 	Probes: []lastv1alpha1.Probe{{ID: "ready",
-		Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}, Assert: "result.exitCode == 0"}},
+		Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}, Assert: exitZero}},
 	OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
 	Outputs:          map[string]string{"ip": "${steps.svc.json.spec.clusterIP}"},
 	Teardown:         []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{kubectlBin, "delete", "deploy", webName}}}},
