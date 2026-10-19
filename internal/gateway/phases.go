@@ -817,46 +817,50 @@ func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns
 	case lastv1alpha1.StageDelete:
 		return g.dropRecord(ctx, key)
 	case lastv1alpha1.StageUpdate:
-		return g.deleteStaleManagedResources(ctx, w, actor, key, ns, name, p)
+		if p.stale == nil {
+			p.stale = map[types.UID]staleDeletion{}
+		}
+		entry := audit.Draft{Actor: actor, Intent: key, Stage: string(p.stage), SubjectHash: p.subject, AuthorizedBy: p.auth}
+		return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(p.uid), len(p.body.Resources), p.stale)
 	}
 	return nil
 }
 
-// deleteStaleManagedResources deletes the ManagedResources a succeeded Update
-// dropped (ruling R1): those in the Intent's namespace whose controller is the
-// Intent, named other than ManagedResourceName(intent, i) for the new plan's
-// resources. The operator cannot delete them (spec §4.1): each deletion
-// garbage-collects an output Secret, so each is audited as
-// managedresource.deleted once the delete succeeds. A ManagedResource already
-// gone counts as deleted and writes no entry. The caller holds the Intent's lock
-// and p.mu. p.stale makes an EndPhase retry repeat only what is left: a deletion
-// whose entry could not be written is audited first, and one already audited is
-// never deleted or audited again, even while it is still terminating.
-func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writer, actor, key, ns, intent string, p *phase) error {
-	if p.stale == nil {
-		p.stale = map[types.UID]staleDeletion{}
-	}
-	record := func(uid types.UID) error {
-		del := p.stale[uid]
-		if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeManagedResourceDeleted, Actor: actor, Intent: key, Stage: string(p.stage),
-			SubjectHash: p.subject, AuthorizedBy: p.auth, Payload: managedResourceDeleted{ManagedResource: del.name, UID: string(uid)}}); err != nil {
+// deleteStaleManagedResources deletes the ManagedResources an Update dropped
+// (ruling R1): those in namespace ns whose controller is the Intent of UID uid,
+// named other than ManagedResourceName(intent, i) for the executed plan's kept
+// resources. EndPhase(Update, succeeded) calls it, and the record sweep finishes
+// a cleanup a restart cut short. The operator cannot delete them (spec §4.1):
+// each deletion garbage-collects an output Secret, so each is audited as
+// managedresource.deleted, from the entry template, once the delete succeeds. A
+// ManagedResource already gone counts as deleted and writes no entry. The caller
+// holds the Intent's lock. seen makes a retry repeat only what is left: a
+// deletion whose entry could not be written is audited first, and one already
+// audited is never deleted or audited again, even while it is still terminating.
+func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writer, entry audit.Draft, ns, intent string, uid types.UID,
+	kept int, seen map[types.UID]staleDeletion) error {
+	record := func(mrUID types.UID) error {
+		del := seen[mrUID]
+		e := entry
+		e.Type, e.Payload = audit.TypeManagedResourceDeleted, managedResourceDeleted{ManagedResource: del.name, UID: string(mrUID)}
+		if _, err := w.Append(ctx, e); err != nil {
 			return fmt.Errorf("record %s: %w", audit.TypeManagedResourceDeleted, err)
 		}
 		del.audited = true
-		p.stale[uid] = del
+		seen[mrUID] = del
 		return nil
 	}
-	pending := slices.SortedFunc(maps.Keys(p.stale), func(a, b types.UID) int { return strings.Compare(p.stale[a].name, p.stale[b].name) })
-	for _, uid := range pending {
-		if !p.stale[uid].audited {
-			if err := record(uid); err != nil {
+	pending := slices.SortedFunc(maps.Keys(seen), func(a, b types.UID) int { return strings.Compare(seen[a].name, seen[b].name) })
+	for _, mrUID := range pending {
+		if !seen[mrUID].audited {
+			if err := record(mrUID); err != nil {
 				return err
 			}
 		}
 	}
 
-	keep := make(map[string]bool, len(p.body.Resources))
-	for i := range p.body.Resources {
+	keep := make(map[string]bool, kept)
+	for i := range kept {
 		keep[lastv1alpha1.ManagedResourceName(intent, i)] = true
 	}
 	var list lastv1alpha1.ManagedResourceList
@@ -867,10 +871,10 @@ func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writ
 	for i := range list.Items {
 		mr := &list.Items[i]
 		owner := metav1.GetControllerOf(mr)
-		if owner == nil || owner.UID != types.UID(p.uid) || keep[mr.Name] {
+		if owner == nil || owner.UID != uid || keep[mr.Name] {
 			continue
 		}
-		if _, done := p.stale[mr.UID]; done {
+		if _, done := seen[mr.UID]; done {
 			continue
 		}
 		// The UID precondition deletes only the object listed, never one recreated under its name.
@@ -881,8 +885,8 @@ func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writ
 		if err != nil {
 			return fmt.Errorf("delete ManagedResource %s: %w", mr.Name, err)
 		}
-		slog.Info("Deleted ManagedResource the Update dropped", "intent", key, "name", mr.Name)
-		p.stale[mr.UID] = staleDeletion{name: mr.Name}
+		slog.Info("Deleted ManagedResource the Update dropped", "intent", entry.Intent, "name", mr.Name)
+		seen[mr.UID] = staleDeletion{name: mr.Name}
 		if err := record(mr.UID); err != nil {
 			return err
 		}

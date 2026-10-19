@@ -567,3 +567,123 @@ func TestAStaleDeletionIsAuditedWhenItsEntryFailed(t *testing.T) {
 		t.Fatalf("%d phase.end entries, want 1", n)
 	}
 }
+
+// sweptMRs returns the managedresource.deleted payloads written since entry
+// from, failing on any not written by the gateway under the executed subject.
+func (e *testEnv) sweptMRs(from int, stage lastv1alpha1.Stage, subject string) []map[string]string {
+	e.t.Helper()
+	var out []map[string]string
+	for _, en := range e.entries()[from:] {
+		if en.Type != audit.TypeManagedResourceDeleted {
+			continue
+		}
+		if en.Intent != envKey || en.Stage != string(stage) || en.SubjectHash != subject || en.Actor != sandbox.GatewayActor {
+			e.t.Fatalf("managedresource.deleted = %+v", en)
+		}
+		var p map[string]string
+		if err := json.Unmarshal(en.Payload, &p); err != nil {
+			e.t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// The record sweep deletes, and audits, the ManagedResources the Intent controls
+// beyond the executed plan's resources; any other ManagedResource stays.
+func TestTheSweepDeletesManagedResourcesBeyondTheExecutedPlan(t *testing.T) {
+	env, in := executedEnv(t)
+	env.createMRs(2)
+	before := len(env.entries())
+	env.g.sweepRecords(env.ctx)
+
+	env.wantMRs(0, 8, 9)
+	got := env.sweptMRs(before, lastv1alpha1.StageCreate, in.Status.Plan.Hash)
+	if want := []map[string]string{deletedPayload(1)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads = %v, want %v", got, want)
+	}
+	if !env.recordExists() {
+		t.Fatal("the sweep deleted the record of a live Intent")
+	}
+	// Nothing is left: the next sweep deletes and writes nothing.
+	before = len(env.entries())
+	env.g.sweepRecords(env.ctx)
+	if n := len(env.entries()) - before; n != 0 {
+		t.Fatalf("the second sweep wrote %d entries", n)
+	}
+}
+
+// A restart between EndPhase's record save and its deletions loses the phase
+// that would retry them; the new leader's sweep finishes them.
+func TestTheSweepFinishesAnUpdateCleanupCutShortByARestart(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(3)
+	h, steps := env.oneResourceUpdate()
+	env.g.crd = interceptor.NewClient(env.crd.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if obj.GetName() == lastv1alpha1.ManagedResourceName(envIntent, 2) {
+				return errors.New("api server unavailable")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase with a failing delete = %v, want Unavailable", err)
+	}
+	env.wantMRs(0, 2, 8, 9)
+
+	before := len(env.entries())
+	env.g = env.newGateway()
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 8, 9)
+	got := env.sweptMRs(before, lastv1alpha1.StageUpdate, h)
+	if want := []map[string]string{deletedPayload(2)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads from the sweep = %v, want %v", got, want)
+	}
+}
+
+// While a phase is open, in the record or only in memory, the sweep deletes
+// nothing: its operator may have created the next plan's ManagedResources.
+func TestTheSweepLeavesManagedResourcesWhileAPhaseIsOpen(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	fix := env.remediation("fix", nonce1)
+	if _, err := env.beginStage(lastv1alpha1.StageRemediate, fix); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 1, 8, 9)
+
+	// The record no longer shows the phase, but this process still holds it.
+	rec, err := env.g.state.Load(env.ctx, envKey, envIntentUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Open = nil
+	if err := env.g.saveRecord(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 1, 8, 9)
+	if n := env.countType(before, audit.TypeManagedResourceDeleted); n != 0 {
+		t.Fatalf("%d managedresource.deleted entries, want none", n)
+	}
+}
+
+func TestTheSweepSkipsTheManagedResourcesOfABusyIntent(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	unlock := env.g.locks.lock(envKey)
+	env.g.sweepRecords(env.ctx)
+	unlock()
+	env.wantMRs(0, 1, 8, 9)
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 8, 9)
+}

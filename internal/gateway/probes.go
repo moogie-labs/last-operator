@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -123,22 +124,32 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	return resp, nil
 }
 
-// executedBody decodes the record's executed plan. The record is canonical plan
-// JSON: it must still hash to the approved subject and decode with no unknown
-// field or trailing data. Every refusal is audited through d.
+// executedBody decodes the record's executed plan (parseExecuted). Every
+// refusal is audited through d.
 func executedBody(d denial, ex *ExecutedPlan) (plan.Body, error) {
+	body, err := parseExecuted(ex)
+	if err != nil {
+		return plan.Body{}, d.deny(codes.Internal, "%v", err)
+	}
+	return body, nil
+}
+
+// parseExecuted decodes the record's executed plan. The record is canonical plan
+// JSON: it must still hash to the approved subject and decode with no unknown
+// field or trailing data.
+func parseExecuted(ex *ExecutedPlan) (plan.Body, error) {
 	sum := sha256.Sum256([]byte(ex.Plan))
 	if got := "sha256:" + hex.EncodeToString(sum[:]); got != ex.PlanHash {
-		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: it hashes to %s", got)
+		return plan.Body{}, fmt.Errorf("executed plan record failed integrity check: it hashes to %s", got)
 	}
 	var body plan.Body
 	dec := json.NewDecoder(strings.NewReader(ex.Plan))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
-		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: %v", err)
+		return plan.Body{}, fmt.Errorf("executed plan record failed integrity check: %w", err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
+		return plan.Body{}, errors.New("executed plan record failed integrity check: trailing data after the plan")
 	}
 	return body, nil
 }

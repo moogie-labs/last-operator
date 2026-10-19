@@ -784,7 +784,16 @@ keeps the record and its executed plan. A record whose Intent went without a
 succeeded Delete (nothing executed, or the finalizer was removed by hand) is
 deleted by the leader's record sweep, at lead and then hourly: under the
 Intent's lock, and only with no open phase, when a live read finds the Intent
-gone or a recreated Intent of another UID holding the name.
+gone or a recreated Intent of another UID holding the name. When the live read
+instead finds the Intent with the record's UID, the record holds an executed
+plan, and no phase is open in the record or held in the gateway's memory, the
+sweep deletes the ManagedResources the Intent controls beyond the executed
+plan's resources, as EndPhase(Update, succeeded) does (§15): a restart between
+that EndPhase's record save and its deletions loses the phase that would
+retry them, and the sweep at lead finishes them. Each deletion is audited as
+`managedresource.deleted` under the executed plan's stage and subject, with
+the gateway as actor. The open-phase conditions keep the sweep from deleting
+a ManagedResource the next plan's operator has already created.
 
 `RunProbes` is authorized by that record alone: the executed plan of the
 Intent's current UID means an approved phase of it succeeded, which needs no
@@ -1616,7 +1625,8 @@ configuration.
   whose names are not among the new plan's (`<intent>-<i>`, one per
   resource). Each deletion is audited as `managedresource.deleted`, with
   the ManagedResource's name and UID and never its Secret's contents. A
-  failed or aborted Update deletes nothing.
+  failed or aborted Update deletes nothing. If a gateway restart cuts
+  those deletions short, the leader's record sweep (§8.3) finishes them.
 
 ## 16. Observability
 

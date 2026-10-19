@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -289,9 +290,11 @@ const recordSweepInterval = time.Hour
 
 // sweepRecords deletes the records no Intent owns any more: only a succeeded
 // Delete drops a record, so an Intent released without one (nothing executed,
-// a finalizer removed by hand) would leave its record behind. It runs in the
-// leader loop, so like flushIndexes it skips a busy Intent; the next sweep
-// retries. Failures are logged.
+// a finalizer removed by hand) would leave its record behind. For a record its
+// Intent still owns, it deletes the ManagedResources an Update dropped whose
+// cleanup a restart cut short (sweepStaleManagedResources). It runs at lead and
+// then hourly in the leader loop, so like flushIndexes it skips a busy Intent;
+// the next sweep retries. Failures are logged.
 func (g *Gateway) sweepRecords(ctx context.Context) {
 	recs, err := g.state.List(ctx)
 	if err != nil {
@@ -330,6 +333,8 @@ func (g *Gateway) sweepRecordLocked(ctx context.Context, key string) error {
 		return fmt.Errorf("gateway: read intent %s: %w", key, err)
 	case in.UID != "" && rec.IntentUID != "" && string(in.UID) != rec.IntentUID:
 		reason = "a recreated Intent holds the name"
+	case in.UID != "" && string(in.UID) == rec.IntentUID:
+		return g.sweepStaleManagedResources(ctx, key, ns, name, rec)
 	default:
 		return nil
 	}
@@ -341,6 +346,33 @@ func (g *Gateway) sweepRecordLocked(ctx context.Context, key string) error {
 	}
 	slog.Info("Deleted Intent record", "intent", key, "uid", rec.IntentUID, "reason", reason)
 	return nil
+}
+
+// sweepStaleManagedResources finishes the cleanup of a succeeded Update that a
+// gateway restart or leadership change cut short: EndPhase saved the Update as
+// the executed plan, then lost the phase that would have retried the deletions.
+// It deletes the ManagedResources the Intent controls beyond the executed plan's
+// resources, as EndPhase does, audited under the executed plan with the gateway
+// as actor. The caller holds the Intent's lock and has read the Intent live with
+// the record's UID and no open phase in the record. No phase of the Intent may
+// be held in memory either: an open phase's operator may already have created
+// the next plan's ManagedResources, and a succeeded Update still ending finishes
+// its own deletions on EndPhase retry.
+func (g *Gateway) sweepStaleManagedResources(ctx context.Context, key, ns, name string, rec *LoadedRecord) error {
+	if rec.Executed == nil || g.phases.get(key) != nil {
+		return nil
+	}
+	body, err := parseExecuted(rec.Executed)
+	if err != nil {
+		return err
+	}
+	w := g.writer.Load()
+	if w == nil {
+		return errors.New("gateway: no audit writer")
+	}
+	entry := audit.Draft{Actor: sandbox.GatewayActor, Intent: key, Stage: rec.Executed.Stage, SubjectHash: rec.Executed.PlanHash}
+	return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(rec.IntentUID), len(body.Resources),
+		map[types.UID]staleDeletion{})
 }
 
 // keyedMutex serializes work per key (per Intent).
