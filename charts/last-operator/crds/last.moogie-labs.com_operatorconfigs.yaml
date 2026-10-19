@@ -39,6 +39,20 @@ spec:
           spec:
             description: OperatorConfigSpec holds cluster defaults.
             properties:
+              approvals:
+                description: ApprovalsConfig configures how long an IntentApproval
+                  stays valid.
+                properties:
+                  maxAge:
+                    description: |-
+                      MaxAge is how old an IntentApproval may be and still authorize or deny.
+                      Defaults to 24h; between 1m and 720h.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: maxAge must be between 1m and 720h
+                      rule: duration(self) >= duration('1m') && duration(self) <=
+                        duration('720h')
+                type: object
               defaults:
                 description: IntentPolicySpec can only tighten OperatorConfig.defaults
                   (spec §6).

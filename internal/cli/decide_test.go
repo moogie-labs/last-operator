@@ -191,3 +191,16 @@ func TestDecisionsRefuseASubjectThatDoesNotHashToItsStatedHash(t *testing.T) {
 		}
 	}
 }
+
+func TestApproveSetsTheIntentUID(t *testing.T) {
+	in := plannedIntent()
+	c := fakeClient(in)
+	d, _ := depsFor(c, "")
+	if err := execute(d, "approve", in.Name); err != nil {
+		t.Fatal(err)
+	}
+	got := approvalsIn(t, c)
+	if len(got) != 1 || in.UID == "" || got[0].Spec.IntentUID != string(in.UID) {
+		t.Fatalf("approvals = %+v, want one carrying intent UID %q", got, in.UID)
+	}
+}

@@ -177,8 +177,8 @@ func intentWithPlan(t *testing.T, steps []lastv1alpha1.Command, resources ...las
 
 func approvalFor(name, subject string, decision lastv1alpha1.Decision, by string) *lastv1alpha1.IntentApproval {
 	return &lastv1alpha1.IntentApproval{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS, UID: types.UID(name + "-uid")},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: envIntent}, Stage: lastv1alpha1.StageCreate,
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS, UID: types.UID(name + "-uid"), CreationTimestamp: metav1.Now()},
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: envIntent}, IntentUID: envIntentUID, Stage: lastv1alpha1.StageCreate,
 			SubjectHash: subject, Decision: decision, ApprovedBy: by},
 	}
 }

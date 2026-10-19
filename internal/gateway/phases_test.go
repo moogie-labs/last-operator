@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
@@ -516,4 +517,80 @@ func TestInterruptedAndAbortedPhaseEndsCarryTheAuthorization(t *testing.T) {
 			t.Fatalf("aborted phase.end AuthorizedBy = %+v", e.AuthorizedBy)
 		}
 	})
+}
+
+func beginWith(t *testing.T, mutate func(in *lastv1alpha1.Intent) []runtime.Object, cfg *lastv1alpha1.OperatorConfig, at func(*testEnv)) error {
+	t.Helper()
+	in := intentWithPlan(t, twoSteps())
+	objs := append([]runtime.Object{in, cfg}, mutate(in)...)
+	env := newTestEnv(t, toClientObjects(objs)...)
+	if at != nil {
+		at(env)
+	}
+	_, err := env.begin(in.Status.Plan.Hash)
+	return err
+}
+
+func TestApprovalForAnotherUIDIsIgnored(t *testing.T) {
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+		a.Spec.IntentUID = "a-previous-intent"
+		return []runtime.Object{a}
+	}, allowAll(), nil)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), msgNoApproval) {
+		t.Fatalf("BeginPhase = %v, want %q", err, msgNoApproval)
+	}
+}
+
+func TestStaleApprovalIsIgnored(t *testing.T) {
+	cfg := allowAll()
+	cfg.Spec.Approvals = &lastv1alpha1.ApprovalsConfig{MaxAge: &metav1.Duration{Duration: time.Hour}}
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		a := approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)
+		a.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+		return []runtime.Object{a}
+	}, cfg, nil)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), msgNoApproval) {
+		t.Fatalf("BeginPhase = %v, want %q", err, msgNoApproval)
+	}
+}
+
+func TestApprovalAgesWithTheGatewayClockAndDefaultsTo24h(t *testing.T) {
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)}
+	}, allowAll(), func(e *testEnv) {
+		e.g.builds.now = func() time.Time { return time.Now().Add(23 * time.Hour) }
+	})
+	if err != nil {
+		t.Fatalf("23h-old approval refused under the 24h default: %v", err)
+	}
+	err = beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver)}
+	}, allowAll(), func(e *testEnv) {
+		e.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("25h-old approval: BeginPhase = %v, want refused", err)
+	}
+}
+
+func TestDenyForAnotherUIDIsIgnored(t *testing.T) {
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		d := approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+		d.Spec.IntentUID = "a-previous-intent"
+		return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver), d}
+	}, allowAll(), nil)
+	if err != nil {
+		t.Fatalf("a foreign-UID Deny stopped a valid Approve: %v", err)
+	}
+}
+
+func TestDenyForThisUIDWins(t *testing.T) {
+	err := beginWith(t, func(in *lastv1alpha1.Intent) []runtime.Object {
+		return []runtime.Object{approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver),
+			approvalFor("no", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")}
+	}, allowAll(), nil)
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "denies") {
+		t.Fatalf("BeginPhase = %v, want a denial", err)
+	}
 }

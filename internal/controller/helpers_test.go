@@ -80,9 +80,18 @@ func editRequest(key types.NamespacedName, request string) {
 	})).To(Succeed())
 }
 
+// intentUID returns the live UID of the Intent at key, which approvals must name.
+func intentUID(key types.NamespacedName) string {
+	var in lastv1alpha1.Intent
+	if err := k8sClient.Get(ctx, key, &in); err != nil {
+		return "no-such-intent" // a decision about an Intent that does not exist names no live UID
+	}
+	return string(in.UID)
+}
+
 func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject string, decision lastv1alpha1.Decision) {
 	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, Stage: stage,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: intentUID(key), Stage: stage,
 			SubjectHash: subject, Decision: decision, ApprovedBy: "alice"}}
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }
@@ -226,7 +235,7 @@ func setInSync(ns, name string, s metav1.ConditionStatus) {
 // approveCommand files a decision on a discovery command, as kubectl last does.
 func approveCommand(key types.NamespacedName, subject string, decision lastv1alpha1.Decision, reason string) {
 	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, Stage: lastv1alpha1.StageDiscovery,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: intentUID(key), Stage: lastv1alpha1.StageDiscovery,
 			SubjectHash: subject, Decision: decision, ApprovedBy: "alice", Reason: reason}}
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }

@@ -225,17 +225,41 @@ func checkPlanPolicy(eff policy.Effective, b plan.Body) error {
 	return nil
 }
 
+// defaultApprovalMaxAge is how long an approval counts when OperatorConfig sets no approvals.maxAge.
+const defaultApprovalMaxAge = 24 * time.Hour
+
+// clock is the gateway's time source, the one the image builds use, so tests age approvals.
+func (g *Gateway) clock() time.Time {
+	if g.builds != nil && g.builds.now != nil {
+		return g.builds.now()
+	}
+	return time.Now()
+}
+
 // findApproval returns the approving IntentApproval for the subject. Any matching
 // Deny wins over every Approve (errApprovalDenied, with the denying object).
-func (g *Gateway) findApproval(ctx context.Context, ns, name string, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+	op, err := g.operatorConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	maxAge := defaultApprovalMaxAge
+	if op != nil && op.Spec.Approvals != nil && op.Spec.Approvals.MaxAge != nil {
+		maxAge = op.Spec.Approvals.MaxAge.Duration
+	}
+	cutoff := g.clock().Add(-maxAge)
 	var list lastv1alpha1.IntentApprovalList
-	if err := g.crd.List(ctx, &list, client.InNamespace(ns)); err != nil {
+	if err := g.crd.List(ctx, &list, client.InNamespace(intent.Namespace)); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "list IntentApprovals: %v", err)
 	}
 	var found *lastv1alpha1.IntentApproval
 	for i := range list.Items {
 		a := &list.Items[i]
-		if a.Spec.IntentRef.Name != name || a.Spec.Stage != stage || a.Spec.SubjectHash != subject {
+		if a.Spec.IntentRef.Name != intent.Name || a.Spec.Stage != stage || a.Spec.SubjectHash != subject {
+			continue
+		}
+		// A foreign-UID or stale decision, Deny included, is ignored.
+		if a.Spec.IntentUID != string(intent.UID) || a.CreationTimestamp.Time.Before(cutoff) {
 			continue
 		}
 		if a.Spec.Decision == lastv1alpha1.DecisionDeny {
@@ -249,6 +273,15 @@ func (g *Gateway) findApproval(ctx context.Context, ns, name string, stage lastv
 		}
 	}
 	return found, nil
+}
+
+// findApprovalFor is findApproval for a caller that holds only the Intent's key.
+func (g *Gateway) findApprovalFor(ctx context.Context, ns, name string, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+	var intent lastv1alpha1.Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
+		return nil, notFoundOr(err, "intent")
+	}
+	return g.findApproval(ctx, &intent, stage, subject)
 }
 
 // verifyPlan checks that the Intent's plan is encodable, bounded, valid and the
@@ -411,7 +444,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := checkPlanPolicy(eff, body); err != nil {
 		return nil, d.deny(codes.PermissionDenied, "%v", err)
 	}
-	approval, err := g.findApproval(ctx, ns, name, stage, subject)
+	approval, err := g.findApproval(ctx, &intent, stage, subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		return nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))

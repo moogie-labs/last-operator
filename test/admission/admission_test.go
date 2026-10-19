@@ -112,7 +112,8 @@ func grantApprovers(t *testing.T, admin client.Client) {
 
 func approval(name, by string) *lastv1alpha1.IntentApproval {
 	return &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: approvalsNS},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: "web"}, Stage: lastv1alpha1.StageCreate,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: "web"}, IntentUID: "uid-web",
+			Stage:       lastv1alpha1.StageCreate,
 			SubjectHash: "sha256:" + strings.Repeat("a", 64), Decision: lastv1alpha1.DecisionApprove, ApprovedBy: by}}
 }
 

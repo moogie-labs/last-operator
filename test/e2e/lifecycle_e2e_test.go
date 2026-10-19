@@ -150,7 +150,7 @@ func TestGatewayLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	create(&lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{Name: "web-create", Namespace: lifecycleNS},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: "web"}, Stage: lastv1alpha1.StageCreate,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: "web"}, IntentUID: string(intent.UID), Stage: lastv1alpha1.StageCreate,
 			SubjectHash: hash, Decision: lastv1alpha1.DecisionApprove, ApprovedBy: review.Status.UserInfo.Username}})
 
 	// Call the deployed gateway as the operator.

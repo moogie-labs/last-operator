@@ -43,6 +43,15 @@ type RegistryConfig struct {
 	External *ExternalRegistry `json:"external,omitempty"`
 }
 
+// ApprovalsConfig configures how long an IntentApproval stays valid.
+type ApprovalsConfig struct {
+	// MaxAge is how old an IntentApproval may be and still authorize or deny.
+	// Defaults to 24h; between 1m and 720h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1m') && duration(self) <= duration('720h')",message="maxAge must be between 1m and 720h"
+	// +optional
+	MaxAge *metav1.Duration `json:"maxAge,omitempty"`
+}
+
 // ImagesConfig configures automatic image builds.
 // +kubebuilder:validation:XValidation:rule="!has(self.buildTimeout) || duration(self.buildTimeout) <= duration('30m')",message="buildTimeout must be at most 30m"
 type ImagesConfig struct {
@@ -92,6 +101,8 @@ type OperatorConfigSpec struct {
 	Probes *ProbeLimits `json:"probes,omitempty"`
 	// +optional
 	Suggestions *SuggestionsConfig `json:"suggestions,omitempty"`
+	// +optional
+	Approvals *ApprovalsConfig `json:"approvals,omitempty"`
 	// +optional
 	Defaults *IntentPolicySpec `json:"defaults,omitempty"`
 }

@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -82,7 +83,7 @@ func depsFor(c client.Client, input string) (Deps, *bytes.Buffer) {
 }
 
 func testIntent(name string, change func(*lastv1alpha1.Intent)) *lastv1alpha1.Intent {
-	in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+	in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID("uid-" + name)},
 		Spec: lastv1alpha1.IntentSpec{Request: "run nginx"}}
 	if change != nil {
 		change(in)

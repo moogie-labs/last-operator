@@ -78,6 +78,7 @@ func TestManagedResourceKeepsFreeFormDesiredState(t *testing.T) {
 func validApproval() *lastv1alpha1.IntentApproval {
 	return &lastv1alpha1.IntentApproval{ObjectMeta: meta(), Spec: lastv1alpha1.IntentApprovalSpec{
 		IntentRef:   lastv1alpha1.LocalRef{Name: "web"},
+		IntentUID:   "uid-web",
 		Stage:       lastv1alpha1.StageCreate,
 		SubjectHash: validHash,
 		Decision:    lastv1alpha1.DecisionApprove,

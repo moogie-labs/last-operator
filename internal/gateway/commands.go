@@ -117,7 +117,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 		return nil, d.deny(codes.PermissionDenied, "policy: %v", err)
 	}
-	approval, err := g.findApproval(ctx, ns, name, p.stage, p.subject)
+	approval, err := g.findApprovalFor(ctx, ns, name, p.stage, p.subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true

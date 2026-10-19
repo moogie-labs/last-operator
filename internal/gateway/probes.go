@@ -65,7 +65,7 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
 	}
 	// The approval must still stand: a Deny after execution stops the probes too.
-	approval, err := g.findApproval(ctx, ns, name, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash)
+	approval, err := g.findApproval(ctx, &existing, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash)
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", approval.Name)

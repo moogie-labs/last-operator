@@ -90,7 +90,7 @@ func decide(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, 
 	}
 	a := &lastv1alpha1.IntentApproval{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: in.Name + "-" + strings.ToLower(string(stage)) + "-", Namespace: in.Namespace},
-		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: in.Name}, Stage: stage,
+		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: in.Name}, IntentUID: string(in.UID), Stage: stage,
 			SubjectHash: subject, Decision: decision, Reason: reason, ApprovedBy: user},
 	}
 	if err := k.Client.Create(ctx, a); err != nil {

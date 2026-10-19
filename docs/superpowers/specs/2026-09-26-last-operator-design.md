@@ -319,6 +319,7 @@ starts an **Update** planning cycle.
 kind: IntentApproval
 spec:
   intentRef: { name: team-x-web }
+  intentUID: "0b1c…"             # the Intent's metadata.uid; required
   stage: Create                  # Discovery | Create | Update | Remediate | Delete
   subjectHash: "sha256:…"        # plan hash, or pendingCommand hash for Discovery
   decision: Approve              # Approve | Deny
@@ -333,8 +334,12 @@ spec:
   to approve). The gateway re-checks both when it uses an approval.
 - Who may approve is decided by RBAC: `create` on `intentapprovals` in
   that namespace.
-- An approval is valid only for the matching `(intent, stage,
-  subjectHash)`.
+- An approval is valid only for the matching `(intent, intentUID, stage,
+  subjectHash)`. An approval for a deleted and recreated Intent of the
+  same name names another UID and authorizes nothing. It also expires:
+  the gateway ignores an approval older than `approvals.maxAge`
+  (OperatorConfig, default 24h) by its `creationTimestamp`. Both rules
+  hold for a `Deny` too: a foreign or stale Deny is ignored.
 - A `Deny` on a discovery command is returned to the agent. The agent
   may propose a different command, ask a clarifying question, or give
   up with a reason.
@@ -421,6 +426,8 @@ spec:
     buildTimeout: 15m           # per build; at most 30m
     maxConcurrentBuilds: 2      # 1 to 8
     unusedRetention: 30d        # delete images not referenced by any live plan for this long
+  approvals:
+    maxAge: 24h                 # an IntentApproval older than this is ignored; 1m to 720h
   probes:
     minInterval: 1m             # floor; no layer may go below it
   suggestions:

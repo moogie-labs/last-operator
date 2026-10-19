@@ -75,6 +75,12 @@ spec:
                 required:
                 - name
                 type: object
+              intentUID:
+                description: |-
+                  IntentUID is the UID of the Intent this decision is for. An approval for a
+                  deleted and recreated Intent of the same name authorizes nothing.
+                minLength: 1
+                type: string
               reason:
                 type: string
               stage:
@@ -96,6 +102,7 @@ spec:
             - approvedBy
             - decision
             - intentRef
+            - intentUID
             - stage
             - subjectHash
             type: object

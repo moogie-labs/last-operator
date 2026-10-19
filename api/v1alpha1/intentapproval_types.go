@@ -17,7 +17,11 @@ const (
 // IntentApprovalSpec binds a human decision to exactly one approval subject.
 type IntentApprovalSpec struct {
 	IntentRef LocalRef `json:"intentRef"`
-	Stage     Stage    `json:"stage"`
+	// IntentUID is the UID of the Intent this decision is for. An approval for a
+	// deleted and recreated Intent of the same name authorizes nothing.
+	// +kubebuilder:validation:MinLength=1
+	IntentUID string `json:"intentUID"`
+	Stage     Stage  `json:"stage"`
 	// SubjectHash is the plan hash, or the pending command hash for Discovery.
 	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
 	SubjectHash string   `json:"subjectHash"`
