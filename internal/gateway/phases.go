@@ -489,22 +489,55 @@ func (g *Gateway) closePredecessorPhase(ctx context.Context, w *audit.Writer, ke
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if stale.Open == nil || stale.IntentUID == "" || stale.IntentUID == uid {
+	if stale.IntentUID == "" || stale.IntentUID == uid {
 		return nil
 	}
-	return g.closeInterrupted(ctx, w, key, stale)
+	if stale.Open == nil {
+		return g.flushPredecessorIndex(ctx, key)
+	}
+	// Never wait for a running step of the predecessor while holding the Intent's
+	// lock; refuse before writing anything, as RunCommand and EndPhase do.
+	var held *phase
+	if p := g.phases.get(key); p != nil {
+		if !p.mu.TryLock() {
+			return status.Error(codes.Aborted, "a step of the previous Intent's phase is still running; retry")
+		}
+		held = p
+		defer p.mu.Unlock()
+	}
+	if err := g.closeOpen(ctx, w, key, stale, held); err != nil {
+		return err
+	}
+	return g.flushPredecessorIndex(ctx, key)
+}
+
+// flushPredecessorIndex saves pending index entries, which still belong to the
+// predecessor, into its record so the reset folds them into the truncation floor.
+func (g *Gateway) flushPredecessorIndex(ctx context.Context, key string) error {
+	if err := g.saveIndexLocked(ctx, key); err != nil {
+		return status.Errorf(codes.Unavailable, "could not save the audit index: %v", err)
+	}
+	return nil
 }
 
 // closeInterrupted ends a phase that an earlier gateway process opened. Its
 // subject stays in Used, so the same plan never runs twice without replanning.
 func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord) error {
+	return g.closeOpen(ctx, w, key, rec, nil)
+}
+
+// closeOpen is closeInterrupted; held is the key's in-memory phase when the
+// caller already holds its mutex, nil when closeOpen should take it.
+func (g *Gateway) closeOpen(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord, held *phase) error {
 	open := *rec.Open
 	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: open.Stage,
 		SubjectHash: open.SubjectHash, AuthorizedBy: open.Auth, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
 			Reason: "the gateway restarted or lost leadership during the phase"}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
 	}
-	if p := g.phases.get(key); p != nil {
+	if held != nil {
+		held.closed = true
+	} else if p := g.phases.get(key); p != nil {
 		p.mu.Lock()
 		p.closed = true
 		p.mu.Unlock()

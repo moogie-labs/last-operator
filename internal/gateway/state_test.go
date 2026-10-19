@@ -8,9 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -19,8 +23,9 @@ import (
 )
 
 const (
-	testHashA  = "sha256:a"
-	testOldUID = "old-uid"
+	testHashA        = "sha256:a"
+	testOldUID       = "old-uid"
+	testRecreatedUID = "recreated"
 )
 
 func TestStateStoreRoundTrip(t *testing.T) {
@@ -366,5 +371,73 @@ func TestLeadClosesInterruptedPhases(t *testing.T) {
 	}
 	if r, _ := ie.g.state.LoadAny(ctx, "team-x/idle"); r.cm.ResourceVersion != idleBefore.cm.ResourceVersion {
 		t.Fatal("a record with no open phase must not be rewritten")
+	}
+}
+
+func TestBeginPhaseDoesNotWaitForAPredecessorsRunningStep(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	ctx := context.Background()
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := env.g.state.LoadAny(ctx, envKey)
+	rec.IntentUID = testOldUID
+	if err := env.g.state.Save(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	p.mu.Lock() // a step of the old phase is running
+	before := len(env.entries())
+	if _, err := env.begin(h); status.Code(err) != codes.Aborted {
+		t.Fatalf("BeginPhase = %v, want Aborted", err)
+	}
+	if len(env.entries()) != before {
+		t.Fatal("an entry was written while the old step ran")
+	}
+	p.mu.Unlock()
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase after the step ended = %v", err)
+	}
+}
+
+func TestARecreatedIntentDoesNotSeeThePredecessorsPendingIndex(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	ctx := context.Background()
+	if _, err := env.begin(h); err != nil { // the index is not flushed
+		t.Fatal(err)
+	}
+	var cur lastv1alpha1.Intent
+	if err := env.crd.Get(ctx, client.ObjectKeyFromObject(in), &cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.UID = testRecreatedUID
+	if err := env.crd.Update(ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	// The approval is the old Intent's, so approve again for the new UID.
+	fresh := approvalFor("ok2", h, lastv1alpha1.DecisionApprove, approver)
+	fresh.Spec.IntentUID = testRecreatedUID
+	if err := env.crd.Create(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase for the recreated Intent = %v", err)
+	}
+	resp, err := env.query(&gatewayv1.QueryAuditRequest{Intent: &gatewayv1.IntentRef{Namespace: envNS, Name: envIntent}})
+	if err != nil || !resp.Truncated {
+		t.Fatalf("QueryAudit = %+v, %v; want truncated", resp, err)
+	}
+	ends := phaseEndsFor(env, envKey)
+	if len(ends) != 1 {
+		t.Fatalf("%d phase.end entries, want the predecessor's interrupted one", len(ends))
+	}
+	for _, e := range resp.Entries {
+		if e.GetSeq() <= ends[0].Seq { // the predecessor's phase.begin and interrupted phase.end
+			t.Fatalf("predecessor entry %d served to the recreated Intent", e.GetSeq())
+		}
 	}
 }

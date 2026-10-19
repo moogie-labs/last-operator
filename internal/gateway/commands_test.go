@@ -496,7 +496,7 @@ func TestRunCommandRefusesWhenTheApprovalIsForAnotherUID(t *testing.T) {
 	if err := env.crd.Get(env.ctx, client.ObjectKeyFromObject(in), &cur); err != nil {
 		t.Fatal(err)
 	}
-	cur.UID = "recreated"
+	cur.UID = testRecreatedUID
 	if err := env.crd.Update(env.ctx, &cur); err != nil {
 		t.Fatal(err)
 	}
