@@ -101,10 +101,27 @@ teardown completes:
   `kubectl annotate intent web -n team-x last.moogie-labs.com/retry=2 --overwrite`.
 - **Nothing to tear down.** An Intent that never executed, or whose plan has no
   teardown commands, is released at once. The latter raises a Warning
-  `NoTeardown` event.
+  `NoTeardown` event. So does an Intent whose Create plan ran some steps and then
+  failed: nothing executed, so nothing is torn down, and a Warning
+  `PartialCreateNotTornDown` event names the plan and how many steps ran.
+- **Waiting.** While the audit log or the API server cannot say what the Intent
+  executed, the deletion waits and retries, with a Warning `TeardownBlocked`
+  event saying why.
 
 Removing the finalizer by hand lets the Intent go without a teardown. What it
 created stays in the world.
+
+## Upgrading to M5a
+
+- **Approvals name the Intent's UID now.** An IntentApproval made before M5a has
+  no `intentUID`, so it authorizes nothing new. An Intent still waiting for
+  approval needs approving again with this `kubectl last`. Probes of an Intent
+  that already executed keep running: the gateway's own record of the executed
+  plan authorizes them, with no standing approval.
+- **Approvals expire** after `approvals.maxAge` in OperatorConfig (default 24h).
+- **Older Intents have no finalizer.** An Intent created before M5a is not
+  torn down when you delete it; what it created stays. To have one torn down,
+  recreate it under M5a.
 
 ## Demo against Claude (opt-in)
 

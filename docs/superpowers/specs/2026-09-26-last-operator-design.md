@@ -342,6 +342,9 @@ spec:
   the gateway ignores an approval older than `approvals.maxAge`
   (OperatorConfig, default 24h) by its `creationTimestamp`. Both rules
   hold for a `Deny` too: a foreign or stale Deny is ignored.
+- The operator and the gateway each age approvals by their own clock. An
+  approval at the `maxAge` boundary can therefore be accepted by the operator
+  and then refused by the gateway; the Intent then waits for a new approval.
 - Probes are the exception: an executed plan's probes need no standing
   approval and never expire. The gateway runs them on its own record that
   the plan's approved phase succeeded (§8.3), so they keep running after
