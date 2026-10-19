@@ -4,7 +4,11 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/images"
 )
 
 // uniqueInstall is an install whose spec hash is fresh for this run.
@@ -130,6 +135,10 @@ func TestImageGCReclaimsUnusedImages(t *testing.T) {
 		}
 	}
 
+	// B's manifest and every blob it lists survived, read through the front proxy
+	// from the registry's storage rather than from a node's image cache.
+	assertImageInRegistry(t, buildDigest(t, hashB))
+
 	// B is still Ready and its probes still pass after the GC.
 	gcAt, err := time.Parse(audit.TimeFormat, result.TS)
 	if err != nil {
@@ -163,6 +172,92 @@ func TestImageGCReclaimsUnusedImages(t *testing.T) {
 		t.Errorf("rebuilt spec hash = %s, want A's %s", got, hashA)
 	}
 	verifyAuditChain(t)
+}
+
+// buildDigest returns the digest of the one successful build of specHash.
+func buildDigest(t *testing.T, specHash string) string {
+	t.Helper()
+	var digest string
+	for _, e := range auditEntries(t, "") {
+		if p := payloadOf(e); e.Type == audit.TypeImageBuildResult && p["specHash"] == specHash && p["outcome"] == "succeeded" {
+			digest, _ = p["digest"].(string)
+		}
+	}
+	if digest == "" {
+		t.Fatalf("no successful image.build.result for spec hash %s", specHash)
+	}
+	return digest
+}
+
+// assertImageInRegistry checks, through a port-forward to the bundled front proxy
+// (anonymous GET/HEAD), that the manifest digest and every manifest, config and
+// layer blob it references answer HEAD 200.
+func assertImageInRegistry(t *testing.T, digest string) {
+	t.Helper()
+	base := "http://" + portForward(t, "last-registry", "svc/last-registry-front", "5000") + "/v2/" + images.ImagesRepo
+	accept := strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json", "application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.docker.distribution.manifest.v2+json",
+	}, ", ")
+	do := func(method, url string) (int, []byte) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), method, url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Accept", accept)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, url, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, url, err)
+		}
+		return resp.StatusCode, body
+	}
+	type descriptor struct {
+		Digest string `json:"digest"`
+	}
+	var blobs int
+	var check func(manifest string)
+	check = func(manifest string) {
+		t.Helper()
+		if code, _ := do(http.MethodHead, base+"/manifests/"+manifest); code != http.StatusOK {
+			t.Fatalf("HEAD manifest %s = %d after GC, want 200", manifest, code)
+		}
+		code, body := do(http.MethodGet, base+"/manifests/"+manifest)
+		if code != http.StatusOK {
+			t.Fatalf("GET manifest %s = %d after GC, want 200", manifest, code)
+		}
+		var m struct {
+			Manifests []descriptor `json:"manifests"`
+			Config    *descriptor  `json:"config"`
+			Layers    []descriptor `json:"layers"`
+		}
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("manifest %s: %v", manifest, err)
+		}
+		for _, child := range m.Manifests {
+			check(child.Digest)
+		}
+		refs := m.Layers
+		if m.Config != nil {
+			refs = append(refs, *m.Config)
+		}
+		for _, b := range refs {
+			if code, _ := do(http.MethodHead, base+"/blobs/"+b.Digest); code != http.StatusOK {
+				t.Fatalf("HEAD blob %s of %s = %d after GC, want 200", b.Digest, manifest, code)
+			}
+			blobs++
+		}
+	}
+	check(digest)
+	if blobs == 0 {
+		t.Fatalf("manifest %s lists no blobs", digest)
+	}
+	t.Logf("B's manifest %s and its %d blobs answer HEAD 200 through the front proxy after GC", digest, blobs)
 }
 
 // setRetention sets images.unusedRetention and restores the previous value in cleanup.
