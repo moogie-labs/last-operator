@@ -102,6 +102,19 @@ func eventReasons(key types.NamespacedName, typ string) []string {
 	return out
 }
 
+// eventNotes returns the notes of the Events about the Intent with reason.
+func eventNotes(key types.NamespacedName, reason string) []string {
+	var list eventsv1.EventList
+	Expect(k8sClient.List(ctx, &list, client.InNamespace(key.Namespace))).To(Succeed())
+	var out []string
+	for _, e := range list.Items {
+		if e.Regarding.Name == key.Name && e.Reason == reason {
+			out = append(out, e.Note)
+		}
+	}
+	return out
+}
+
 func countOf(calls []string, call string) int {
 	n := 0
 	for _, c := range calls {
@@ -181,7 +194,60 @@ var _ = Describe("Intent deletion", func() {
 			deleteIntent(key)
 			Eventually(gone(key)).Should(BeTrue())
 			Expect(gw.calls(key)).To(Equal([]string{callLLM}))
+			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonPartialCreateNotTornDown))
 		})
+
+		It("when its failed Create ran no step, without a warning", func() {
+			failing := []lastv1alpha1.Command{argvStep("s1", "false")}
+			gw.setScript(key, &script{exit: map[string]int32{"s1": 1}, llm: turns(answer(failing), answer([]lastv1alpha1.Command{s1}))})
+			createIntent(key, "run web")
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			approve(key, lastv1alpha1.DecisionApprove)
+			Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{s1})))
+
+			deleteIntent(key)
+			Eventually(gone(key)).Should(BeTrue())
+			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonPartialCreateNotTornDown))
+		})
+	})
+
+	It("warns when it releases an Intent whose failed Create ran steps", func() {
+		partial := []lastv1alpha1.Command{s1, argvStep("s2", "false")}
+		gw.setScript(key, &script{exit: map[string]int32{"s2": 1}, llm: turns(answer(partial), answer([]lastv1alpha1.Command{t1}))})
+		createIntent(key, "run web")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		approve(key, lastv1alpha1.DecisionApprove)
+		Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{t1})))
+
+		deleteIntent(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(deleteRequests(key)).To(BeEmpty(), "nothing executed, so there is nothing to order")
+		Eventually(func() []string { return eventNotes(key, ReasonPartialCreateNotTornDown) }).Should(ConsistOf(
+			"Create plan " + hashOf(partial) + " ran 1 steps and did not succeed; nothing was torn down"))
+	})
+
+	It("holds the release of an Intent that never executed while the audit log cannot be read", func() {
+		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1}))})
+		createIntent(key, "run web")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		// The executed-plan read scans phase.begin, then phase.end; the partial-Create
+		// read scans phase.end again: fail only that second phase.end read.
+		previous := ""
+		gw.updateScript(key, func(s *script) {
+			s.queryHook = func(types []string) error {
+				typ := strings.Join(types, ",")
+				defer func() { previous = typ }()
+				if typ == "phase.end" && previous == "phase.end" {
+					return status.Error(codes.Unavailable, "audit log unavailable")
+				}
+				return nil
+			}
+		})
+		deleteIntent(key)
+		Consistently(gone(key)).Should(BeFalse())
+		gw.updateScript(key, func(s *script) { s.queryHook = nil })
+		setRetry(key, "poke")
+		Eventually(gone(key)).Should(BeTrue())
 	})
 
 	It("tears down an executed Intent through an approved Delete plan", func() {

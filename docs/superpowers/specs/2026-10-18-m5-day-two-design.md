@@ -61,7 +61,7 @@ Probes follow an adaptive interval with jitter and a floor.
 ### 3.4 Delete
 - **Finalizer (D7):** added in `startPlanning` before the first Create phase begins.
 - **On a deletion timestamp:**
-  - with no executed plan, remove the finalizer;
+  - with no executed plan, remove the finalizer. When the audit log holds a Create `phase.end` that did not succeed but records `stepsRun > 0`, the release also emits a Warning event (`PartialCreateNotTornDown`) naming the plan and the steps run, since what those steps created is not torn down;
   - otherwise go to Planning with stage `Delete`.
 - **Delete planning:** the model gets the teardown commands (from D3, in resource order) and returns a plan whose steps order them, with `resources: []`.
 - **Operator checks:** before recording, the operator verifies that the steps are a permutation of the teardown commands. If they aren't, the model gets a correction (the M4b identical-replan mechanism).

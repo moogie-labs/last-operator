@@ -160,6 +160,28 @@ func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (pla
 	return body, hash, true, nil
 }
 
+// PartialCreate reports the newest Create phase that did not succeed but ran
+// steps, which may have created something: the subject of its phase.end and the
+// stepsRun it records. A truncated index gives what it still holds. Gateway
+// errors are returned unchanged.
+func PartialCreate(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (subject string, stepsRun int, found bool, err error) {
+	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
+		var end struct {
+			Outcome  string `json:"outcome"`
+			StepsRun int    `json:"stepsRun"`
+		}
+		if e.GetStage() != string(lastv1alpha1.StageCreate) || json.Unmarshal(e.GetPayload(), &end) != nil ||
+			end.Outcome == outcomeSucceeded || end.StepsRun <= 0 {
+			return
+		}
+		subject, stepsRun, found = e.GetSubjectHash(), end.StepsRun, true
+	})
+	if err != nil {
+		return "", 0, false, err
+	}
+	return subject, stepsRun, found, nil
+}
+
 // ErrNoReload means the audit log no longer holds the whole planning session,
 // so it cannot be rebuilt.
 var ErrNoReload = errors.New("agent: the conversation cannot be reloaded")

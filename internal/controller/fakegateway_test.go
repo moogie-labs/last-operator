@@ -68,9 +68,11 @@ type script struct {
 
 	interrupt map[string]bool // step ID → the gateway restarts before it: the phase ends as interrupted, once
 
-	beginErr       error // returned by BeginPhase once the call is recorded
-	queryErr       error // returned by QueryAudit
-	auditTruncated bool  // QueryAudit reports that the index dropped entries
+	beginErr error // returned by BeginPhase once the call is recorded
+	queryErr error // returned by QueryAudit
+	// queryHook, when set, is called with each QueryAudit call's types; an error it returns is the call's.
+	queryHook      func(types []string) error
+	auditTruncated bool // QueryAudit reports that the index dropped entries
 }
 
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
@@ -94,6 +96,7 @@ type fakeGateway struct {
 	openStage map[types.NamespacedName]string                       // stage of the open phase
 	openBegin map[types.NamespacedName]uint64                       // phase.begin sequence number of the open phase
 	openUID   map[types.NamespacedName]types.UID                    // Intent UID the open phase belongs to
+	openSteps map[types.NamespacedName]int                          // steps of the open phase that succeeded
 	tornDown  map[types.NamespacedName]types.UID                    // Intent UID whose Delete succeeded
 	used      map[string]bool                                       // Discovery subjects already opened: they are single-use
 	executed  map[types.NamespacedName]string                       // hash of the last executed plan
@@ -106,7 +109,7 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		llmReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{}, argv: map[types.NamespacedName]map[string][]string{},
 		outputs: map[types.NamespacedName]map[string]map[string]string{}, open: map[types.NamespacedName]string{},
 		openStage: map[types.NamespacedName]string{}, openBegin: map[types.NamespacedName]uint64{},
-		openUID: map[types.NamespacedName]types.UID{}, tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
+		openUID: map[types.NamespacedName]types.UID{}, openSteps: map[types.NamespacedName]int{}, tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
 }
 
@@ -367,6 +370,9 @@ func (f *fakeGateway) RunCommand(ctx context.Context, in *gatewayv1.RunCommandRe
 	}
 	f.appendAudit(key, "command.result", f.openStage[key], in.GetSubjectHash(),
 		map[string]any{"exitCode": res.ExitCode, "stdout": res.Stdout, "stderr": res.Stderr})
+	if res.ExitCode == 0 {
+		f.openSteps[key]++
+	}
 	return &gatewayv1.RunCommandResponse{Result: res}, nil
 }
 
@@ -425,8 +431,9 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 // closePhase ends the Intent's open phase with its phase.end entry. f.mu must be held.
 func (f *fakeGateway) closePhase(key types.NamespacedName, outcome, reason string) {
 	f.appendAudit(key, "phase.end", f.openStage[key], f.open[key],
-		map[string]any{"beginSeq": f.openBegin[key], "outcome": outcome, "reason": reason})
+		map[string]any{"beginSeq": f.openBegin[key], "outcome": outcome, "reason": reason, "stepsRun": f.openSteps[key]})
 	delete(f.open, key)
+	delete(f.openSteps, key)
 	delete(f.openStage, key)
 	delete(f.openBegin, key)
 	delete(f.openUID, key)
@@ -534,6 +541,11 @@ func (f *fakeGateway) QueryAudit(_ context.Context, in *gatewayv1.QueryAuditRequ
 	s := f.scriptFor(key)
 	if s.queryErr != nil {
 		return nil, s.queryErr
+	}
+	if s.queryHook != nil {
+		if err := s.queryHook(in.GetTypes()); err != nil {
+			return nil, err
+		}
 	}
 	limit := int(in.GetLimit())
 	if limit == 0 {

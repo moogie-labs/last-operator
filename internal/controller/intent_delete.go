@@ -71,7 +71,7 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 	}
 	switch {
 	case td.source == teardownNone:
-		return ctrl.Result{}, r.release(ctx, in, "Nothing ever executed")
+		return ctrl.Result{}, r.releaseUnexecuted(ctx, in, "Nothing ever executed")
 	case len(td.commands) == 0:
 		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonNoTeardown, "Teardown", "%s",
 			"What the Intent created has no teardown commands; nothing was torn down")
@@ -150,7 +150,10 @@ func (r *IntentReconciler) planTeardown(ctx context.Context, in *lastv1alpha1.In
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(td.commands) == 0 {
+	switch {
+	case td.source == teardownNone:
+		return ctrl.Result{}, r.releaseUnexecuted(ctx, in, "Nothing left to tear down")
+	case len(td.commands) == 0:
 		return ctrl.Result{}, r.release(ctx, in, "Nothing left to tear down")
 	}
 	first, err := agent.TeardownMessage(agent.Teardown{Namespace: in.Namespace, Name: in.Name, Text: in.Spec.Request,
@@ -345,6 +348,24 @@ func (r *IntentReconciler) release(ctx context.Context, in *lastv1alpha1.Intent,
 	r.sessions.drop(key)
 	logf.FromContext(ctx).Info("Released Intent", "reason", why)
 	return nil
+}
+
+// releaseUnexecuted releases an Intent with no executed plan and no
+// ManagedResources (D6). A Create phase that ran steps and then failed may still
+// have created something no teardown covers, so the release warns about it. An
+// audit read error is returned, so the release is retried, never skipped.
+func (r *IntentReconciler) releaseUnexecuted(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
+	subject, steps, found, err := agent.PartialCreate(ctx, r.Gateway, intentRef(in))
+	if err != nil {
+		return err
+	}
+	if found {
+		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonPartialCreateNotTornDown, "Teardown",
+			"Create plan %s ran %d steps and did not succeed; nothing was torn down", subject, steps)
+		logf.FromContext(ctx).Info("Found a failed Create plan that ran steps; nothing was torn down",
+			"plan", subject, "stepsRun", steps)
+	}
+	return r.release(ctx, in, why)
 }
 
 // ensureFinalizer adds the teardown finalizer before the Intent's first Create

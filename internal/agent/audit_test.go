@@ -276,3 +276,37 @@ func TestExecutedPlanReturnsGatewayErrors(t *testing.T) {
 		t.Error("ExecutedPlan hid a gateway error")
 	}
 }
+
+// endedPhase returns a phase.end of stage for subject that ran stepsRun steps.
+func endedPhase(seq uint64, stage, subject, outcome string, stepsRun int) *gatewayv1.AuditEntry {
+	return entry(seq, audit.TypePhaseEnd, stage, subject, map[string]any{"beginSeq": seq - 1, "outcome": outcome, "stepsRun": stepsRun})
+}
+
+func TestPartialCreateIsTheNewestCreateThatRanStepsAndFailed(t *testing.T) {
+	a := &fakeAuditor{pageSize: 1, entries: []*gatewayv1.AuditEntry{
+		endedPhase(2, "Create", "sha256:one", "failed", 2),
+		endedPhase(4, "Create", "sha256:two", "interrupted", 1),
+		endedPhase(6, "Create", "sha256:three", "failed", 0),
+		endedPhase(8, "Discovery", "sha256:d", "failed", 1),
+		endedPhase(10, "Delete", "sha256:del", "failed", 1),
+	}}
+	subject, steps, found, err := PartialCreate(context.Background(), a, ref)
+	if err != nil || !found || subject != "sha256:two" || steps != 1 {
+		t.Errorf("PartialCreate = %q, %d, found %v, err %v; want sha256:two after 1 step", subject, steps, found, err)
+	}
+}
+
+func TestPartialCreateNotFound(t *testing.T) {
+	for name, a := range map[string]*fakeAuditor{
+		"none":        {},
+		"no step ran": {entries: []*gatewayv1.AuditEntry{endedPhase(2, "Create", "sha256:one", "failed", 0)}},
+		"succeeded":   {entries: []*gatewayv1.AuditEntry{endedPhase(2, "Create", "sha256:one", outcomeSucceeded, 1)}},
+	} {
+		if _, _, found, err := PartialCreate(context.Background(), a, ref); found || err != nil {
+			t.Errorf("%s: PartialCreate = found %v, err %v, want not found", name, found, err)
+		}
+	}
+	if _, _, _, err := PartialCreate(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref); err == nil {
+		t.Error("PartialCreate hid a gateway error")
+	}
+}
