@@ -136,10 +136,32 @@ treat it as a security incident.
 The gateway keeps each built image's last-used time. Once a day
 (`gateway.imageGCInterval`) it deletes images unused for longer than
 `OperatorConfig.spec.images.unusedRetention` (default 30 days) that no Intent
-plan or ManagedResource still references, pausing builds while it runs and
-auditing every deletion. With the bundled registry, the `registry-gc` sidecar
+plan or ManagedResource still references, auditing every deletion. With the
+bundled registry, it pauses builds while it runs, and the `registry-gc` sidecar
 then reclaims the blobs' disk space. External registries: GC deletes the
-manifests, but blob storage relies on the registry's own lifecycle policy.
+manifests without pausing builds, and blob storage relies on the registry's own
+lifecycle policy.
+
+Every chart upgrade recreates the bundled registry pod, because the GC
+sidecar's image follows the chart's tag. Expect a short registry outage, or up
+to 25 minutes if a garbage collection is running when the pod stops.
+
+## External registry
+
+With `registry.mode: external`, the push and pull Secrets
+(`kubernetes.io/dockerconfigjson`, in `last-gateway`) are yours to keep fresh.
+ECR tokens expire every 12 hours, so run something that rewrites both Secrets
+before then (a CronJob, External Secrets). The gateway reads the push Secret on
+every image resolve and re-copies the pull Secret before every run when it
+changed, so no restart is needed.
+
+For Docker Hub, name the repository `index.docker.io/<namespace>/<name>`. The
+`auths` key may be `index.docker.io` or the standard
+`https://index.docker.io/v1/`; a `docker.io/...` repository matches neither.
+
+Providers can't mount the push or pull Secret while `registry.external` names
+it. Once you remove `registry.external` or point it at other Secrets, the old
+ones are ordinary Secrets again; delete them once nothing uses them.
 
 ## Checking the bundled registry
 

@@ -1064,6 +1064,19 @@ is deleted.
 - **Distribution v3** (CNCF, the reference OCI registry) stores images
   on a PVC. It has no authentication of its own. A NetworkPolicy
   allows ingress only from the front proxy.
+- **No blob descriptor cache.** The image's default config caches blob
+  descriptors in memory. `registry garbage-collect` runs in the GC
+  sidecar's process, so it cannot clear that cache: the registry would
+  keep answering `HEAD` 200 for freed blobs and accept manifests that
+  reference them, and BuildKit skips uploading a blob that answers 200.
+  The chart sets `REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR` to an empty
+  value on the registry container, which turns the cache off
+  ("caching disabled" in its log).
+- **Upgrades restart the registry.** The GC sidecar's image follows the
+  chart's tag, so every chart upgrade recreates the registry pod. Pushes
+  and pulls fail for the few seconds the pod takes to restart. If a GC
+  is running, the sidecar waits up to 25 minutes for it before the pod
+  stops, so the outage can last that long.
 - **Front proxy.** nginx with per-method basic auth, the approach
   Distribution's docs recommend:
   - `GET`/`HEAD` are anonymous;
@@ -1113,7 +1126,8 @@ is deleted.
   1. Write `image.gc.start`
      `{"retention", "candidates": [specHash...]}`.
   2. Pause new builds (they queue) and wait for running builds to
-     finish.
+     finish. This happens only with the bundled registry: an external
+     one has no sidecar to protect, so its builds go on.
   3. For each candidate that is still unused:
      - drop it from the image index;
      - delete its manifest through the front proxy with the admin
@@ -1121,17 +1135,29 @@ is deleted.
      - write `image.deleted`
        `{"specHash", "digest", "registryDeleted": bool, "error"}`.
 
-     A failed DELETE is recorded there, and the run goes on.
+     A failed DELETE is recorded there, and the run goes on. A DELETE
+     that times out ends this step: the remaining candidates stay in
+     the index, untouched, for the next run.
   4. Call the **GC sidecar** in the registry pod: `POST /gc` with the
-     admin credential, waiting up to 30 minutes. It shares the PVC,
-     runs `registry garbage-collect`, answers
+     admin credential, waiting up to 31 minutes. It shares the PVC,
+     runs `registry garbage-collect` for at most 30 minutes, answers
      `{"bytesFreed", "log"}` (the gateway reads at most 1 MiB of it),
-     and is reachable only from the gateway.
+     and is reachable only from the gateway. A failed run answers 500
+     with `{"bytesFreed", "log", "error"}`; the gateway records the
+     bytes freed before the failure as well as the error.
+     The run is tied to the request: if the gateway stops waiting (its
+     timeout, a step-down, a rollout), the sidecar kills the run, so it
+     never sweeps while builds upload. An interrupted run is safe; the
+     next one collects what it left. On SIGTERM the sidecar waits up to
+     25 minutes for a running GC.
      The chart sets `LAST_REGISTRY_GC_URL` only for the bundled
      registry; without it there is no call and no bytes are freed.
   5. Resume builds.
   6. Write `image.gc.result`
-     `{"deleted", "bytesFreed", "sidecarError", "durationMs"}`.
+     `{"deleted", "kept", "deferred", "bytesFreed", "sidecarError", "durationMs"}`.
+     `kept` counts candidates that were used after the run started,
+     which stay in the index. `deferred` counts candidates left for the
+     next run after a DELETE timed out.
 
   The gateway writes all three entry types, with no Intent.
 - **Builds resume on every path.** That includes a failed DELETE, a
@@ -1141,8 +1167,9 @@ is deleted.
 - **A resolve never receives a deleted digest.** The entry leaves the
   index *before* its manifest is deleted (the reverse of the M4 design's
   order, deliberately).
-  - A resolve that finds the entry gone builds the image again. The
-    build waits for the pause, so it starts after GC.
+  - A resolve that finds the entry gone builds the image again. With
+    the bundled registry the build waits for the pause, so it starts
+    after GC.
   - A resolve that used the entry before the drop made it used again.
     GC then keeps it.
 - **Pulls continue throughout,** as do resolves of images still
@@ -1183,9 +1210,20 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
   for the registry host is `FailedPrecondition` naming
   `registry.external.pushSecretRef`, audited as a `policy.denied` on
   `RunCommand` and `RunProbes`. A config's credential for a host is its
-  exact `auths` key if there is one; otherwise the keys that normalise
-  to the host (`https://host`, `host/v1/`), in sorted order. Two of
-  them holding different credentials is an error.
+  exact `auths` key if that key holds one; otherwise the keys that
+  normalise to the host (`https://host`, `host/v1/`), in sorted order.
+  Two of them holding different credentials is an error.
+- **Docker Hub.** Name the repository `index.docker.io/<namespace>/<name>`.
+  Its `auths` key may be `index.docker.io` or the standard
+  `https://index.docker.io/v1/`, which normalises to it. A
+  `docker.io/...` repository has the host `docker.io`, which neither key
+  matches.
+- **Credential rotation.** The gateway never refreshes a credential.
+  ECR's push and pull tokens expire every 12 hours, so something outside
+  last-operator (a CronJob, External Secrets) must rewrite both Secrets
+  before then. The gateway reads the push Secret on every resolve and
+  compares the pull Secret's copy before every run, so a rewritten
+  Secret takes effect without a restart.
 - **Runs** use `<repository>@<digest>`. The gateway checks manifests
   with HEAD, using the push credential over HTTPS. The HEAD cache is
   keyed by registry, repository and digest.
@@ -1195,10 +1233,11 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
   host are upgraded to HTTPS (so on-premises registries at private
   addresses work); plain HTTP to any other host, such as a token realm,
   is refused.
-- **No Provider may mount a registry credential.** `last-registry-admin`,
-  `last-registry-pusher` and the Secrets `pushSecretRef` and
-  `pullSecretRef` name (whatever the mode) are refused like the audit
-  Secrets.
+- **No Provider may mount a registry credential.** `last-registry-admin`
+  and `last-registry-pusher` are refused like the audit Secrets. So are
+  the Secrets `pushSecretRef` and `pullSecretRef` name, in either mode,
+  but only while `registry.external` names them: once it is removed or
+  names other Secrets, a Provider may mount the old ones.
 - **Pull Secret.** Before every sandbox run in external mode, the
   gateway copies `pullSecretRef` to `last-sandbox/last-registry-pull`.
   It creates the copy, or deletes and recreates it when it differs, so
@@ -1214,7 +1253,8 @@ repository in ECR, GHCR, Harbor, or similar. `pushSecretRef` and
   `UNSUPPORTED`. GC then records `image.deleted` with
   `registryDeleted: false` and the refusal in `error`, and the entry
   still leaves the index; the registry's own lifecycle policy reclaims
-  the storage. There is no sidecar call, so `bytesFreed` is 0.
+  the storage. There is no sidecar call, so `bytesFreed` is 0, and
+  builds are not paused.
 - **Switching modes** needs no migration. Each index entry records the
   `host/repo` it was pushed to (`registry`; absent means the bundled
   front host and `last/images`, as for entries written before external
