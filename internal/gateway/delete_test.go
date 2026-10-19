@@ -556,3 +556,96 @@ func TestDeleteRetryNeverRecreatesARecordAlreadyDeleted(t *testing.T) {
 		t.Fatalf("the retry created the record again (%d creates, exists=%v)", creates()-before, env.recordExists())
 	}
 }
+
+// failFirstRecordDelete makes the first record delete fail; when ambiguous, the
+// API server deletes the record but the answer is lost.
+func (e *testEnv) failFirstRecordDelete(ambiguous bool) {
+	var fail atomic.Bool
+	fail.Store(true)
+	e.kube.PrependReactor("delete", "configmaps", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if !fail.CompareAndSwap(true, false) {
+			return false, nil, nil
+		}
+		if ambiguous {
+			da := a.(k8stesting.DeleteAction)
+			if err := e.kube.Tracker().Delete(da.GetResource(), da.GetNamespace(), da.GetName()); err != nil {
+				e.t.Error(err)
+			}
+		}
+		return true, nil, errors.New("connection reset")
+	})
+}
+
+func TestNoPhaseOpensWhileATornDownRecordIsDropped(t *testing.T) {
+	for _, ambiguous := range []bool{false, true} {
+		t.Run(map[bool]string{false: "delete failed", true: "delete answer lost"}[ambiguous], func(t *testing.T) {
+			env, _ := executedEnv(t)
+			steps := teardownCommands()
+			h := env.startDelete(steps)
+			env.approve(deleteApproval("teardown", h))
+			env.runDelete(h, steps)
+			env.failFirstRecordDelete(ambiguous)
+			if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+				t.Fatalf("first EndPhase = %v, want Unavailable", err)
+			}
+			// An index flush in between saves into a record that is still there, and
+			// never recreates one already deleted.
+			env.indexedEntry()
+			env.g.flushIndexes(context.Background())
+			if rec, err := env.g.state.LoadAny(context.Background(), envKey); err != nil || env.recordExists() == ambiguous ||
+				(!ambiguous && (len(rec.Index) == 0 || rec.Index[len(rec.Index)-1].Type != audit.TypeLLMRequest)) {
+				t.Fatalf("record after a flush = %+v (exists=%v), %v", rec.IntentRecord, env.recordExists(), err)
+			}
+			_, err := env.beginStage(lastv1alpha1.StageDelete, h)
+			env.wantDenied(err, codes.FailedPrecondition)
+			pc := pendingCommand(t, discoveryCommand(), "nonce-mid-drop")
+			env.setPending(pc)
+			env.approve(discoveryApproval("look", pc.Hash, lastv1alpha1.DecisionApprove))
+			_, err = env.beginStage(lastv1alpha1.StageDiscovery, pc.Hash)
+			env.wantDenied(err, codes.FailedPrecondition)
+			if _, err := env.end(h, true); err != nil {
+				t.Fatalf("retried EndPhase = %v", err)
+			}
+			if env.recordExists() {
+				t.Fatal("the record survived the retried EndPhase")
+			}
+		})
+	}
+}
+
+func TestDeleteRetryClearsTheOpenPhaseWhenItCannotDropTheRecord(t *testing.T) {
+	env, _ := executedEnv(t)
+	steps := teardownCommands()
+	h := env.startDelete(steps)
+	env.approve(deleteApproval("teardown", h))
+	env.runDelete(h, steps)
+	var failSave atomic.Bool
+	failSave.Store(true)
+	env.kube.PrependReactor("update", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failSave.CompareAndSwap(true, false) {
+			return true, nil, errors.New("etcd unavailable")
+		}
+		return false, nil, nil
+	})
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first EndPhase = %v, want Unavailable", err)
+	}
+	env.failFirstRecordDelete(false)
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("retried EndPhase = %v, want Unavailable", err)
+	}
+	rec, err := env.g.state.LoadAny(context.Background(), envKey)
+	if err != nil || rec.Open != nil {
+		t.Fatalf("record after the retry = %+v, %v; want no open phase", rec.IntentRecord, err)
+	}
+	env.g = env.newGateway()
+	if err := env.g.closeInterruptedPhases(env.ctx, env.g.writer.Load()); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range env.entries() {
+		var p phaseEnd
+		if e.Type == audit.TypePhaseEnd && e.SubjectHash == h && json.Unmarshal(e.Payload, &p) == nil && p.Outcome == outcomeInterrupted {
+			t.Fatal("a restart interrupted a Delete that already succeeded")
+		}
+	}
+}

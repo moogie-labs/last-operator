@@ -644,9 +644,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 			return nil, d.deny(codes.FailedPrecondition, "this phase already ended as %s", p.outcome)
 		}
 		if p.stage == lastv1alpha1.StageDelete && p.outcome == outcomeSucceeded {
-			// A retry of a succeeded Delete only drops the record: an earlier deletion may
-			// have gone through unanswered, and saving first would recreate it.
-			if err := g.dropRecord(ctx, key, p.uid); err != nil {
+			if err := g.retryTeardown(ctx, key, p.uid); err != nil {
 				return nil, status.Errorf(codes.Unavailable, "%v", err)
 			}
 			g.phases.remove(key)
@@ -662,13 +660,9 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	if p.endSeq == 0 {
-		end, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(p.stage),
-			SubjectHash: p.subject, AuthorizedBy: p.auth,
-			Payload: phaseEnd{BeginSeq: p.beginSeq, Outcome: want, Reason: truncateReason(req.GetReason()), StepsRun: p.next}})
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+		if err := g.endOpenPhase(ctx, w, actor, key, p, want, req.GetReason()); err != nil {
+			return nil, err
 		}
-		p.endSeq, p.outcome, p.closed = end.Seq, want, true
 	}
 	rec.Open = nil
 	// A Discovery phase ran one inspection command, and a Delete phase only tears
@@ -686,7 +680,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	if p.outcome == outcomeSucceeded && p.stage == lastv1alpha1.StageDelete {
-		if err := g.dropRecord(ctx, key, p.uid); err != nil {
+		if err := g.dropRecord(ctx, key); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "%v", err)
 		}
 	}
@@ -694,16 +688,55 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 	return &gatewayv1.EndPhaseResponse{EndSeq: p.endSeq}, nil
 }
 
+// endOpenPhase writes the phase's phase.end and marks it closed; the caller holds
+// p.mu and the Intent's lock.
+func (g *Gateway) endOpenPhase(ctx context.Context, w *audit.Writer, actor, key string, p *phase, outcome, reason string) error {
+	end, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: actor, Intent: key, Stage: string(p.stage),
+		SubjectHash: p.subject, AuthorizedBy: p.auth,
+		Payload: phaseEnd{BeginSeq: p.beginSeq, Outcome: outcome, Reason: truncateReason(reason), StepsRun: p.next}})
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
+	}
+	p.endSeq, p.outcome, p.closed = end.Seq, outcome, true
+	if outcome == outcomeSucceeded && p.stage == lastv1alpha1.StageDelete {
+		// From the teardown's phase.end on, no phase opens for the Intent, even
+		// while dropping its record fails and EndPhase is retried.
+		g.tornDown.Store(key, p.uid)
+	}
+	return nil
+}
+
 // dropRecord deletes the record of an Intent whose teardown succeeded, with the
-// index entries still pending for it, and remembers its UID so that no later
-// index flush recreates the record. The caller holds the Intent's lock, which
-// every record writer takes; phase.end is already in the audit log, the source
-// of truth the record only indexes.
-func (g *Gateway) dropRecord(ctx context.Context, key, uid string) error {
+// index entries still pending for it. EndPhase already stored the Intent's UID
+// in tornDown, so no later index flush recreates the record. The caller holds
+// the Intent's lock, which every record writer takes; phase.end is already in
+// the audit log, the source of truth the record only indexes.
+func (g *Gateway) dropRecord(ctx context.Context, key string) error {
 	if err := g.state.Delete(ctx, key); err != nil {
 		return err
 	}
-	g.tornDown.Store(key, uid)
 	g.index.take(key)
 	return nil
+}
+
+// retryTeardown finishes a succeeded Delete whose record save or drop failed. A
+// record still there is saved without its open phase first, so a restart never
+// interrupts the ended phase; one already gone (an earlier deletion went through
+// unanswered) is never saved, which would recreate it. A record a recreated
+// Intent now owns is left alone.
+func (g *Gateway) retryTeardown(ctx context.Context, key, uid string) error {
+	rec, err := g.state.LoadAny(ctx, key)
+	if err != nil {
+		return err
+	}
+	if rec.cm != nil && rec.IntentUID != uid {
+		return nil
+	}
+	if rec.cm != nil && rec.Open != nil {
+		rec.Open = nil
+		if err := g.saveRecord(ctx, rec); err != nil {
+			return err
+		}
+	}
+	return g.dropRecord(ctx, key)
 }
