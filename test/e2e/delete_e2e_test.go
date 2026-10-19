@@ -271,7 +271,11 @@ data: {greeting: hello}
 	})
 
 	// The Delete phase is in the chain, after the Create phase, and the chain verifies.
-	types := intentEntryTypes(t, ns+"/web")
+	entries := auditEntries(t, ns+"/web")
+	var types []string
+	for _, e := range entries {
+		types = append(types, e.Type)
+	}
 	want := []string{audit.TypeApprovalObserved, audit.TypePhaseBegin, audit.TypeCommandResult, audit.TypePhaseEnd,
 		audit.TypeLLMRequest, audit.TypeLLMResponse,
 		audit.TypeApprovalObserved, audit.TypePhaseBegin,
@@ -279,6 +283,32 @@ data: {greeting: hello}
 		audit.TypeCommandStart, audit.TypeCommandResult, audit.TypePhaseEnd}
 	if !containsInOrder(types, want) {
 		t.Fatalf("chain entries for the intent = %v, want %v in order", types, want)
+	}
+	// The newest phase.begin is the Delete phase, for the Delete plan, and its phase.end succeeded.
+	var begin *audit.Entry
+	for i := range entries {
+		if entries[i].Type == audit.TypePhaseBegin {
+			begin = &entries[i]
+		}
+	}
+	if begin == nil || begin.Stage != string(lastv1alpha1.StageDelete) || begin.SubjectHash != wantDelete {
+		t.Fatalf("newest phase.begin = %+v, want stage Delete for %s", begin, wantDelete)
+	}
+	var end *audit.Entry
+	for i := range entries {
+		var p struct {
+			BeginSeq uint64 `json:"beginSeq"`
+			Outcome  string `json:"outcome"`
+		}
+		if entries[i].Type == audit.TypePhaseEnd && json.Unmarshal(entries[i].Payload, &p) == nil && p.BeginSeq == begin.Seq {
+			end = &entries[i]
+			if p.Outcome != "succeeded" {
+				t.Fatalf("the Delete phase.end (seq %d) has outcome %q, want succeeded", end.Seq, p.Outcome)
+			}
+		}
+	}
+	if end == nil {
+		t.Fatalf("no phase.end for the Delete phase.begin at seq %d", begin.Seq)
 	}
 	verifyAuditChain(t)
 }

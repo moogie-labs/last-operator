@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,15 +20,19 @@ import (
 // the operator states for it: the pending discovery command in
 // AwaitingDiscoveryApproval, the plan in AwaitingApproval. Only verifiedSubject
 // makes it something to show or decide.
+// approvablePlanStages are the stages this CLI knows how to put a plan to the
+// user for. Any other stage is refused, never approved as Create.
+var approvablePlanStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageDelete}
+
 func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	switch {
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
 		return lastv1alpha1.StageDiscovery, in.Status.PendingCommand.Hash, true
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingApproval && in.Status.Plan != nil:
-		if in.Status.Stage == lastv1alpha1.StageUpdate || in.Status.Stage == lastv1alpha1.StageDelete {
-			return in.Status.Stage, in.Status.Plan.Hash, true
+		if in.Status.Stage == "" {
+			return lastv1alpha1.StageCreate, in.Status.Plan.Hash, true // an Intent from before stages were recorded
 		}
-		return lastv1alpha1.StageCreate, in.Status.Plan.Hash, true
+		return in.Status.Stage, in.Status.Plan.Hash, true
 	}
 	return "", "", false
 }
@@ -42,6 +47,10 @@ func verifiedSubject(in *lastv1alpha1.Intent) (stage lastv1alpha1.Stage, hash st
 	stage, stated, ok := subjectOf(in)
 	if !ok {
 		return "", "", false, nil
+	}
+	if stage != lastv1alpha1.StageDiscovery && !slices.Contains(approvablePlanStages, stage) {
+		return stage, stated, true, fmt.Errorf("intent %s/%s: the plan is for stage %s, which this kubectl-last cannot approve "+
+			"(is kubectl-last as new as the operator?)", in.Namespace, in.Name, clean(string(stage)))
 	}
 	hash, err = verifyHash(in, stage)
 	if err != nil {

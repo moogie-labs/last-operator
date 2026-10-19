@@ -38,20 +38,26 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 	asked := map[string]bool{}  // subjects already put to the user, decided or left pending
 	warned := map[string]bool{} // stated hashes whose content did not hash to them
 	var last lastv1alpha1.Phase
-	seen := false // the Intent has been read at least once
+	var prev *lastv1alpha1.Intent // the last Intent read
 	for {
 		var in lastv1alpha1.Intent
 		if err := k.Client.Get(ctx, key, &in); err != nil {
 			switch {
 			case ctx.Err() != nil:
 				return stopped(d.Out, key)
-			case seen && apierrors.IsNotFound(err):
-				writef(d.Out, "Intent %s/%s torn down.\n", key.Namespace, key.Name)
+			case prev != nil && apierrors.IsNotFound(err):
+				// Only an Intent that was being deleted and tearing down went through its teardown.
+				// Any other disappearance (a force delete, a finalizer removed by hand) may have left resources behind.
+				if prev.DeletionTimestamp != nil && prev.Status.Phase == lastv1alpha1.PhaseTearingDown {
+					writef(d.Out, "Intent %s/%s torn down.\n", key.Namespace, key.Name)
+				} else {
+					writef(d.Out, "Intent %s/%s was deleted.\n", key.Namespace, key.Name)
+				}
 				return nil
 			}
 			return err
 		}
-		seen = true
+		prev = in.DeepCopy()
 		if phaseOf(&in) != last {
 			printStatus(d.Out, &in)
 			last = phaseOf(&in)

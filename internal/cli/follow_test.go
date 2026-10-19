@@ -276,21 +276,54 @@ func TestFollowEndsAtDrifted(t *testing.T) {
 	}
 }
 
+// vanishes plays the API server and operator for a followed Intent: the first
+// pauses apply status (the Intent being deleted with the finalizer held, if
+// deleting), and the last removes the Intent, as a released finalizer or a
+// force delete would.
+func vanishes(t *testing.T, c client.Client, status func(*lastv1alpha1.Intent), deleting bool) func(context.Context) error {
+	t.Helper()
+	calls := 0
+	return func(ctx context.Context) error {
+		calls++
+		var in lastv1alpha1.Intent
+		if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: webName}, &in); err != nil {
+			return err
+		}
+		switch calls {
+		case 1:
+			if deleting {
+				in.Finalizers = []string{"last.moogie-labs.com/teardown"}
+				if err := c.Update(ctx, &in); err != nil {
+					return err
+				}
+				if err := c.Delete(ctx, &in); err != nil {
+					return err
+				}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(&in), &in); err != nil {
+					return err
+				}
+			}
+			status(&in)
+			return c.Status().Update(ctx, &in)
+		case 2:
+			if !deleting {
+				return c.Delete(ctx, &in)
+			}
+			in.Finalizers = nil
+			return c.Update(ctx, &in)
+		}
+		return errors.New("the follow loop did not finish")
+	}
+}
+
 func TestFollowEndsWhenTheIntentIsTornDown(t *testing.T) {
 	c := fakeClient()
 	d, out := depsFor(c, "")
-	w := &world{t: t, c: c, steps: []step{{apply: func(in *lastv1alpha1.Intent) {
+	d.Wait = vanishes(t, c, func(in *lastv1alpha1.Intent) {
 		in.Status.Stage = lastv1alpha1.StageDelete
 		in.Status.Phase = lastv1alpha1.PhaseTearingDown
 		setReady(in, "TearingDown", "Running the teardown")
-	}}}}
-	d.Wait = func(ctx context.Context) error {
-		if len(w.steps) > 0 {
-			return w.wait(ctx)
-		}
-		in := testIntent(webName, nil)
-		return client.IgnoreNotFound(c.Delete(ctx, in)) // the finalizer is released, the Intent goes
-	}
+	}, true)
 	if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
 		t.Fatalf("kubectl last = %v\n%s", err, out)
 	}
@@ -298,6 +331,33 @@ func TestFollowEndsWhenTheIntentIsTornDown(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFollowDoesNotClaimATeardownForAnIntentThatJustVanished(t *testing.T) {
+	for name, tc := range map[string]struct {
+		deleting bool
+		status   func(*lastv1alpha1.Intent)
+	}{
+		"deleted before the teardown, then the finalizer removed by hand": {true, func(in *lastv1alpha1.Intent) {
+			in.Status.Stage = lastv1alpha1.StageDelete
+			in.Status.Phase = lastv1alpha1.PhasePlanning
+		}},
+		"not being deleted": {false, func(in *lastv1alpha1.Intent) {
+			in.Status.Phase = lastv1alpha1.PhaseTearingDown // not deleted, so not a teardown
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fakeClient()
+			d, out := depsFor(c, "")
+			d.Wait = vanishes(t, c, tc.status, tc.deleting)
+			if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
+				t.Fatalf("kubectl last = %v\n%s", err, out)
+			}
+			if !strings.HasSuffix(out.String(), "Intent team-x/web was deleted.\n") || strings.Contains(out.String(), "torn down") {
+				t.Errorf("output:\n%s", out)
+			}
+		})
 	}
 }
 

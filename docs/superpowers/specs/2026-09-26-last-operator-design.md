@@ -552,7 +552,8 @@ Pending → Clarifying ⇄ (user answers)
   surface at creation time instead of as false drift later.
 - **Delete.** A finalizer, `last.moogie-labs.com/teardown`, is added
   before the first Create and holds the Intent until its teardown
-  completes. A deletion overrides everything else (§4.3).
+  completes. A deletion overrides everything else: any open phase is
+  aborted and the Intent starts Delete.
   - **Start.** The operator aborts any open phase and reads the
     executed plan from the audit log: the plan in the newest
     `phase.begin` of stage Create or Update whose `phase.end` succeeded,
