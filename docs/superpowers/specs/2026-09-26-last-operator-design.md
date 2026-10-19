@@ -792,8 +792,13 @@ plan's resources, as EndPhase(Update, succeeded) does (§15): a restart between
 that EndPhase's record save and its deletions loses the phase that would
 retry them, and the sweep at lead finishes them. Each deletion is audited as
 `managedresource.deleted` under the executed plan's stage and subject, with
-the gateway as actor. The open-phase conditions keep the sweep from deleting
-a ManagedResource the next plan's operator has already created.
+the gateway as actor. A ManagedResource already being deleted is neither
+deleted nor audited again, and none is deleted while the audit writer is
+broken. The open-phase conditions keep the sweep from deleting a
+ManagedResource the next plan's operator has already created, with one
+exception: a phase interrupted by a restart is closed at lead, so the sweep
+can delete a ManagedResource its operator was still creating. That operator's
+EndPhase is then refused and its run fails, so no executed plan loses one.
 
 `RunProbes` is authorized by that record alone: the executed plan of the
 Intent's current UID means an approved phase of it succeeded, which needs no
@@ -1624,9 +1629,13 @@ configuration.
   is the executed plan. They are the ManagedResources the Intent controls
   whose names are not among the new plan's (`<intent>-<i>`, one per
   resource). Each deletion is audited as `managedresource.deleted`, with
-  the ManagedResource's name and UID and never its Secret's contents. A
-  failed or aborted Update deletes nothing. If a gateway restart cuts
-  those deletions short, the leader's record sweep (§8.3) finishes them.
+  the ManagedResource's name and UID and never its Secret's contents. If
+  the operator moves on before its EndPhase retry finishes them, the next
+  BeginPhase for the Intent does, its Delete included; if a gateway
+  restart cuts them short, the leader's record sweep (§8.3) does.
+  EndPhase deletes nothing for a failed or aborted Update; the ManagedResources
+  it created beyond the executed plan's resources are removed by the
+  leader's record sweep.
 
 ## 16. Observability
 

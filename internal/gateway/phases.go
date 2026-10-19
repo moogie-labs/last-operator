@@ -587,7 +587,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, err
 		}
 	}
-	if err := g.checkEnding(d, key, string(intent.UID)); err != nil {
+	if err := g.finishEnding(ctx, w, actor, key, ns, name, string(intent.UID)); err != nil {
 		return nil, err
 	}
 	if err := checkReplay(d, rec, &intent, stage, subject); err != nil {
@@ -639,17 +639,30 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
 }
 
-// checkEnding refuses a phase while the Intent's succeeded Update still has
-// stale ManagedResources to delete. Its record is saved without the open phase,
-// but the phase stays in memory until its EndPhase retry finishes; a new phase
-// would replace it and leave them behind. The caller holds the Intent's lock,
-// under which endSeq and outcome are written.
-func (g *Gateway) checkEnding(d denial, key, uid string) error {
+// finishEnding finishes the cleanup of the Intent's succeeded Update before a
+// new phase opens. Such an Update is saved as the executed plan without its open
+// phase, but stays in memory while stale ManagedResources are left to delete; a
+// new phase would replace it and leave them behind. Its operator may have moved
+// on (an EndPhase(failed) for the Intent's deletion is refused as already
+// succeeded), so BeginPhase does the work rather than wait for an EndPhase retry
+// that may never come. A step-holder of the phase answers Aborted and a failed
+// deletion Unavailable; the operator retries both. The caller holds the
+// Intent's lock, under which endSeq and outcome are written, and has checked
+// that the record has no open phase.
+func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string) error {
 	p := g.phases.get(key)
 	if p == nil || p.endSeq == 0 || p.outcome != outcomeSucceeded || p.stage != lastv1alpha1.StageUpdate || p.uid != uid {
 		return nil
 	}
-	return d.deny(codes.AlreadyExists, "the previous phase (subject %s) is still ending; its EndPhase must be retried", p.subject)
+	if !p.mu.TryLock() {
+		return status.Error(codes.Aborted, "the previous phase is still ending; retry")
+	}
+	defer p.mu.Unlock()
+	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
+		return status.Errorf(codes.Unavailable, "finish the cleanup of the previous Update (subject %s): %v", p.subject, err)
+	}
+	g.phases.remove(key)
+	return nil
 }
 
 // closePredecessorPhase ends the open phase of a record that belongs to another
@@ -874,8 +887,12 @@ func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writ
 		if owner == nil || owner.UID != uid || keep[mr.Name] {
 			continue
 		}
-		if _, done := seen[mr.UID]; done {
-			continue
+		if _, done := seen[mr.UID]; done || mr.DeletionTimestamp != nil {
+			continue // already deleted: a finalizer may hold it, and it is never audited twice
+		}
+		// Never delete what could not be audited.
+		if w.Broken() {
+			return errors.New("the audit writer is broken; no ManagedResource is deleted unaudited")
 		}
 		// The UID precondition deletes only the object listed, never one recreated under its name.
 		err := g.crd.Delete(ctx, mr, client.Preconditions{UID: &mr.UID})

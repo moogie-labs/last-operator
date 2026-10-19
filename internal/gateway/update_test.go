@@ -495,11 +495,6 @@ func TestStaleManagedResourceDeletionIsRetried(t *testing.T) {
 	if got := env.executed(); got.PlanHash != h {
 		t.Fatalf("executed = %s, want the Update %s", got.PlanHash, h)
 	}
-	// No phase opens while the Update's EndPhase has work left.
-	fix := env.remediation("fix", nonce1)
-	_, err = env.beginStage(lastv1alpha1.StageRemediate, fix)
-	env.wantDenied(err, codes.AlreadyExists)
-
 	if _, err := env.end(h, true); err != nil {
 		t.Fatalf("EndPhase retry = %v", err)
 	}
@@ -686,4 +681,119 @@ func TestTheSweepSkipsTheManagedResourcesOfABusyIntent(t *testing.T) {
 	env.wantMRs(0, 1, 8, 9)
 	env.g.sweepRecords(env.ctx)
 	env.wantMRs(0, 8, 9)
+}
+
+// failMRDeletes makes the gateway's ManagedResource deletes fail while fail is
+// set, and counts every ManagedResource delete it is asked for.
+func (e *testEnv) failMRDeletes(fail *atomic.Bool) *atomic.Int32 {
+	var calls atomic.Int32
+	e.g.crd = interceptor.NewClient(e.crd.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*lastv1alpha1.ManagedResource); ok {
+				calls.Add(1)
+				if fail.Load() {
+					return errors.New("api server unavailable")
+				}
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	return &calls
+}
+
+// An Update whose cleanup is still pending never blocks the next phase, the
+// Intent's Delete included: once the operator has moved on (its EndPhase(failed)
+// was refused as already succeeded), BeginPhase finishes the cleanup itself.
+func TestABeginPhaseFinishesAnEndingUpdatesCleanup(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	h, steps := env.oneResourceUpdate()
+	var failing atomic.Bool
+	failing.Store(true)
+	env.failMRDeletes(&failing)
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase with a failing delete = %v, want Unavailable", err)
+	}
+	_, err := env.end(h, false) // the operator aborts the phase for the Intent's deletion
+	env.wantDenied(err, codes.FailedPrecondition)
+
+	del := env.startDelete(teardownCommands())
+	env.approve(deleteApproval("teardown", del))
+	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); status.Code(err) != codes.Unavailable {
+		t.Fatalf("BeginPhase(Delete) while the cleanup fails = %v, want Unavailable", err)
+	}
+	env.wantMRs(0, 1, 8, 9)
+	p := env.g.phases.get(envKey)
+	p.mu.Lock()
+	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); status.Code(err) != codes.Aborted {
+		t.Fatalf("BeginPhase(Delete) while the Update is held = %v, want Aborted", err)
+	}
+	p.mu.Unlock()
+
+	failing.Store(false)
+	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); err != nil {
+		t.Fatalf("BeginPhase(Delete) once the delete works = %v", err)
+	}
+	env.wantMRs(0, 8, 9)
+	if got, want := env.deletedMRs(before, h), []map[string]string{deletedPayload(1)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedresource.deleted payloads = %v, want %v", got, want)
+	}
+	if n := env.countType(before, audit.TypePhaseEnd); n != 1 {
+		t.Fatalf("%d phase.end entries, want the Update's one", n)
+	}
+}
+
+// No ManagedResource is deleted while the audit writer is broken: its
+// deletion could not be audited.
+func TestNoStaleDeletionWithABrokenAuditWriter(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	var failing atomic.Bool
+	calls := env.failMRDeletes(&failing)
+	env.sink.SetFailPuts(true)
+	if _, err := env.g.writer.Load().Append(env.ctx, audit.Draft{Type: audit.TypeLLMRequest, Actor: testOperator, Intent: envKey}); err == nil {
+		t.Fatal("an append with the sink down succeeded")
+	}
+	env.sink.SetFailPuts(false)
+	if !env.g.writer.Load().Broken() {
+		t.Fatal("the writer is not broken")
+	}
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 1, 8, 9)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("%d ManagedResource deletes with a broken writer, want none", n)
+	}
+}
+
+// A ManagedResource already being deleted, held by a finalizer, is neither
+// deleted nor audited again.
+func TestATerminatingManagedResourceIsNotDeletedAgain(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(1)
+	held := controlledMR(lastv1alpha1.ManagedResourceName(envIntent, 1), envIntentUID, true)
+	held.Finalizers = []string{"example.com/hold"}
+	if err := env.crd.Create(env.ctx, held); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.crd.Delete(env.ctx, held); err != nil {
+		t.Fatal(err)
+	}
+	var failing atomic.Bool
+	calls := env.failMRDeletes(&failing)
+	before := len(env.entries())
+	env.g.sweepRecords(env.ctx)
+	env.wantMRs(0, 1, 8, 9)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("%d deletes of a terminating ManagedResource, want none", n)
+	}
+	if n := env.countType(before, audit.TypeManagedResourceDeleted); n != 0 {
+		t.Fatalf("%d managedresource.deleted entries, want none", n)
+	}
 }

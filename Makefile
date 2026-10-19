@@ -349,8 +349,10 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-intent-operator'
 	@# The gateway's gRPC port admits only the operator's pods: the podSelector shares the namespaceSelector's from: element.
 	helm template last charts/last-operator -n last-system | grep -A1 'kubernetes.io/metadata.name: last-system' | grep -q '^          podSelector:'
-	@# The operator never gets Secrets or ManagedResource deletes (spec §4.1; test/admission checks the full list).
-	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|delete)' charts/last-operator/files/operator-clusterrole.yaml
+	@# The operator never gets Secrets, a delete or deletecollection, or a wildcard, in any rule and in any list style
+	@# (spec §4.1; test/admission checks the full list). Comments are skipped; the first line fails if the file is gone.
+	grep -q '^kind: ClusterRole$$' charts/last-operator/files/operator-clusterrole.yaml
+	! grep -v '^[[:space:]]*#' charts/last-operator/files/operator-clusterrole.yaml | grep -Eq 'secrets|delete|\*'
 	@# The gateway deletes, and audits, the ManagedResources an Update dropped: delete on managedresources alone, in its own rule.
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[managedresources\]' | grep -q 'verbs: \[delete\]'
 	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[.*,.*\]' | grep -q 'verbs: \[.*delete'
