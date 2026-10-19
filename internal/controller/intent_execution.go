@@ -44,33 +44,45 @@ func setExecuted(in *lastv1alpha1.Intent, s metav1.ConditionStatus, reason, msg 
 	setCondition(&in.Status.Conditions, in.Generation, CondExecuted, s, reason, msg)
 }
 
-// execute runs the approved plan (spec §8.3). Step results live only in this
-// process, so the Executed checkpoint decides what a reconcile may do: open
-// the phase, abandon one this process lost, or confirm one whose steps all
+// execute runs the approved plan (spec §8.3): a Create plan in phase
+// Executing, or a Delete plan in phase TearingDown. Step results live only in
+// this process, so the Executed checkpoint decides what a reconcile may do:
+// open the phase, abandon one this process lost, or confirm one whose steps all
 // succeeded. A phase is never resumed.
 func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Status.Plan == nil {
-		return ctrl.Result{}, r.fail(ctx, in, ReasonExecutionFailed, "The Intent has no plan to run")
+		return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, "The Intent has no plan to run")
 	}
+	stage := planStage(in)
 	switch checkpoint(in) {
 	case ReasonStepsSucceeded:
 		return r.finishPhase(ctx, in)
 	case ReasonPhaseOpen:
 		return r.abandonPhase(ctx, in, "The operator lost track of the running phase")
+	case ReasonPhaseEnded:
+		if stage == lastv1alpha1.StageDelete {
+			return ctrl.Result{}, r.release(ctx, in, "Teardown succeeded") // released before this process could
+		}
+	}
+	if stage == lastv1alpha1.StageCreate {
+		// startPlanning added it; an Intent planned by an older operator may lack it.
+		if err := r.ensureFinalizer(ctx, in); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	bctx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
 	_, err := r.Gateway.BeginPhase(bctx, &gatewayv1.BeginPhaseRequest{Intent: intentRef(in),
-		Stage: string(lastv1alpha1.StageCreate), SubjectHash: in.Status.Plan.Hash})
+		Stage: string(stage), SubjectHash: in.Status.Plan.Hash})
 	cancel()
 	switch {
 	case status.Code(err) == codes.AlreadyExists:
 		return r.abandonPhase(ctx, in, "A phase from an earlier attempt was still open")
 	case terminal(err):
-		return ctrl.Result{}, r.fail(ctx, in, ReasonExecutionFailed, "The gateway refused to open the phase: "+describe(err))
+		return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, "The gateway refused to open the phase: "+describe(err))
 	case err != nil:
 		return ctrl.Result{}, err
 	}
-	logf.FromContext(ctx).Info("Opened phase", "plan", in.Status.Plan.Hash)
+	logf.FromContext(ctx).Info("Opened phase", "plan", in.Status.Plan.Hash, "stage", stage)
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		setExecuted(in, metav1.ConditionUnknown, ReasonPhaseOpen, "Running plan "+in.Status.Plan.Hash)
 	}); err != nil {
@@ -220,18 +232,27 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 	}
 }
 
-// endFailed closes the phase as failed. A failure of the plan itself returns
-// the Intent to Planning with the failure as context (spec §8.3); anything
-// else fails the Intent.
+// endFailed closes the phase as failed. A failure of a Create plan itself
+// returns the Intent to Planning with the failure as context (spec §8.3);
+// anything else, and any failed teardown, fails the Intent.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
 	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason); err != nil && status.Code(err) != codes.FailedPrecondition {
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
-	if replan {
+	if replan && planStage(in) == lastv1alpha1.StageCreate {
 		return r.startPlanning(ctx, in, reason)
 	}
-	return ctrl.Result{}, r.fail(ctx, in, ReasonExecutionFailed, reason)
+	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)
+}
+
+// specEditHint tells the user how to plan a Create again; a teardown has the
+// retry annotation instead (failRun).
+func specEditHint(in *lastv1alpha1.Intent) string {
+	if planStage(in) == lastv1alpha1.StageDelete {
+		return ""
+	}
+	return "; edit the Intent's spec to plan again"
 }
 
 // abandonPhase closes a phase this process cannot continue and fails the Intent.
@@ -239,7 +260,7 @@ func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.In
 	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); err != nil && status.Code(err) != codes.FailedPrecondition {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")
+	return ctrl.Result{}, r.failRun(ctx, in, ReasonInterrupted, why+specEditHint(in))
 }
 
 // finishPhase closes a phase whose steps all succeeded. If the gateway refuses
@@ -248,8 +269,14 @@ func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.In
 // or the gateway may hold the phase open but refuse to let it succeed:
 // RunProbes reports which plan the gateway last executed. Unless it is this
 // plan, the phase is ended as failed, in case it is still open.
+//
+// A Delete phase has no executed plan to compare: a refusal fails the teardown.
+// Once the gateway records it as succeeded, the Intent is released.
 func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	err := r.endPhase(ctx, in, in.Status.Plan.Hash, true, "")
+	if planStage(in) == lastv1alpha1.StageDelete {
+		return r.finishTeardown(ctx, in, err)
+	}
 	if status.Code(err) == codes.FailedPrecondition {
 		executed, perr := r.executedPlan(ctx, in)
 		if perr != nil {
@@ -260,7 +287,7 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 			if eerr := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
 				return ctrl.Result{}, eerr // still StepsSucceeded: the next attempt asks again
 			}
-			return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+"; edit the Intent's spec to plan again")
+			return ctrl.Result{}, r.fail(ctx, in, ReasonInterrupted, why+specEditHint(in))
 		}
 		err = nil
 	}
@@ -272,6 +299,29 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 		setExecuted(in, metav1.ConditionTrue, ReasonPhaseEnded, "Plan "+in.Status.Plan.Hash+" executed")
 		setPhase(in, lastv1alpha1.PhaseVerifying, ReasonVerifying, "Running every probe once")
 	})
+}
+
+// finishTeardown records how ending a Delete phase as succeeded went (err is
+// EndPhase's answer) and releases the Intent once the gateway recorded it. The
+// finalizer is never removed while the phase may still be open.
+func (r *IntentReconciler) finishTeardown(ctx context.Context, in *lastv1alpha1.Intent, err error) (ctrl.Result, error) {
+	if status.Code(err) == codes.FailedPrecondition {
+		why := "The teardown phase ended before it succeeded (" + describe(err) + ")"
+		if eerr := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
+			return ctrl.Result{}, eerr // still StepsSucceeded: the next attempt asks again
+		}
+		return ctrl.Result{}, r.failRun(ctx, in, ReasonInterrupted, why)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	logf.FromContext(ctx).Info("Executed teardown plan", "plan", in.Status.Plan.Hash)
+	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		setExecuted(in, metav1.ConditionTrue, ReasonPhaseEnded, "Teardown plan "+in.Status.Plan.Hash+" executed")
+	}); err != nil {
+		return ctrl.Result{}, err // the next attempt finds the phase ended (FailedPrecondition) and fails the teardown
+	}
+	return ctrl.Result{}, r.release(ctx, in, "Teardown succeeded")
 }
 
 // executedPlan returns the hash of the plan the gateway last executed for the

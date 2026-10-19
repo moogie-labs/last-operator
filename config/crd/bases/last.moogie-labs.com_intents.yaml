@@ -173,6 +173,11 @@ spec:
                   ObservedRequestHash is the SHA-256 of spec.request for the current planning
                   session; answers to clarifying questions do not start a new session.
                 type: string
+              observedRetry:
+                description: |-
+                  ObservedRetry is the last.moogie-labs.com/retry annotation's value when the
+                  current teardown was planned; a different value plans it again.
+                type: string
               pendingCommand:
                 description: PendingCommand is a discovery command awaiting approval.
                 properties:

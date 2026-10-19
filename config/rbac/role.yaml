@@ -16,12 +16,20 @@ rules:
   resources:
   - intentapprovals
   - intentpolicies
-  - intents
   - operatorconfigs
   - providers
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - last.moogie-labs.com
+  resources:
+  - intents
+  verbs:
+  - get
+  - list
+  - patch
   - watch
 - apiGroups:
   - last.moogie-labs.com
@@ -44,6 +52,7 @@ rules:
   - managedresources
   verbs:
   - create
+  - delete
   - get
   - list
   - patch

@@ -42,6 +42,17 @@ const (
 	ReasonExecutionFailed           = "ExecutionFailed"
 	ReasonInterrupted               = "ExecutionInterrupted"
 	ReasonVerificationFailed        = "VerificationFailed"
+	ReasonTearingDown               = "TearingDown"
+	ReasonTeardownFailed            = "TeardownFailed"
+)
+
+// Event reasons of a teardown.
+const (
+	// ReasonExecutedPlanNotFound warns that the audit log no longer holds the
+	// executed plan, so the teardown comes from the ManagedResources (design §3.3).
+	ReasonExecutedPlanNotFound = "ExecutedPlanNotFound"
+	// ReasonNoTeardown warns that what the Intent created has no teardown commands.
+	ReasonNoTeardown = "NoTeardown"
 )
 
 // Planned reasons.

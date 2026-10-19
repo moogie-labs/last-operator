@@ -160,11 +160,13 @@ A kubebuilder controller manager. It:
 checked by `test/admission`; plus Leases and Events in its own namespace for
 leader election):
 
-- get/list/watch on `Intent`; update/patch on `intents/status`; update on
-  `intents/finalizers`.
-- get/list/watch/create/update/patch on `ManagedResource` and its status.
-  **No delete**: deleting a ManagedResource garbage-collects its output
-  Secret with no audit entry.
+- get/list/watch/patch on `Intent` (patch for the teardown finalizer, M5);
+  update/patch on `intents/status`; update on `intents/finalizers`.
+- get/list/watch/create/update/patch on `ManagedResource` and its status, and
+  delete (M5): after a succeeded Delete phase the operator deletes the
+  Intent's ManagedResources, which garbage-collects their output Secrets. The
+  deletion itself has no audit entry; the Delete phase that preceded it does.
+  No deletecollection.
 - get/list/watch on `IntentApproval`, `IntentPolicy`, `OperatorConfig`,
   and `Provider`. The first message of a planning session lists the
   Providers the namespace may use (M3).
@@ -173,7 +175,6 @@ leader election):
   - create on `CommandRuleSuggestion` (M7). The `spec.decision` field is
     excluded by admission (§9.5).
   - get/list/watch on `CommandRule` and `ClusterCommandRule` (M6).
-  - update/patch on `Intent`, for finalizers (M5).
 - **No** create on `IntentApproval`, `CommandRule`, or
   `ClusterCommandRule`. **No** writes to `IntentPolicy`, `OperatorConfig`,
   `Provider`, `LLMProvider`, RBAC, or admission policies.

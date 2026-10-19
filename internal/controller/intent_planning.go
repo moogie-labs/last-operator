@@ -29,7 +29,19 @@ const planTimeout = agent.MaxAttempts*agent.CallTimeout + time.Minute
 // startPlanning discards the current plan and planning session and starts a
 // new session for the current spec. feedback, when set, is a failure the new
 // plan must address.
+//
+// It adds the teardown finalizer first (D7). A deletion overrides everything
+// (design §4.3): for an Intent being deleted, Delete planning starts instead.
 func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
+	if !in.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, r.startDelete(ctx, in, feedback)
+	}
+	if err := r.ensureFinalizer(ctx, in); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !in.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil // deleted meanwhile: the next reconcile tears it down
+	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		in.Status.Stage = lastv1alpha1.StageCreate
 		in.Status.ObservedGeneration = in.Generation
@@ -67,6 +79,9 @@ func replanFeedback(in *lastv1alpha1.Intent) string {
 // conversation, with the user turn the Intent's state owes the model, and
 // records the model's next turn.
 func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
+	if in.Status.Stage == lastv1alpha1.StageDelete {
+		return r.planTeardown(ctx, in)
+	}
 	if in.Generation != in.Status.ObservedGeneration {
 		return r.startPlanning(ctx, in, "")
 	}
@@ -144,10 +159,11 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 		}
 		pending = &lastv1alpha1.PendingCommand{Hash: subject, Command: *turn.Command, Nonce: nonce, Reason: turn.Reason}
 	}
-	gen, prev := in.Generation, in.Status.PlanningSessionSeq
+	gen, prev, stage := in.Generation, in.Status.PlanningSessionSeq, planStage(in)
 	applied := false
 	err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		applied = in.Generation == gen && in.Status.Phase == lastv1alpha1.PhasePlanning && in.Status.PlanningSessionSeq == prev
+		applied = in.Generation == gen && in.Status.Phase == lastv1alpha1.PhasePlanning && in.Status.PlanningSessionSeq == prev &&
+			planStage(in) == stage
 		if !applied {
 			return // the spec changed while planning; the next reconcile plans again
 		}
@@ -162,11 +178,11 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 		meta.RemoveStatusCondition(&in.Status.Conditions, CondExecuted)
 		switch turn.Kind {
 		case agent.KindPlan:
-			in.Status.Stage = lastv1alpha1.StageCreate
+			in.Status.Stage = stage
 			in.Status.Plan = turn.Plan
 			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionTrue, ReasonPlanWritten, "Plan "+subject)
 			setPhase(in, lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval,
-				"Waiting for an IntentApproval of plan "+subject+" for stage Create")
+				"Waiting for an IntentApproval of plan "+subject+" for stage "+string(stage))
 		case agent.KindQuestions:
 			in.Status.Questions = turn.Questions
 			setPhase(in, lastv1alpha1.PhaseClarifying, ReasonClarifying,
@@ -240,12 +256,27 @@ func storedTurnChanged(stored *lastv1alpha1.Intent, kind agent.Kind, hash string
 	return false
 }
 
-// awaitApproval waits for an IntentApproval of the current plan.
+// planStage is the stage a plan in Planning or AwaitingApproval is for: Delete
+// once the teardown is planned, Create otherwise.
+func planStage(in *lastv1alpha1.Intent) lastv1alpha1.Stage {
+	if in.Status.Stage == lastv1alpha1.StageDelete {
+		return lastv1alpha1.StageDelete
+	}
+	return lastv1alpha1.StageCreate
+}
+
+// awaitApproval waits for an IntentApproval of the current plan for its stage.
+// A deletion raises the generation, and spec edits no longer matter, so a
+// Delete plan never goes back to planning for one.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
-	if in.Generation != in.Status.ObservedGeneration || in.Status.Plan == nil {
+	stage := planStage(in)
+	switch {
+	case stage == lastv1alpha1.StageDelete && in.Status.Plan == nil:
+		return ctrl.Result{}, r.startDelete(ctx, in, "")
+	case in.Generation != in.Status.ObservedGeneration && stage == lastv1alpha1.StageCreate, in.Status.Plan == nil:
 		return r.startPlanning(ctx, in, "")
 	}
-	approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageCreate, in.Status.Plan.Hash)
+	approved, denial, err := r.decision(ctx, in, stage, in.Status.Plan.Hash)
 	switch {
 	case err != nil:
 		return ctrl.Result{}, err
@@ -258,11 +289,15 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 	gen, subject := in.Generation, in.Status.Plan.Hash
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		// A conflict retry re-reads the Intent: run only the plan that was approved.
-		if in.Generation != gen || in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval ||
-			in.Status.Plan == nil || in.Status.Plan.Hash != subject {
+		if (stage == lastv1alpha1.StageCreate && in.Generation != gen) || planStage(in) != stage ||
+			in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval || in.Status.Plan == nil || in.Status.Plan.Hash != subject {
 			return
 		}
-		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+in.Status.Plan.Hash)
+		if stage == lastv1alpha1.StageDelete {
+			setPhase(in, lastv1alpha1.PhaseTearingDown, ReasonTearingDown, "Running teardown plan "+subject)
+			return
+		}
+		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+subject)
 	})
 }
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -78,7 +79,10 @@ A resource describes one thing the plan provisions:
 is a CEL expression over result.exitCode, result.stdout, result.stderr and result.json
 (stdout parsed as JSON). Probe ids are unique across the plan. Probes only read; they
 run again on a schedule to detect drift. Sensitive values go in outputs, never in argv,
-files, or the summary. Leave "teardown" empty.`
+files, or the summary. "teardown" lists the commands that remove what the resource
+created, or [] when nothing needs removing. They run only when the Intent is deleted,
+long after the plan's steps, in an order you are asked for then and a human approves,
+so they never use ${steps…} references.`
 
 // Environment is what the namespace's effective policy lets commands use (M3
 // spec §4.4). The gateway enforces the policy; this only tells the model.
@@ -114,6 +118,39 @@ func FirstMessage(r Request) string {
 			"Plan again; the new plan must succeed from the cluster's current state.\n", r.Feedback)
 	}
 	return b.String()
+}
+
+// Teardown is what a Delete planning session starts from (design D6): the
+// teardown commands of what the Intent's executed plan created, in resource order.
+type Teardown struct {
+	Namespace, Name string
+	Text            string // spec.request
+	Commands        []lastv1alpha1.Command
+	Feedback        string // why the previous teardown failed, if it did
+}
+
+// TeardownMessage is a Delete planning session's first user message: the
+// teardown commands to order into a Delete plan.
+func TeardownMessage(t Teardown) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Intent %s/%s, in namespace %s, is being deleted.\n\nIts request was:\n%s\n\n", t.Namespace, t.Name, t.Namespace, t.Text)
+	b.WriteString("Tear down what its executed plan created. These are the teardown commands of its resources, in resource order:\n")
+	for i, c := range t.Commands {
+		raw, err := json.Marshal(commandToWire(c))
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%d. %s\n", i+1, raw)
+	}
+	b.WriteString("\nAnswer with a plan turn whose \"steps\" are these commands, each exactly once, in the order that " +
+		"tears things down safely, and whose \"resources\" are []. Copy every command as given; you may change only an " +
+		"id, and the ids must be unique among the steps. Add, drop or change no command: a human approves the plan, and " +
+		"any other plan is refused. The summary says what the teardown removes.\n")
+	if t.Feedback != "" {
+		fmt.Fprintf(&b, "\nThe previous teardown failed and was not completed:\n%s\n"+
+			"Order the commands again; the teardown must succeed from the cluster's current state.\n", t.Feedback)
+	}
+	return b.String(), nil
 }
 
 func (e Environment) describe(b *strings.Builder) {

@@ -347,8 +347,9 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-operator-leader-election'
 	@# The gateway's gRPC port admits only the operator's pods: the podSelector shares the namespaceSelector's from: element.
 	helm template last charts/last-operator -n last-system | grep -A1 'kubernetes.io/metadata.name: last-system' | grep -q '^          podSelector:'
-	@# The operator never gets Secrets or ManagedResource deletes (spec §4.1; test/admission checks the full list).
-	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|delete)' charts/last-operator/files/operator-clusterrole.yaml
+	@# The operator never gets Secrets, and deletes nothing but ManagedResources (spec §4.1; test/admission checks the full list).
+	! grep -Eq '^[[:space:]]+(resources|verbs): \[.*(secrets|deletecollection)' charts/last-operator/files/operator-clusterrole.yaml
+	! awk '/resources:/ { r = $$0 } /verbs: \[.*delete/ && r !~ /\[managedresources\]$$/ { bad = 1 } END { exit !bad }' charts/last-operator/files/operator-clusterrole.yaml
 	@# The bundled registry: namespaces, credentials, and a front proxy that picks the realm and user file per method.
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-front'
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-registry-auth'

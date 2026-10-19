@@ -33,7 +33,7 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 			agent.LostTurn("the operator lost track of it while it ran; ask again if you still need it"))
 	}
 	if in.Generation != in.Status.ObservedGeneration || pc == nil {
-		if err := r.endApprovedPhase(ctx, in); err != nil {
+		if err := r.endApprovedPhase(ctx, in, "The Intent's spec changed before the discovery command ran"); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.startPlanning(ctx, in, "")
@@ -51,11 +51,11 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 }
 
 // endApprovedPhase ends the pending command's phase, if it is approved, before
-// a spec edit discards the command. An earlier attempt may have opened the phase
-// and stopped before recording it; nothing else would ever end it, and the
-// gateway opens no other phase for the Intent while it is open. An unapproved
-// command never opened a phase.
-func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha1.Intent) error {
+// a spec edit or a deletion discards the command; why says which. An earlier
+// attempt may have opened the phase and stopped before recording it; nothing
+// else would ever end it, and the gateway opens no other phase for the Intent
+// while it is open. An unapproved command never opened a phase.
+func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
 	pc := in.Status.PendingCommand
 	if pc == nil {
 		return nil
@@ -64,7 +64,7 @@ func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha
 	if err != nil || !approved {
 		return err
 	}
-	err = r.endPhase(ctx, in, pc.Hash, false, "The Intent's spec changed before the discovery command ran")
+	err = r.endPhase(ctx, in, pc.Hash, false, why)
 	if status.Code(err) == codes.FailedPrecondition {
 		return nil // no phase was open
 	}

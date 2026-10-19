@@ -71,7 +71,10 @@ func (e ranError) Error() string      { return string(e) }
 func (ranError) Is(target error) bool { return target == errPlanAlreadyRan }
 
 // rerunCheck refuses a plan whose hash is in used, telling the model why. The
-// feedback is the failure the session was asked to address, if any.
+// feedback is the failure the session was asked to address, if any. Delete
+// planning never applies it: a retried or interrupted teardown re-proposes a
+// permutation of the same commands, often the very plan that ran, and the
+// gateway exempts Delete from its run-once rule (teardownCheck applies instead).
 func rerunCheck(used map[string]bool, feedback string) func(agent.Turn) error {
 	return func(t agent.Turn) error {
 		if t.Kind != agent.KindPlan || t.Plan == nil || !used[t.Plan.Hash] {

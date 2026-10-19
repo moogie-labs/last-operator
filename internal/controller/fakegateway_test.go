@@ -65,6 +65,8 @@ type script struct {
 	probeErr error             // RunProbes error
 	onProbe  func()            // called during a successful RunProbes
 
+	interrupt map[string]bool // step ID → the gateway restarts before it: the phase ends as interrupted, once
+
 	beginErr       error // returned by BeginPhase once the call is recorded
 	queryErr       error // returned by QueryAudit
 	auditTruncated bool  // QueryAudit reports that the index dropped entries
@@ -72,8 +74,10 @@ type script struct {
 
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
 // phase rules the operator depends on (approval before BeginPhase, one open
-// phase, calls only within it, probes only of an executed plan) and records
-// every call per Intent.
+// phase, calls only within it, probes only of an executed plan, Delete only for
+// an Intent being deleted, nothing after a succeeded Delete) and records every
+// call per Intent. Its phase.begin and phase.end entries carry the gateway's
+// payloads, so agent.ExecutedPlan reads them.
 type fakeGateway struct {
 	gatewayv1.GatewayServiceClient // unimplemented RPCs panic
 
@@ -87,6 +91,9 @@ type fakeGateway struct {
 	outputs   map[types.NamespacedName]map[string]map[string]string // ManagedResource → values sent
 	open      map[types.NamespacedName]string                       // subject of the open phase
 	openStage map[types.NamespacedName]string                       // stage of the open phase
+	openBegin map[types.NamespacedName]uint64                       // phase.begin sequence number of the open phase
+	openUID   map[types.NamespacedName]types.UID                    // Intent UID the open phase belongs to
+	tornDown  map[types.NamespacedName]types.UID                    // Intent UID whose Delete succeeded
 	used      map[string]bool                                       // Discovery subjects already opened: they are single-use
 	executed  map[types.NamespacedName]string                       // hash of the last executed plan
 	seq       uint64                                                // the last audit sequence number, across Intents
@@ -97,7 +104,8 @@ func newFakeGateway(c client.Client) *fakeGateway {
 	return &fakeGateway{c: c, scripts: map[types.NamespacedName]*script{}, log: map[types.NamespacedName][]string{},
 		llmReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{}, argv: map[types.NamespacedName]map[string][]string{},
 		outputs: map[types.NamespacedName]map[string]map[string]string{}, open: map[types.NamespacedName]string{},
-		openStage: map[types.NamespacedName]string{}, used: map[string]bool{},
+		openStage: map[types.NamespacedName]string{}, openBegin: map[types.NamespacedName]uint64{},
+		openUID: map[types.NamespacedName]types.UID{}, tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
 }
 
@@ -228,6 +236,24 @@ func (f *fakeGateway) pendingSubject(ctx context.Context, key types.NamespacedNa
 	return nil
 }
 
+// stageRule applies the gateway's Delete rules (Task 4): a Delete phase opens
+// only for an Intent being deleted and only for a plan without resources, such
+// an Intent opens no Create phase, and once its Delete succeeded it opens none.
+func (f *fakeGateway) stageRule(intent *lastv1alpha1.Intent, stage string) error {
+	deleting := intent.DeletionTimestamp != nil
+	switch {
+	case f.tornDown[client.ObjectKeyFromObject(intent)] == intent.UID:
+		return status.Error(codes.FailedPrecondition, "intent was already torn down; no phase opens for it again")
+	case stage == string(lastv1alpha1.StageDelete) && !deleting:
+		return status.Error(codes.FailedPrecondition, "intent is not being deleted")
+	case stage == string(lastv1alpha1.StageDelete) && intent.Status.Plan != nil && len(intent.Status.Plan.Resources) > 0:
+		return status.Error(codes.FailedPrecondition, "a Delete plan has no resources")
+	case stage == string(lastv1alpha1.StageCreate) && deleting:
+		return status.Error(codes.FailedPrecondition, "intent is being deleted; only a Delete or Discovery phase can open")
+	}
+	return nil
+}
+
 func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.BeginPhaseResponse, error) {
 	key, stage, subject := keyOf(in.GetIntent()), in.GetStage(), in.GetSubjectHash()
 	discovery := stage == string(lastv1alpha1.StageDiscovery)
@@ -238,6 +264,18 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	var pendingErr error
 	if discovery {
 		pendingErr = f.pendingSubject(ctx, key, subject)
+	}
+	var intent lastv1alpha1.Intent
+	if err := f.c.Get(ctx, key, &intent); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	payload := map[string]any{}
+	if p := intent.Status.Plan; !discovery && p != nil {
+		canonical, err := plan.Canonical(plan.FromStatus(p))
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		payload["plan"], payload["steps"] = string(canonical), len(p.Steps)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -250,9 +288,12 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 		return nil, err
 	}
 	// The gateway's order: the subject, then an open phase, then the rest.
+	ruleErr := f.stageRule(&intent, stage)
 	switch {
 	case pendingErr != nil:
 		return nil, pendingErr
+	case ruleErr != nil:
+		return nil, ruleErr
 	case f.open[key] != "":
 		return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
 	case f.used[subject]:
@@ -260,8 +301,8 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	case !approved:
 		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	}
-	f.open[key], f.openStage[key] = subject, stage
-	f.appendAudit(key, "phase.begin", stage, subject, map[string]any{})
+	f.open[key], f.openStage[key], f.openUID[key] = subject, stage, intent.UID
+	f.openBegin[key] = f.appendAudit(key, "phase.begin", stage, subject, payload)
 	if discovery {
 		f.used[subject] = true
 	}
@@ -285,6 +326,12 @@ func (f *fakeGateway) RunCommand(_ context.Context, in *gatewayv1.RunCommandRequ
 	}
 	f.argv[key][in.GetStepId()] = c.Run.Argv
 	s := f.scriptFor(key)
+	if s.interrupt[in.GetStepId()] {
+		// As a gateway restart does: the new leader closed the phase as interrupted.
+		delete(s.interrupt, in.GetStepId())
+		f.closePhase(key, "interrupted", "the gateway restarted")
+		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
+	}
 	if len(s.runErrs) > 0 {
 		err := s.runErrs[0]
 		s.runErrs = s.runErrs[1:]
@@ -339,14 +386,28 @@ func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest,
 	if f.open[key] == "" || f.open[key] != in.GetSubjectHash() {
 		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
 	}
-	stage := f.openStage[key]
-	delete(f.open, key)
-	delete(f.openStage, key)
-	// A Discovery phase ran one inspection command; it never becomes the executed plan.
-	if in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery) {
+	stage, uid := f.openStage[key], f.openUID[key]
+	f.closePhase(key, outcome, in.GetReason())
+	switch {
+	case in.GetSucceeded() && stage == string(lastv1alpha1.StageDelete):
+		// A succeeded Delete drops the record: no executed plan, and no phase opens again.
+		delete(f.executed, key)
+		f.tornDown[key] = uid
+	case in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery):
+		// A Discovery phase ran one inspection command; it never becomes the executed plan.
 		f.executed[key] = in.GetSubjectHash()
 	}
 	return &gatewayv1.EndPhaseResponse{}, nil
+}
+
+// closePhase ends the Intent's open phase with its phase.end entry. f.mu must be held.
+func (f *fakeGateway) closePhase(key types.NamespacedName, outcome, reason string) {
+	f.appendAudit(key, "phase.end", f.openStage[key], f.open[key],
+		map[string]any{"beginSeq": f.openBegin[key], "outcome": outcome, "reason": reason})
+	delete(f.open, key)
+	delete(f.openStage, key)
+	delete(f.openBegin, key)
+	delete(f.openUID, key)
 }
 
 func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequest, _ ...grpc.CallOption) (*gatewayv1.RunProbesResponse, error) {
@@ -443,8 +504,10 @@ func (f *fakeGateway) QueryAudit(_ context.Context, in *gatewayv1.QueryAuditRequ
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !slices.Equal(in.GetTypes(), []string{"phase.begin"}) {
-		f.record(key, queryAudit) // the used-plans read happens before every model turn: not part of the call logs
+	if !slices.Equal(in.GetTypes(), []string{"phase.begin"}) && !slices.Equal(in.GetTypes(), []string{"phase.end"}) {
+		// The used-plans read happens before every model turn, and the
+		// executed-plan read before every teardown turn: not part of the call logs.
+		f.record(key, queryAudit)
 	}
 	s := f.scriptFor(key)
 	if s.queryErr != nil {

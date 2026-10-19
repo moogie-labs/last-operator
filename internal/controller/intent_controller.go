@@ -11,6 +11,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -50,12 +51,12 @@ type IntentReconciler struct {
 	sessions sessionStore
 }
 
-// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intentapprovals,verbs=get;list;watch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=providers;intentpolicies;operatorconfigs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -72,7 +73,10 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !in.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil // teardown arrives with the Delete stage
+		if !controllerutil.ContainsFinalizer(&in, lastv1alpha1.FinalizerTeardown) {
+			return ctrl.Result{}, nil // nothing holds it: the API server removes it
+		}
+		return r.tearDown(ctx, &in)
 	}
 	switch in.Status.Phase {
 	case "", lastv1alpha1.PhasePending:
@@ -99,7 +103,8 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager sets up the controller with the Manager. The Intent watch
+// has no predicate, so a metadata change such as the retry annotation wakes it.
 func (r *IntentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&lastv1alpha1.Intent{}).

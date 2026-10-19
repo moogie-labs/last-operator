@@ -24,6 +24,15 @@ const (
 	PhaseFailed                    Phase = "Failed"
 )
 
+const (
+	// FinalizerTeardown holds an Intent until its teardown succeeds, or until it
+	// is clear that nothing ever executed.
+	FinalizerTeardown = "last.moogie-labs.com/teardown"
+	// AnnotationRetry plans a failed teardown again whenever its value changes;
+	// status.observedRetry records the value the operator acted on.
+	AnnotationRetry = "last.moogie-labs.com/retry"
+)
+
 // Answer answers one of status.questions.
 type Answer struct {
 	// +kubebuilder:validation:MinLength=1
@@ -109,6 +118,10 @@ type IntentStatus struct {
 	Plan *Plan `json:"plan,omitempty"`
 	// +optional
 	SuggestedRules []string `json:"suggestedRules,omitempty"`
+	// ObservedRetry is the last.moogie-labs.com/retry annotation's value when the
+	// current teardown was planned; a different value plans it again.
+	// +optional
+	ObservedRetry string `json:"observedRetry,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional

@@ -73,6 +73,8 @@ func TestOperatorRBAC(t *testing.T) {
 		attr(last, "", "intents", "", "watch"),
 		attr(last, "team-x", "intents", "status", verbUpdate),
 		attr(last, "team-x", "managedresources", "", "create"),
+		attr(last, "team-x", "intents", "", verbPatch),         // the teardown finalizer (M5 design D7)
+		attr(last, "team-x", "managedresources", "", "delete"), // after a succeeded teardown (M5 design §3.4)
 		attr(last, "team-x", "managedresources", "status", verbUpdate),
 		attr(last, "", "intentapprovals", "", "list"),
 		attr(last, "", "intentpolicies", "", "list"),
@@ -117,7 +119,6 @@ func TestOperatorRBAC(t *testing.T) {
 		attr(last, "", "intents", "", "create"),
 		attr(last, "team-x", "intents", "", verbUpdate),
 		attr(last, "team-x", "intents", "", "delete"),
-		attr(last, "team-x", "managedresources", "", "delete"),
 		attr(last, "team-x", "managedresources", "", "deletecollection"),
 	)
 	for _, verb := range []string{verbCreate, verbUpdate, verbPatch, "delete"} {
