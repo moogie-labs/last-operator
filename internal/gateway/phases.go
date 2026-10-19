@@ -410,6 +410,18 @@ func checkReplay(d denial, rec *LoadedRecord, intent *lastv1alpha1.Intent, stage
 	return nil
 }
 
+// checkTornDown refuses every phase for an Intent whose Delete succeeded: its
+// record and used subjects are gone, and opening a phase would recreate them.
+// The guard lives in memory, so a gateway restart loses it; the Intent is then
+// still terminating, which keeps Create shut, but its Delete and Discovery
+// approvals could open once more within their age limit.
+func (g *Gateway) checkTornDown(d denial, key string, intent *lastv1alpha1.Intent) error {
+	if gone, ok := g.tornDown.Load(key); ok && gone == string(intent.UID) {
+		return d.deny(codes.FailedPrecondition, "intent was already torn down; no phase opens for it again")
+	}
+	return nil
+}
+
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
 	w, release, err := g.beginRPC()
 	if err != nil {
@@ -441,6 +453,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, err
 	}
 	if err := checkDeletePlan(d, &intent, stage, body); err != nil {
+		return nil, err
+	}
+	if err := g.checkTornDown(d, key, &intent); err != nil {
 		return nil, err
 	}
 
@@ -627,6 +642,15 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		// A previous attempt wrote phase.end but could not save the record; only retry the save.
 		if p.outcome != want {
 			return nil, d.deny(codes.FailedPrecondition, "this phase already ended as %s", p.outcome)
+		}
+		if p.stage == lastv1alpha1.StageDelete && p.outcome == outcomeSucceeded {
+			// A retry of a succeeded Delete only drops the record: an earlier deletion may
+			// have gone through unanswered, and saving first would recreate it.
+			if err := g.dropRecord(ctx, key, p.uid); err != nil {
+				return nil, status.Errorf(codes.Unavailable, "%v", err)
+			}
+			g.phases.remove(key)
+			return &gatewayv1.EndPhaseResponse{EndSeq: p.endSeq}, nil
 		}
 	} else {
 		if req.GetSucceeded() && (p.failed || p.next < len(p.body.Steps)) {

@@ -703,7 +703,9 @@ resuming it. The record is bounded (about 900 KiB), so the
 gateway refuses at `BeginPhase` a plan too large to record once executed.
 A succeeded Delete phase deletes the record, after its `phase.end` is in the
 audit log, together with the in-memory phase and the Intent's unsaved
-index entries; no later index flush recreates it. A failed or aborted Delete
+index entries; no later index flush recreates it, and no phase opens again
+for that Intent (a guard the gateway keeps in memory: after a restart, the
+Intent's deletion still keeps Create shut). A failed or aborted Delete
 keeps the record and its executed plan. The output Secrets are not the
 gateway's to delete: they belong to their ManagedResources and go with them.
 

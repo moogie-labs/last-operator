@@ -22,7 +22,11 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
-const teardownFinalizer = "last.moogie-labs.com/teardown"
+const (
+	teardownFinalizer = "last.moogie-labs.com/teardown"
+	recreatedUID      = "intent-uid-2"
+	verbCreate        = "create"
+)
 
 // teardownCommands are the executed plan's teardown commands, in resource order.
 func teardownCommands() []lastv1alpha1.Command {
@@ -118,6 +122,25 @@ func (e *testEnv) recordExists() bool {
 		e.t.Fatal(err)
 	}
 	return err == nil
+}
+
+// recreate releases the torn-down Intent, as the operator does, and creates a
+// new Intent with the same name.
+func (e *testEnv) recreate() {
+	e.t.Helper()
+	var old lastv1alpha1.Intent
+	if err := e.crd.Get(e.ctx, client.ObjectKey{Namespace: envNS, Name: envIntent}, &old); err != nil {
+		e.t.Fatal(err)
+	}
+	old.Finalizers = nil
+	if err := e.crd.Update(e.ctx, &old); err != nil {
+		e.t.Fatal(err)
+	}
+	recreated := intentWithPlan(e.t, twoSteps())
+	recreated.UID = recreatedUID
+	if err := e.crd.Create(e.ctx, recreated); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // indexedEntry appends an llm.request entry for the env's Intent, outside any phase.
@@ -349,29 +372,18 @@ func TestNoFlushRecreatesATornDownRecord(t *testing.T) {
 func TestATornDownNameServesARecreatedIntent(t *testing.T) {
 	env, _ := tornDown(t)
 	ctx := context.Background()
-	var old lastv1alpha1.Intent
-	if err := env.crd.Get(ctx, client.ObjectKey{Namespace: envNS, Name: envIntent}, &old); err != nil {
-		t.Fatal(err)
-	}
-	old.Finalizers = nil // the operator releases the torn-down Intent
-	if err := env.crd.Update(ctx, &old); err != nil {
-		t.Fatal(err)
-	}
-	recreated := intentWithPlan(t, twoSteps())
-	recreated.UID = "intent-uid-2"
-	if err := env.crd.Create(ctx, recreated); err != nil {
-		t.Fatal(err)
-	}
+	env.recreate()
 	env.indexedEntry()
 	env.g.flushIndexes(ctx)
 	rec, err := env.g.state.LoadAny(ctx, envKey)
-	if err != nil || rec.IntentUID != "intent-uid-2" || len(rec.Index) != 1 || rec.Executed != nil || len(rec.Used) != 0 {
+	if err != nil || rec.IntentUID != recreatedUID || len(rec.Index) != 1 || rec.Executed != nil || len(rec.Used) != 0 {
 		t.Fatalf("record for the recreated Intent = %+v, %v", rec.IntentRecord, err)
 	}
 }
 
 func TestATornDownIntentNeverReopensItsCreatePlan(t *testing.T) {
 	env, in := tornDown(t)
+	env.g = env.newGateway() // a restart loses the in-memory teardown marker
 	// The record and its used subjects are gone, but the Intent is still being
 	// deleted: its executed Create plan, approval still standing, must not run again.
 	h := env.setPlan(lastv1alpha1.StageCreate, in.Status.Plan.Steps, in.Status.Plan.Resources...)
@@ -421,5 +433,126 @@ func TestDeleteRetriesTheRecordDeletion(t *testing.T) {
 	}
 	if ends != 1 {
 		t.Fatalf("Delete phase.end entries = %d, want 1", ends)
+	}
+}
+
+func TestATornDownIntentOpensNoPhaseAgain(t *testing.T) {
+	env, _ := tornDown(t)
+	steps := teardownCommands()
+	h, err := plan.Hash(plan.Body{Steps: steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Delete's approval still stands, and the record with its used subjects is gone.
+	_, err = env.beginStage(lastv1alpha1.StageDelete, h)
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !strings.Contains(err.Error(), "torn down") {
+		t.Fatalf("reopening the succeeded Delete = %v", err)
+	}
+	c := discoveryCommand()
+	pc := pendingCommand(t, c, "nonce-after-teardown")
+	env.setPending(pc)
+	env.approve(discoveryApproval("look", pc.Hash, lastv1alpha1.DecisionApprove))
+	_, err = env.beginStage(lastv1alpha1.StageDiscovery, pc.Hash)
+	env.wantDenied(err, codes.FailedPrecondition)
+	if env.recordExists() {
+		t.Fatal("a refused phase recreated the torn-down record")
+	}
+}
+
+func TestAnInterruptedDeleteRunsAgain(t *testing.T) {
+	for _, atLead := range []bool{true, false} {
+		t.Run(map[bool]string{true: "closed at lead", false: "closed by BeginPhase"}[atLead], func(t *testing.T) {
+			env, _ := executedEnv(t)
+			steps := teardownCommands()
+			h := env.startDelete(steps)
+			env.approve(deleteApproval("teardown", h))
+			if _, err := env.beginStage(lastv1alpha1.StageDelete, h); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.run(h, steps[0]); err != nil {
+				t.Fatal(err)
+			}
+			env.g = env.newGateway() // the gateway restarted mid-teardown
+			if atLead {
+				if err := env.g.closeInterruptedPhases(env.ctx, env.g.writer.Load()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env.runDelete(h, steps)
+			if _, err := env.end(h, true); err != nil {
+				t.Fatalf("EndPhase of the re-run Delete = %v", err)
+			}
+			var interrupted int
+			for _, e := range env.entries() {
+				var p phaseEnd
+				if e.Type == audit.TypePhaseEnd && e.SubjectHash == h && json.Unmarshal(e.Payload, &p) == nil && p.Outcome == outcomeInterrupted {
+					interrupted++
+				}
+			}
+			if interrupted != 1 || env.recordExists() {
+				t.Fatalf("interrupted phase.end entries = %d, record exists = %v", interrupted, env.recordExists())
+			}
+		})
+	}
+}
+
+func TestATornDownMarkerOutlivesAFailedSave(t *testing.T) {
+	env, _ := tornDown(t)
+	ctx := context.Background()
+	env.recreate()
+	var fail atomic.Bool
+	fail.Store(true)
+	env.kube.PrependReactor(verbCreate, "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if fail.CompareAndSwap(true, false) {
+			return true, nil, errors.New("etcd unavailable")
+		}
+		return false, nil, nil
+	})
+	env.indexedEntry()
+	env.g.flushIndexes(ctx) // the save fails; the entries stay pending
+	env.g.flushIndexes(ctx)
+	rec, err := env.g.state.LoadAny(ctx, envKey)
+	if err != nil || rec.IntentUID != recreatedUID || len(rec.Index) != 1 {
+		t.Fatalf("record for the recreated Intent = %+v, %v", rec.IntentRecord, err)
+	}
+}
+
+func TestDeleteRetryNeverRecreatesARecordAlreadyDeleted(t *testing.T) {
+	env, _ := executedEnv(t)
+	steps := teardownCommands()
+	h := env.startDelete(steps)
+	env.approve(deleteApproval("teardown", h))
+	env.runDelete(h, steps)
+	var fail atomic.Bool
+	fail.Store(true)
+	env.kube.PrependReactor("delete", "configmaps", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if !fail.CompareAndSwap(true, false) {
+			return false, nil, nil
+		}
+		// The API server deleted the record, but the answer was lost.
+		da := a.(k8stesting.DeleteAction)
+		if err := env.kube.Tracker().Delete(da.GetResource(), da.GetNamespace(), da.GetName()); err != nil {
+			t.Error(err)
+		}
+		return true, nil, errors.New("connection reset")
+	})
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first EndPhase = %v, want Unavailable", err)
+	}
+	creates := func() (n int) {
+		for _, a := range env.kube.Actions() {
+			if a.GetVerb() == verbCreate && a.GetResource().Resource == "configmaps" {
+				n++
+			}
+		}
+		return n
+	}
+	before := creates()
+	if _, err := env.end(h, true); err != nil {
+		t.Fatalf("retried EndPhase = %v", err)
+	}
+	if creates() != before || env.recordExists() {
+		t.Fatalf("the retry created the record again (%d creates, exists=%v)", creates()-before, env.recordExists())
 	}
 }

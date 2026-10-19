@@ -132,13 +132,18 @@ func (g *Gateway) saveIndexLocked(ctx context.Context, intent string) error {
 		g.index.restore(intent, es)
 		return err
 	}
+	if gone, ok := g.tornDown.Load(intent); ok && gone != rec.IntentUID && rec.IntentUID != "" {
+		// A recreated Intent owns the record now; forget its predecessor's teardown.
+		g.tornDown.CompareAndDelete(intent, gone)
+	}
 	return nil
 }
 
 // afterTeardown decides who owns the entries a flush holds for an Intent without
 // a record. When a succeeded Delete dropped that record, drop is true while the
 // torn-down Intent, or no Intent, holds the name: saving the entries would bring
-// the record back. A recreated Intent's UID comes back as uid, to own the new record.
+// the record back. A recreated Intent's UID comes back as uid, to own the new
+// record; the caller forgets the teardown once that record is saved.
 func (g *Gateway) afterTeardown(ctx context.Context, intent string) (uid string, drop bool, err error) {
 	gone, ok := g.tornDown.Load(intent)
 	if !ok {
@@ -154,7 +159,6 @@ func (g *Gateway) afterTeardown(ctx context.Context, intent string) (uid string,
 	case string(in.UID) == gone:
 		return "", true, nil
 	}
-	g.tornDown.CompareAndDelete(intent, gone)
 	return string(in.UID), false, nil
 }
 
