@@ -160,13 +160,14 @@ A kubebuilder controller manager. It:
 checked by `test/admission`; plus Leases and Events in its own namespace for
 leader election):
 
-- get/list/watch/patch on `Intent` (patch for the teardown finalizer, M5);
-  update/patch on `intents/status`; update on `intents/finalizers`.
-- get/list/watch/create/update/patch on `ManagedResource` and its status, and
-  delete (M5): after a succeeded Delete phase the operator deletes the
-  Intent's ManagedResources, which garbage-collects their output Secrets. The
-  deletion itself has no audit entry; the Delete phase that preceded it does.
-  No deletecollection.
+- get/list/watch/patch on `Intent`; update/patch on `intents/status`; update
+  on `intents/finalizers`. The patch is for the teardown finalizer (M5): the
+  `last-intent-operator` ValidatingAdmissionPolicy lets the operator change
+  only that finalizer, never spec, labels, annotations, ownerReferences or
+  another finalizer.
+- get/list/watch/create/update/patch on `ManagedResource` and its status.
+  **No delete**: deleting a ManagedResource garbage-collects its output
+  Secret with no audit entry.
 - get/list/watch on `IntentApproval`, `IntentPolicy`, `OperatorConfig`,
   and `Provider`. The first message of a planning session lists the
   Providers the namespace may use (M3).

@@ -75,6 +75,8 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 		Stage: string(stage), SubjectHash: in.Status.Plan.Hash})
 	cancel()
 	switch {
+	case tornDown(in, err):
+		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
 	case status.Code(err) == codes.AlreadyExists:
 		return r.abandonPhase(ctx, in, "A phase from an earlier attempt was still open")
 	case terminal(err):
@@ -108,6 +110,8 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 		switch {
 		case ctx.Err() != nil:
 			return ctrl.Result{}, ctx.Err() // shutting down; the next process abandons the phase
+		case tornDown(in, err):
+			return ctrl.Result{}, r.release(ctx, in, msgTornDown)
 		case err != nil:
 			return r.endFailed(ctx, in, fmt.Sprintf("step %s: %s", step.ID, describe(err)), false)
 		case res.GetExitCode() != 0 || res.GetError() != "":
@@ -237,7 +241,11 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 // anything else, and any failed teardown, fails the Intent.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
-	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason); err != nil && status.Code(err) != codes.FailedPrecondition {
+	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
+	switch {
+	case tornDown(in, err):
+		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
+	case err != nil && status.Code(err) != codes.FailedPrecondition:
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
 	if replan && planStage(in) == lastv1alpha1.StageCreate {
@@ -257,7 +265,11 @@ func specEditHint(in *lastv1alpha1.Intent) string {
 
 // abandonPhase closes a phase this process cannot continue and fails the Intent.
 func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.Intent, why string) (ctrl.Result, error) {
-	if err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); err != nil && status.Code(err) != codes.FailedPrecondition {
+	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why)
+	switch {
+	case tornDown(in, err):
+		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
+	case err != nil && status.Code(err) != codes.FailedPrecondition:
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonInterrupted, why+specEditHint(in))
@@ -303,8 +315,12 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 
 // finishTeardown records how ending a Delete phase as succeeded went (err is
 // EndPhase's answer) and releases the Intent once the gateway recorded it. The
-// finalizer is never removed while the phase may still be open.
+// finalizer is never removed while the phase may still be open. A torn-down
+// refusal means an earlier EndPhase succeeded and its answer was lost.
 func (r *IntentReconciler) finishTeardown(ctx context.Context, in *lastv1alpha1.Intent, err error) (ctrl.Result, error) {
+	if tornDown(in, err) {
+		err = nil
+	}
 	if status.Code(err) == codes.FailedPrecondition {
 		why := "The teardown phase ended before it succeeded (" + describe(err) + ")"
 		if eerr := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {

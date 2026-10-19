@@ -352,8 +352,7 @@ spec:
 		{"get", "secrets", "-n", ns},
 		{"list", "pods", "-n", "last-sandbox"},
 		{"create", "intentapprovals.last.moogie-labs.com", "-n", ns},
-		{"delete", "intents.last.moogie-labs.com", "-n", ns},
-		{"deletecollection", "managedresources.last.moogie-labs.com", "-n", ns},
+		{"delete", "managedresources.last.moogie-labs.com", "-n", ns},
 	} {
 		if operatorCan(t, args...) {
 			t.Errorf("the operator can %v", args)

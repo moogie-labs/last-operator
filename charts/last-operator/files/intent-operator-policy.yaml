@@ -1,0 +1,44 @@
+# The operator patches Intents only to add or remove its teardown finalizer (M5
+# design D7). Its RBAC grants patch on the whole object, so this policy holds it to
+# that one entry: spec, labels, annotations (the retry annotation included),
+# ownerReferences and every other finalizer stay as they were. Status is a
+# subresource and is not matched here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: last-intent-operator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["last.moogie-labs.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["intents"]
+  matchConditions:
+    - name: operator-service-account
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-operator')"
+  variables:
+    - name: teardown
+      expression: "'last.moogie-labs.com/teardown'"
+  validations:
+    - expression: "object.spec == oldObject.spec"
+      message: "the operator may not change an Intent's spec"
+    - expression: "(has(object.metadata.labels) ? object.metadata.labels : {}) == (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})"
+      message: "the operator may not change an Intent's labels"
+    - expression: "(has(object.metadata.annotations) ? object.metadata.annotations : {}) == (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})"
+      message: "the operator may not change an Intent's annotations"
+    - expression: "(has(object.metadata.ownerReferences) ? object.metadata.ownerReferences : []) == (has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences : [])"
+      message: "the operator may not change an Intent's ownerReferences"
+    - expression: >-
+        (has(object.metadata.finalizers) ? object.metadata.finalizers : []).filter(f, f != variables.teardown) ==
+        (has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers : []).filter(f, f != variables.teardown)
+      message: "the operator may change only the last.moogie-labs.com/teardown finalizer"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: last-intent-operator
+spec:
+  policyName: last-intent-operator
+  validationActions: [Deny]

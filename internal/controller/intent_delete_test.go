@@ -186,7 +186,7 @@ var _ = Describe("Intent deletion", func() {
 
 	It("tears down an executed Intent through an approved Delete plan", func() {
 		executed(&script{}, turns(deletePlan))
-		creation := len(gw.calls(key))
+		creation, uid := len(gw.calls(key)), getIntent(key).UID
 		awaitingDelete()
 
 		By("asking the model to order the executed plan's teardown commands")
@@ -210,11 +210,35 @@ var _ = Describe("Intent deletion", func() {
 		Eventually(gone(key)).Should(BeTrue())
 		Expect(gw.calls(key)[creation:]).To(Equal([]string{callLLM, beginPhase, runT2, runT1, endSucceeded}))
 		Expect(eventReasons(key, "Normal")).To(ContainElement(string(lastv1alpha1.PhaseTearingDown)))
-		for _, name := range []string{"web-0", "web-1"} {
-			var mr lastv1alpha1.ManagedResource
-			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: name}, &mr)
-			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "ManagedResource %s is deleted", name)
-		}
+		// The ManagedResources go by ownerReference garbage collection, which envtest does not run.
+		Expect(metav1.IsControlledBy(getMR(key.Namespace, "web-0"), &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{UID: uid}})).
+			To(BeTrue())
+	})
+
+	It("releases the Intent when the answer to the EndPhase that ended its teardown was lost", func() {
+		executed(&script{}, turns(deletePlan))
+		awaitingDelete()
+		gw.updateScript(key, func(s *script) { s.loseEnd = true })
+		approveDelete(key)
+
+		Eventually(gone(key)).Should(BeTrue())
+		calls := gw.calls(key)
+		Expect(calls[len(calls)-2:]).To(Equal([]string{endSucceeded, endSucceeded}),
+			"the retried EndPhase is refused as torn down, which means the teardown succeeded")
+	})
+
+	It("releases an executed Intent with no teardown commands, with a warning", func() {
+		bare := []lastv1alpha1.ManagedResourceSpec{{Description: "a Deployment with no teardown"}}
+		gw.setScript(key, &script{llm: lifecycle(turns(answer([]lastv1alpha1.Command{s1}, bare...)), turns(deletePlan))})
+		createIntent(key, "run web")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		approve(key, lastv1alpha1.DecisionApprove)
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+
+		deleteIntent(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(deleteRequests(key)).To(BeEmpty(), "no Delete planning")
+		Expect(eventReasons(key, "Warning")).To(ContainElement(ReasonNoTeardown))
 	})
 
 	It("falls back to the ManagedResources' teardown when the audit log lost the executed plan", func() {

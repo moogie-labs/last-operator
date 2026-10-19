@@ -71,7 +71,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, subject: subject, rpc: "RunCommand"}
 	p := g.phases.get(key)
 	if p == nil || p.subject != subject {
-		return nil, d.deny(codes.FailedPrecondition, "no open phase for this plan")
+		return nil, g.noOpenPhase(ctx, d, ns, name, key)
 	}
 	d.stage = string(p.stage)
 	if !p.mu.TryLock() {

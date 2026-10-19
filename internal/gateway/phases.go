@@ -417,9 +417,23 @@ func checkReplay(d denial, rec *LoadedRecord, intent *lastv1alpha1.Intent, stage
 // approvals could open once more within their age limit.
 func (g *Gateway) checkTornDown(d denial, key string, intent *lastv1alpha1.Intent) error {
 	if gone, ok := g.tornDown.Load(key); ok && gone == string(intent.UID) {
-		return d.deny(codes.FailedPrecondition, "intent was already torn down; no phase opens for it again")
+		return d.deny(codes.FailedPrecondition, "%s", gatewayv1.MsgTornDown)
 	}
 	return nil
+}
+
+// noOpenPhase refuses a RunCommand or EndPhase that names no open phase. For an
+// Intent whose Delete succeeded the refusal says so (gatewayv1.MsgTornDown), so
+// an operator that lost the answer to the EndPhase that ended its teardown
+// knows the teardown succeeded rather than failing it.
+func (g *Gateway) noOpenPhase(ctx context.Context, d denial, ns, name, key string) error {
+	if gone, ok := g.tornDown.Load(key); ok {
+		var intent lastv1alpha1.Intent
+		if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err == nil && gone == string(intent.UID) {
+			return d.deny(codes.FailedPrecondition, "%s", gatewayv1.MsgTornDown)
+		}
+	}
+	return d.deny(codes.FailedPrecondition, "no open phase for this plan")
 }
 
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
@@ -607,7 +621,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		return nil, err
 	}
 	defer release()
-	_, _, key, err := intentKey(req.GetIntent())
+	ns, name, key, err := intentKey(req.GetIntent())
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +635,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, subject: subject, rpc: "EndPhase"}
 	p := g.phases.get(key)
 	if p == nil || p.subject != subject {
-		return nil, d.deny(codes.FailedPrecondition, "no open phase for this plan")
+		return nil, g.noOpenPhase(ctx, d, ns, name, key)
 	}
 	d.stage = string(p.stage)
 	// Never wait for a running step while holding the Intent's lock: the step can

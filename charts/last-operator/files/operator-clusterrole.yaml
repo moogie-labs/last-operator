@@ -1,10 +1,12 @@
 # The operator's cluster-wide permissions (spec §4.1). The operator is
 # untrusted: it reads approvals, policy, configuration and Providers, and writes only
-# Intent status, the Intent's teardown finalizer (patch) and ManagedResources. It
-# deletes an Intent's ManagedResources once their teardown succeeded, which
-# garbage-collects their output Secrets (M5 design §3.4). It has no access to
-# Secrets, Pods, ConfigMaps or anything in the gateway, sandbox or audit
-# namespaces, and cannot impersonate or mint tokens. test/admission checks this file.
+# Intent status, ManagedResources and the Intent's teardown finalizer (patch on
+# intents, which files/intent-operator-policy.yaml limits to that one finalizer). An
+# Intent's ManagedResources go by ownerReference garbage collection once the
+# finalizer is released after a succeeded Delete phase. It has no access to Secrets, Pods,
+# ConfigMaps or anything in the gateway, sandbox or audit namespaces, cannot
+# impersonate or mint tokens, and cannot delete ManagedResources (that would
+# garbage-collect output Secrets unaudited). test/admission checks this file.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -21,7 +23,7 @@ rules:
     verbs: [update]
   - apiGroups: [last.moogie-labs.com]
     resources: [managedresources]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, list, watch, create, update, patch]
   - apiGroups: [last.moogie-labs.com]
     resources: [managedresources/status]
     verbs: [get, update, patch]

@@ -24,6 +24,7 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
 // retryTeardownHint tells the user how to plan a failed teardown again (D7).
@@ -299,6 +300,18 @@ func commandKey(c lastv1alpha1.Command) (string, error) {
 	return string(b), err
 }
 
+// tornDown reports a gateway refusal of a Delete phase call saying the Intent
+// was already torn down: a Delete phase of this Intent UID succeeded, and this
+// operator lost the answer. The teardown is done, so the Intent is released.
+// Trusting the refusal grants nothing: the operator may remove its own
+// finalizer anyway.
+func tornDown(in *lastv1alpha1.Intent, err error) bool {
+	return planStage(in) == lastv1alpha1.StageDelete && gatewayv1.TornDown(err)
+}
+
+// msgTornDown is why an Intent is released on a torn-down refusal.
+const msgTornDown = "The gateway already tore the Intent down"
+
 // failRun fails the Intent for a phase that did not complete. A Delete phase
 // fails as TeardownFailed whatever went wrong, and keeps the finalizer: the
 // retry annotation plans the teardown again (D7).
@@ -309,21 +322,12 @@ func (r *IntentReconciler) failRun(ctx context.Context, in *lastv1alpha1.Intent,
 	return r.fail(ctx, in, reason, msg)
 }
 
-// release lets an Intent being deleted go: it deletes the Intent's
-// ManagedResources, whose output Secrets they own, then removes the finalizer.
-// Callers have ended every phase: the teardown succeeded, or nothing was left
-// to tear down.
+// release lets an Intent being deleted go by removing its finalizer. Its
+// ManagedResources, and through them their output Secrets, then go by
+// ownerReference garbage collection once the Intent is gone; the operator
+// deletes none of them (spec §4.1). Callers have ended every phase: the
+// teardown succeeded, or nothing was left to tear down.
 func (r *IntentReconciler) release(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
-	mrs, err := r.ownedManagedResources(ctx, in)
-	if err != nil {
-		return err
-	}
-	for i := range mrs {
-		if err := r.Delete(ctx, &mrs[i]); client.IgnoreNotFound(err) != nil {
-			return err
-		}
-		logf.FromContext(ctx).Info("Deleted ManagedResource", "name", mrs[i].Name)
-	}
 	key := client.ObjectKeyFromObject(in)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var fresh lastv1alpha1.Intent

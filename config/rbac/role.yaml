@@ -52,7 +52,6 @@ rules:
   - managedresources
   verbs:
   - create
-  - delete
   - get
   - list
   - patch

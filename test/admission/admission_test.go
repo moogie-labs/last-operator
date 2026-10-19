@@ -284,3 +284,98 @@ func TestGatewayAuditGuard(t *testing.T) {
 		t.Errorf("another ServiceAccount minting a last-gateway token: %v", err)
 	}
 }
+
+// TestOperatorIntentPatches checks intent-operator-policy.yaml: the operator may
+// add and remove its teardown finalizer on an Intent, and change nothing else.
+func TestOperatorIntentPatches(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(adminCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ns, name, request = "intent-patches", "intent-patcher", "run web"
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: []rbacv1.PolicyRule{{
+		APIGroups: []string{lastv1alpha1.GroupVersion.Group}, Resources: []string{"intents"},
+		Verbs: []string{verbGet, verbPatch, verbUpdate}}}}
+	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: name},
+		Subjects: []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: "last-operator",
+			Namespace: strings.Split(operatorUser, ":")[2]}}}
+	intent := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns},
+		Spec: lastv1alpha1.IntentSpec{Request: request}}
+	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, intent} {
+		if err := admin.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyChartPolicy(t, admin, "intent-operator-policy.yaml")
+	operator := clientAs(t, operatorUser, "system:serviceaccounts", "system:serviceaccounts:last-system")
+
+	// patch applies change to a fresh copy of the Intent as the operator.
+	patch := func(change func(*lastv1alpha1.Intent)) error {
+		var cur lastv1alpha1.Intent
+		if err := admin.Get(ctx, client.ObjectKeyFromObject(intent), &cur); err != nil {
+			t.Fatal(err)
+		}
+		base := cur.DeepCopy()
+		change(&cur)
+		return operator.Patch(ctx, &cur, client.MergeFrom(base))
+	}
+	editSpec := func(in *lastv1alpha1.Intent) { in.Spec.Request = "run something else" }
+
+	// Admission policies take effect asynchronously; wait for enforcement.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := patch(editSpec)
+		if err != nil && strings.Contains(err.Error(), "may not change an Intent's spec") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the policy never took effect: %v", err)
+		}
+		if err == nil { // applied before enforcement started; restore it
+			if err := patch(func(in *lastv1alpha1.Intent) { in.Spec.Request = request }); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if err := patch(func(in *lastv1alpha1.Intent) {
+		in.Finalizers = append(in.Finalizers, lastv1alpha1.FinalizerTeardown)
+	}); err != nil {
+		t.Fatalf("adding the teardown finalizer: %v", err)
+	}
+	for _, c := range []struct {
+		what, refusal string
+		change        func(*lastv1alpha1.Intent)
+	}{
+		{"spec", "may not change an Intent's spec", editSpec},
+		{"the retry annotation", "may not change an Intent's annotations", func(in *lastv1alpha1.Intent) {
+			in.Annotations = map[string]string{lastv1alpha1.AnnotationRetry: "1"}
+		}},
+		{"a label", "may not change an Intent's labels", func(in *lastv1alpha1.Intent) {
+			in.Labels = map[string]string{"edited": "by-the-operator"}
+		}},
+		{"another finalizer", "may change only the last.moogie-labs.com/teardown finalizer", func(in *lastv1alpha1.Intent) {
+			in.Finalizers = append(in.Finalizers, "example.com/other")
+		}},
+		{"ownerReferences", "may not change an Intent's ownerReferences", func(in *lastv1alpha1.Intent) {
+			in.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "owner", UID: "uid-owner"}}
+		}},
+	} {
+		if err := patch(c.change); err == nil || !strings.Contains(err.Error(), c.refusal) {
+			t.Errorf("changing %s = %v, want %q", c.what, err, c.refusal)
+		}
+	}
+	if err := patch(func(in *lastv1alpha1.Intent) { in.Finalizers = nil }); err != nil {
+		t.Fatalf("removing the teardown finalizer: %v", err)
+	}
+	var got lastv1alpha1.Intent
+	if err := admin.Get(ctx, client.ObjectKeyFromObject(intent), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Request != request || len(got.Finalizers) != 0 || len(got.Annotations) != 0 {
+		t.Fatalf("intent after the patches = %+v", got.ObjectMeta)
+	}
+}

@@ -18,6 +18,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
@@ -647,5 +648,30 @@ func TestDeleteRetryClearsTheOpenPhaseWhenItCannotDropTheRecord(t *testing.T) {
 		if e.Type == audit.TypePhaseEnd && e.SubjectHash == h && json.Unmarshal(e.Payload, &p) == nil && p.Outcome == outcomeInterrupted {
 			t.Fatal("a restart interrupted a Delete that already succeeded")
 		}
+	}
+}
+
+func TestATornDownIntentAnswersEveryPhaseCallAsTornDown(t *testing.T) {
+	env, _ := tornDown(t)
+	steps := teardownCommands()
+	h, err := plan.Hash(plan.Body{Steps: steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The answer to the EndPhase that ended the teardown was lost: the operator asks again.
+	_, err = env.end(h, true)
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !gatewayv1.TornDown(err) {
+		t.Fatalf("EndPhase after the teardown = %v, want the torn-down refusal", err)
+	}
+	_, err = env.run(h, steps[0])
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !gatewayv1.TornDown(err) {
+		t.Fatalf("RunCommand after the teardown = %v, want the torn-down refusal", err)
+	}
+	_, err = env.beginStage(lastv1alpha1.StageDelete, h)
+	env.wantDenied(err, codes.FailedPrecondition)
+	if !gatewayv1.TornDown(err) {
+		t.Fatalf("BeginPhase after the teardown = %v, want the torn-down refusal", err)
 	}
 }

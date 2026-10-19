@@ -61,6 +61,7 @@ type script struct {
 	runErrs  []error           // errors returned by the next RunCommand calls, in order, before runErr
 	buildLog map[string]string // step ID → the log of a failed image build: no run starts
 	endErrs  []error           // errors returned by the next EndPhase calls, in order
+	loseEnd  bool              // the next EndPhase takes effect, but its answer is lost (Unavailable), once
 	failing  map[string]bool   // probe ID → fails; other probes pass
 	probeErr error             // RunProbes error
 	onProbe  func()            // called during a successful RunProbes
@@ -243,7 +244,7 @@ func (f *fakeGateway) stageRule(intent *lastv1alpha1.Intent, stage string) error
 	deleting := intent.DeletionTimestamp != nil
 	switch {
 	case f.tornDown[client.ObjectKeyFromObject(intent)] == intent.UID:
-		return status.Error(codes.FailedPrecondition, "intent was already torn down; no phase opens for it again")
+		return status.Error(codes.FailedPrecondition, gatewayv1.MsgTornDown)
 	case stage == string(lastv1alpha1.StageDelete) && !deleting:
 		return status.Error(codes.FailedPrecondition, "intent is not being deleted")
 	case stage == string(lastv1alpha1.StageDelete) && intent.Status.Plan != nil && len(intent.Status.Plan.Resources) > 0:
@@ -309,13 +310,28 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	return &gatewayv1.BeginPhaseResponse{}, nil
 }
 
-func (f *fakeGateway) RunCommand(_ context.Context, in *gatewayv1.RunCommandRequest, _ ...grpc.CallOption) (*gatewayv1.RunCommandResponse, error) {
+// noOpenPhase refuses a call that names no open phase, as the gateway does: as
+// torn down for an Intent whose Delete succeeded. f.mu must not be held.
+func (f *fakeGateway) noOpenPhase(ctx context.Context, key types.NamespacedName) error {
+	f.mu.Lock()
+	gone, ok := f.tornDown[key]
+	f.mu.Unlock()
+	var intent lastv1alpha1.Intent
+	if ok && f.c.Get(ctx, key, &intent) == nil && intent.UID == gone {
+		return status.Error(codes.FailedPrecondition, gatewayv1.MsgTornDown)
+	}
+	return status.Error(codes.FailedPrecondition, "no open phase for this plan")
+}
+
+func (f *fakeGateway) RunCommand(ctx context.Context, in *gatewayv1.RunCommandRequest, _ ...grpc.CallOption) (*gatewayv1.RunCommandResponse, error) {
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record(key, "RunCommand:"+in.GetStepId())
 	if f.open[key] == "" || f.open[key] != in.GetSubjectHash() {
-		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
+		f.mu.Unlock()
+		defer f.mu.Lock()
+		return nil, f.noOpenPhase(ctx, key)
 	}
 	var c lastv1alpha1.Command
 	if err := json.Unmarshal(in.GetCommandJson(), &c); err != nil {
@@ -369,7 +385,7 @@ func (f *fakeGateway) WriteOutputSecret(_ context.Context, in *gatewayv1.WriteOu
 	return &gatewayv1.WriteOutputSecretResponse{SecretName: in.GetManagedResource() + "-outputs"}, nil
 }
 
-func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.EndPhaseResponse, error) {
+func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.EndPhaseResponse, error) {
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -384,7 +400,9 @@ func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest,
 		return nil, err
 	}
 	if f.open[key] == "" || f.open[key] != in.GetSubjectHash() {
-		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
+		f.mu.Unlock()
+		defer f.mu.Lock()
+		return nil, f.noOpenPhase(ctx, key)
 	}
 	stage, uid := f.openStage[key], f.openUID[key]
 	f.closePhase(key, outcome, in.GetReason())
@@ -396,6 +414,10 @@ func (f *fakeGateway) EndPhase(_ context.Context, in *gatewayv1.EndPhaseRequest,
 	case in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery):
 		// A Discovery phase ran one inspection command; it never becomes the executed plan.
 		f.executed[key] = in.GetSubjectHash()
+	}
+	if s := f.scriptFor(key); s.loseEnd {
+		s.loseEnd = false
+		return nil, status.Error(codes.Unavailable, "the answer was lost")
 	}
 	return &gatewayv1.EndPhaseResponse{}, nil
 }

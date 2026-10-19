@@ -67,8 +67,9 @@ Probes follow an adaptive interval with jitter and a floor.
 - **Operator checks:** before recording, the operator verifies that the steps are a permutation of the teardown commands. If they aren't, the model gets a correction (the M4b identical-replan mechanism).
 - **Running it:** AwaitingApproval (stage Delete), then Executing, which shows phase `TearingDown`.
 - **On success:**
-  - the gateway's `EndPhase(Delete, succeeded)` deletes the record and the output Secrets it wrote (D2);
-  - the operator deletes the ManagedResources, then removes the finalizer.
+  - the gateway's `EndPhase(Delete, succeeded)` deletes the record (D2);
+  - the operator removes the finalizer. The Intent is then deleted, and ownerReference garbage collection removes its ManagedResources and, through them, their output Secrets. The operator itself never deletes a ManagedResource (main spec §4.1);
+  - a refusal of a later Delete phase call because the gateway already tore this Intent UID down (`gatewayv1.MsgTornDown`) also counts as success: the answer to the ending EndPhase was lost.
 - **On failure:** `Failed` / `TeardownFailed`. The `last.moogie-labs.com/retry` annotation, with any value change, replans the Delete.
 - **Gateway:** BeginPhase accepts stage `Delete`. The subject is the plan in `status.plan` (as for Create), and `resources` must be empty. Authorization in M5a is approval only; Auto arrives in M5c.
 - **Plan checks:** `plan.Validate` and `agent.Parse` apply the argv-xor-script rule to teardown commands (M2c follow-up).
