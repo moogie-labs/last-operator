@@ -94,6 +94,10 @@ spec:
             - {name: OTEL_TRACES_EXPORTER, value: none}
             # The image's default config serves a debug endpoint on :5001, the GC sidecar's port in this pod.
             - {name: REGISTRY_HTTP_DEBUG_ADDR, value: "127.0.0.1:5002"}
+            # The default config caches blob descriptors in memory. garbage-collect runs in the sidecar,
+            # so this process would keep answering HEAD 200 for freed blobs and accept manifests that
+            # reference them. An empty value disables the cache.
+            - {name: REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR, value: ""}
           ports:
             - {name: registry, containerPort: 5000}
           readinessProbe:

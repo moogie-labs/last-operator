@@ -373,6 +373,7 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	sc=$$(printf '%s\n' "$$dep" | awk '/^        - name: /{f=($$0=="        - name: registry-gc")} /^      [a-z]/{f=0} f') && \
 	reg=$$(printf '%s\n' "$$dep" | awk '/^        - name: /{f=($$0=="        - name: registry")} /^      [a-z]/{f=0} f') && \
 	printf '%s\n' "$$reg" | grep -q 'name: REGISTRY_HTTP_DEBUG_ADDR, value: "127.0.0.1:5002"' && \
+	printf '%s\n' "$$reg" | grep -q 'name: REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR, value: ""}' && \
 	vol=$$(printf '%s\n' "$$dep" | awk '/^        - name: /{f=($$0=="        - name: gc-auth")} /^[^ ]/{f=0} f') && \
 	test -n "$$sc" && test -n "$$vol" && \
 	printf '%s\n' "$$sc" | grep -qE 'mountPath: /var/lib/registry\}$$' && \
