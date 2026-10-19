@@ -276,6 +276,31 @@ func TestFollowEndsAtDrifted(t *testing.T) {
 	}
 }
 
+func TestFollowEndsWhenTheIntentIsTornDown(t *testing.T) {
+	c := fakeClient()
+	d, out := depsFor(c, "")
+	w := &world{t: t, c: c, steps: []step{{apply: func(in *lastv1alpha1.Intent) {
+		in.Status.Stage = lastv1alpha1.StageDelete
+		in.Status.Phase = lastv1alpha1.PhaseTearingDown
+		setReady(in, "TearingDown", "Running the teardown")
+	}}}}
+	d.Wait = func(ctx context.Context) error {
+		if len(w.steps) > 0 {
+			return w.wait(ctx)
+		}
+		in := testIntent(webName, nil)
+		return client.IgnoreNotFound(c.Delete(ctx, in)) // the finalizer is released, the Intent goes
+	}
+	if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
+		t.Fatalf("kubectl last = %v\n%s", err, out)
+	}
+	for _, want := range []string{"Intent team-x/web: TearingDown (Running the teardown)\n", "Intent team-x/web torn down.\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestPrintReadyEscapesTheOutputSecretName(t *testing.T) {
 	mr := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: "web-0", Namespace: testNS},
 		Spec: lastv1alpha1.ManagedResourceSpec{IntentRef: &lastv1alpha1.LocalRef{Name: webName}, Description: "web",

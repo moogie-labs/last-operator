@@ -53,9 +53,10 @@ func shellWord(s string) string {
 
 // renderPlan writes a plan as its approver reviews it (M3 spec §5): the
 // summary, each step, and each resource with its probes and outputs. hash is
-// the hash the CLI computed from what it shows; files shows file contents.
-func renderPlan(w io.Writer, p *lastv1alpha1.Plan, hash string, files bool) {
-	writef(w, "Plan %s (stage Create)\n", hash)
+// the hash the CLI computed from what it shows; stage is the stage the plan
+// is approved for; files shows file contents.
+func renderPlan(w io.Writer, p *lastv1alpha1.Plan, stage lastv1alpha1.Stage, hash string, files bool) {
+	writef(w, "Plan %s (stage %s)\n", hash, stage)
 	if p.Summary != "" {
 		writef(w, "Summary: %s\n", clean(p.Summary))
 	}
@@ -161,7 +162,7 @@ func renderSubject(w io.Writer, in *lastv1alpha1.Intent, stage lastv1alpha1.Stag
 		renderPending(w, in.Status.PendingCommand, hash, files)
 		return
 	}
-	renderPlan(w, in.Status.Plan, hash, files)
+	renderPlan(w, in.Status.Plan, stage, hash, files)
 }
 
 // hasFiles reports whether anything renderSubject shows for stage carries files.

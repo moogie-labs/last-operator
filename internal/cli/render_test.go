@@ -66,7 +66,7 @@ func TestRenderPlanShowsWhatTheApproverDecides(t *testing.T) {
 		Outputs:          map[string]string{"ip": "${steps.svc.json.spec.clusterIP}"},
 	}}}
 	var b strings.Builder
-	renderPlan(&b, p, h2, false)
+	renderPlan(&b, p, lastv1alpha1.StageCreate, h2, false)
 	got := b.String()
 	for _, want := range []string{
 		"Plan " + h2 + " (stage Create)\n",
@@ -123,7 +123,7 @@ func TestRenderPlanEscapesEveryModelWrittenField(t *testing.T) {
 		Probes:      []lastv1alpha1.Probe{{ID: "pr\x1bobe", Command: argvCommand(wordKubectl), Assert: "a\nb"}},
 	}}}
 	var b strings.Builder
-	renderPlan(&b, p, h2, true)
+	renderPlan(&b, p, lastv1alpha1.StageCreate, h2, true)
 	got := b.String()
 	if strings.ContainsRune(got, '\x1b') {
 		t.Errorf("an escape sequence reached the output:\n%q", got)
@@ -157,5 +157,26 @@ func TestRenderShowsEachInstallCommand(t *testing.T) {
 	}
 	if strings.Contains(b.String(), "install commands") {
 		t.Error("the install command count is still shown")
+	}
+}
+
+func TestRenderShowsTheStageBeingApproved(t *testing.T) {
+	in := testIntent(webName, func(in *lastv1alpha1.Intent) {
+		in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
+		in.Status.Stage = lastv1alpha1.StageDelete
+		in.Status.Plan = webPlan()
+	})
+	stage, hash, ok, err := verifiedSubject(in)
+	if err != nil || !ok || stage != lastv1alpha1.StageDelete {
+		t.Fatalf("verifiedSubject = %v, %q, %v, %v; want stage Delete", stage, hash, ok, err)
+	}
+	var b strings.Builder
+	renderSubject(&b, in, stage, hash, false)
+	if want := "Plan " + hash + " (stage Delete)\n"; !strings.HasPrefix(b.String(), want) {
+		t.Errorf("output:\n%s\nwant prefix %q", b.String(), want)
+	}
+	in.Status.Stage = ""
+	if stage, _, _, _ := verifiedSubject(in); stage != lastv1alpha1.StageCreate {
+		t.Errorf("a plan with no stage = %v, want Create", stage)
 	}
 }

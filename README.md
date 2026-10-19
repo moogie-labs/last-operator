@@ -20,6 +20,9 @@ day-2 changes, allow rules and rule suggestions arrive in M4–M7.
 - `kubectl last "<request>"`, which creates an Intent and follows it: it asks you
   the model's questions, shows each discovery command and the plan, and asks for
   your approval. Also `kubectl last answer | plan | approve | deny NAME`.
+- **Intent identity, approvals and Delete.** Approvals are bound to the Intent's
+  UID, and `kubectl delete intent` tears down what the Intent created, behind a
+  finalizer and your approval.
 - `kubectl last audit verify | log | conformance`.
 
 ## Building the CLI
@@ -72,6 +75,36 @@ asks about when they run, and show it first. Every decision is an
 `IntentApproval` that you create under your own identity, for the hash you were
 shown, and the plugin never shows or decides content that does not hash to its
 stated hash.
+
+## Deleting an Intent
+
+```bash
+kubectl delete intent web -n team-x
+```
+
+A finalizer, `last.moogie-labs.com/teardown`, holds the Intent until its
+teardown completes:
+
+- **Plan.** The operator reads the plan the Intent executed from the audit log
+  and asks the model to order its teardown commands. The model can reorder them,
+  not change, add or drop any. The Intent shows `AwaitingApproval` for stage
+  Delete.
+- **Approval.** A Delete always needs your approval; no allow rule or Auto mode
+  covers it. Approve it as usual, with `kubectl last plan web -n team-x` and
+  `kubectl last approve web -n team-x --hash H`, or `y` at the prompt of a
+  following `kubectl last`.
+- **Teardown.** The phase is `TearingDown` while the commands run. On success the
+  finalizer is released, and the ManagedResources and output Secrets go with the
+  Intent. Following a deletion ends with `Intent team-x/web torn down.`
+- **Failure.** The Intent is `Failed` with reason `TeardownFailed` and keeps its
+  finalizer. Change the retry annotation to plan the teardown again:
+  `kubectl annotate intent web -n team-x last.moogie-labs.com/retry=2 --overwrite`.
+- **Nothing to tear down.** An Intent that never executed, or whose plan has no
+  teardown commands, is released at once. The latter raises a Warning
+  `NoTeardown` event.
+
+Removing the finalizer by hand lets the Intent go without a teardown. What it
+created stays in the world.
 
 ## Demo against Claude (opt-in)
 

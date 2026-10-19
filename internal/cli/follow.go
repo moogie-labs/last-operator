@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,14 +38,20 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 	asked := map[string]bool{}  // subjects already put to the user, decided or left pending
 	warned := map[string]bool{} // stated hashes whose content did not hash to them
 	var last lastv1alpha1.Phase
+	seen := false // the Intent has been read at least once
 	for {
 		var in lastv1alpha1.Intent
 		if err := k.Client.Get(ctx, key, &in); err != nil {
-			if ctx.Err() != nil {
+			switch {
+			case ctx.Err() != nil:
 				return stopped(d.Out, key)
+			case seen && apierrors.IsNotFound(err):
+				writef(d.Out, "Intent %s/%s torn down.\n", key.Namespace, key.Name)
+				return nil
 			}
 			return err
 		}
+		seen = true
 		if phaseOf(&in) != last {
 			printStatus(d.Out, &in)
 			last = phaseOf(&in)
@@ -142,7 +149,11 @@ func failed(w io.Writer, in *lastv1alpha1.Intent) error {
 	if c := meta.FindStatusCondition(in.Status.Conditions, condReady); c != nil {
 		reason, msg = c.Reason, c.Message
 	}
-	writef(w, "Intent %s/%s failed: %s: %s\nEdit its spec.request to try again.\n", in.Namespace, in.Name, clean(reason), clean(msg))
+	again := "Edit its spec.request to try again."
+	if in.Status.Stage == lastv1alpha1.StageDelete {
+		again = "Change its " + lastv1alpha1.AnnotationRetry + " annotation to plan the teardown again."
+	}
+	writef(w, "Intent %s/%s failed: %s: %s\n%s\n", in.Namespace, in.Name, clean(reason), clean(msg), again)
 	return ErrIntentFailed
 }
 

@@ -24,6 +24,9 @@ func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
 		return lastv1alpha1.StageDiscovery, in.Status.PendingCommand.Hash, true
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingApproval && in.Status.Plan != nil:
+		if in.Status.Stage == lastv1alpha1.StageUpdate || in.Status.Stage == lastv1alpha1.StageDelete {
+			return in.Status.Stage, in.Status.Plan.Hash, true
+		}
 		return lastv1alpha1.StageCreate, in.Status.Plan.Hash, true
 	}
 	return "", "", false

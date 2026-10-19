@@ -550,9 +550,41 @@ Pending → Clarifying ⇄ (user answers)
 - **Verifying.** Runs every probe once; all must pass. A failure here
   marks the Intent `Failed` with the probe details, so bad probes
   surface at creation time instead of as false drift later.
-- **Delete.** A finalizer holds the Intent until teardown completes.
-  The teardown plan is built from each ManagedResource's `teardown`
-  commands and handed to the agent to review for ordering.
+- **Delete.** A finalizer, `last.moogie-labs.com/teardown`, is added
+  before the first Create and holds the Intent until its teardown
+  completes. A deletion overrides everything else (§4.3).
+  - **Start.** The operator aborts any open phase and reads the
+    executed plan from the audit log: the plan in the newest
+    `phase.begin` of stage Create or Update whose `phase.end` succeeded,
+    with its hash checked. It is never read from status. If the audit
+    log no longer holds it, the ManagedResources' `teardown` commands
+    stand in, with a Warning event.
+  - **Nothing to do.** An Intent that never executed is released at
+    once. One whose plan has no teardown commands is released with a
+    Warning `NoTeardown` event; nothing is torn down.
+  - **Plan.** Stage `Delete` planning is one exchange. The model must
+    answer with a plan whose `resources` is `[]` and whose steps are a
+    permutation of the executed plan's teardown commands. The operator
+    checks this before recording it, and sends a correction for a
+    reordered-wrongly, added or dropped step. The model orders the
+    commands; it cannot change them.
+  - **Approval.** The plan awaits an `IntentApproval` for stage Delete.
+    The gateway authorizes Delete by approval only, never by allow rule
+    or Auto mode. The phase is `TearingDown` while it runs.
+  - **End.** On success the operator releases the finalizer. The
+    ManagedResources go by owner-reference garbage collection, and so do
+    their output Secrets. The gateway drops the Intent's record.
+  - **Failure.** The Intent moves to `Failed` with reason
+    `TeardownFailed` and keeps its finalizer. Changing the
+    `last.moogie-labs.com/retry` annotation plans the teardown again,
+    with the failure as context; the operator records the value it acted
+    on in `status.observedRetry`. A spec edit does not.
+  - **Restarts.** A gateway restart mid-teardown closes the Delete phase
+    as interrupted, and the operator plans the Delete again.
+  - **Approvals are bound to the Intent's UID** (`spec.intentUID`). An
+    approval for an earlier Intent of the same name, or older than
+    `approvals.maxAge` (default 24h), authorizes nothing, whether it
+    approves or denies.
 - **Failures (M2).** A step that exits non-zero sends the Intent back to
   Planning with the failure as context. Any other failure moves it to
   `Failed`, with the reason in its `Ready` condition:
@@ -561,6 +593,7 @@ Pending → Clarifying ⇄ (user answers)
   - `ExecutionFailed`
   - `ExecutionInterrupted`
   - `VerificationFailed`
+  - `TeardownFailed` (a Delete; retried with the annotation above)
 
   A spec edit retries a failed Intent. Automatic retry with backoff
   arrives with Auto modes (M5). Until then every replan needs a fresh
@@ -1574,6 +1607,12 @@ The CRs emit standard Kubernetes Events for phase transitions.
   name. This bites only when a preloaded image's name isn't pullable by the
   node (kind-loaded or air-gapped preloads), so such installs must reference
   the base image by one name (the pinned digest), as the e2e now does.
+- **Removing the finalizer by hand skips the teardown.** Anyone who
+  can patch an Intent can remove `last.moogie-labs.com/teardown` and
+  let the Intent go without a Delete plan or approval. The resources it
+  created stay in the world, and the ManagedResources go by garbage
+  collection, so nothing probes them any more. Prefer fixing the cause
+  of a failed teardown and changing the retry annotation.
 - **Operator-wide credentials.** Every namespace allowed to use a
   Provider shares its full permissions.
 - **Auto-mode discovery runs before any plan exists.** With
