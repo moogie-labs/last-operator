@@ -40,7 +40,7 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing); err != nil {
 		return nil, notFoundOr(err, "intent")
 	}
-	rec, err := g.state.Load(ctx, key)
+	rec, err := g.state.Load(ctx, key, string(existing.UID))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}

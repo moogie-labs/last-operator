@@ -254,9 +254,33 @@ func (g *Gateway) prepareLeading(ctx context.Context, w *audit.Writer) error {
 	if err := g.prepareImages(ctx, op); err != nil {
 		return err
 	}
+	if err := g.closeInterruptedPhases(ctx, w); err != nil {
+		return err
+	}
 	g.rpcMu.Lock()
 	g.draining = false
 	g.rpcMu.Unlock()
+	return nil
+}
+
+// closeInterruptedPhases ends every phase another gateway process left open, so
+// a restart mid-phase never leaves an Intent waiting for the next BeginPhase.
+func (g *Gateway) closeInterruptedPhases(ctx context.Context, w *audit.Writer) error {
+	recs, err := g.state.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		if rec.Open == nil || rec.Open.Epoch == g.epoch {
+			continue
+		}
+		unlock := g.locks.lock(rec.Intent)
+		err := g.closeInterrupted(ctx, w, rec.Intent, rec)
+		unlock()
+		if err != nil {
+			return fmt.Errorf("gateway: close interrupted phase of %s: %w", rec.Intent, err)
+		}
+	}
 	return nil
 }
 

@@ -132,7 +132,7 @@ func TestLeadSavesCollectedIndexEntriesWhenSteppingDown(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("lead returned %v after cancel", err)
 	}
-	rec, err := g.state.Load(context.Background(), "team-x/web")
+	rec, err := g.state.LoadAny(context.Background(), "team-x/web")
 	if err != nil || len(rec.Index) != 1 || rec.Index[0].Seq != 7 {
 		t.Fatalf("record index after stepping down = %v, %v; want the collected entry", rec.Index, err)
 	}

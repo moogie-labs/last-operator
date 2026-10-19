@@ -145,7 +145,7 @@ func TestRunProbesAllowsOneRunInFlight(t *testing.T) {
 func TestRunProbesRefusesATamperedExecutedRecord(t *testing.T) {
 	env, in := newRunEnv(t, twoSteps(), probedResource())
 	executeAll(t, env, in)
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil {
 		t.Fatal(err)
 	}

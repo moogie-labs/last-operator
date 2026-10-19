@@ -50,10 +50,13 @@ const MaxRecordBytes = 900 << 10
 // already opened a phase. Only the leading gateway writes it, and only after the
 // matching phase.begin / phase.end entry is durable; the operator cannot read it.
 type IntentRecord struct {
-	Intent   string        `json:"intent"`
-	Open     *OpenPhase    `json:"open,omitempty"`
-	Executed *ExecutedPlan `json:"executed,omitempty"`
-	Used     []string      `json:"used,omitempty"`
+	Intent string `json:"intent"`
+	// IntentUID is the UID of the Intent object this record belongs to. A record
+	// for another UID (the Intent was deleted and recreated) is reset on Load.
+	IntentUID string        `json:"intentUID,omitempty"`
+	Open      *OpenPhase    `json:"open,omitempty"`
+	Executed  *ExecutedPlan `json:"executed,omitempty"`
+	Used      []string      `json:"used,omitempty"`
 	// UsedDiscovery holds Discovery subjects, kept apart from Used.
 	UsedDiscovery []string `json:"usedDiscovery,omitempty"`
 	// Index lists the Intent's recent indexed audit entries, oldest first.
@@ -140,8 +143,28 @@ func recordName(intent string) string {
 	return "last-intent-" + hex.EncodeToString(sum[:])[:20]
 }
 
-// Load returns the intent's record, or an empty one when none exists.
-func (s *StateStore) Load(ctx context.Context, intent string) (*LoadedRecord, error) {
+// Load returns the intent's record for the Intent object with this UID, or an
+// empty one when none exists. A stored record for a different, non-empty UID
+// comes back empty (the Intent was recreated); its ConfigMap is kept so the next
+// Save overwrites it. A record with no stored UID adopts uid.
+func (s *StateStore) Load(ctx context.Context, intent, uid string) (*LoadedRecord, error) {
+	r, err := s.LoadAny(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+	if uid == "" {
+		return r, nil
+	}
+	if r.IntentUID != "" && r.IntentUID != uid {
+		r.IntentRecord = IntentRecord{Intent: intent}
+	}
+	r.IntentUID = uid
+	return r, nil
+}
+
+// LoadAny returns the intent's record whatever UID it holds, keeping the stored
+// UID. A new record has an empty UID, which the next Load adopts.
+func (s *StateStore) LoadAny(ctx context.Context, intent string) (*LoadedRecord, error) {
 	cm, err := s.kube.CoreV1().ConfigMaps(s.ns).Get(ctx, recordName(intent), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return &LoadedRecord{IntentRecord: IntentRecord{Intent: intent}}, nil
@@ -149,14 +172,44 @@ func (s *StateStore) Load(ctx context.Context, intent string) (*LoadedRecord, er
 	if err != nil {
 		return nil, fmt.Errorf("gateway: load intent record: %w", err)
 	}
+	return decodeRecord(cm, intent)
+}
+
+func decodeRecord(cm *corev1.ConfigMap, intent string) (*LoadedRecord, error) {
 	var rec IntentRecord
 	if err := json.Unmarshal([]byte(cm.Data[stateKey]), &rec); err != nil {
 		return nil, fmt.Errorf("gateway: intent record %s is corrupt: %w", cm.Name, err)
 	}
-	if rec.Intent != intent {
+	if intent != "" && rec.Intent != intent {
 		return nil, fmt.Errorf("gateway: intent record %s belongs to %q, not %q", cm.Name, rec.Intent, intent)
 	}
 	return &LoadedRecord{IntentRecord: rec, cm: cm}, nil
+}
+
+// Delete removes the intent's record; a missing record is not an error.
+func (s *StateStore) Delete(ctx context.Context, intent string) error {
+	err := s.kube.CoreV1().ConfigMaps(s.ns).Delete(ctx, recordName(intent), metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("gateway: delete intent record: %w", err)
+	}
+	return nil
+}
+
+// List returns every intent record in the gateway namespace.
+func (s *StateStore) List(ctx context.Context) ([]*LoadedRecord, error) {
+	l, err := s.kube.CoreV1().ConfigMaps(s.ns).List(ctx, metav1.ListOptions{LabelSelector: labelComponent + "=" + stateComponent})
+	if err != nil {
+		return nil, fmt.Errorf("gateway: list intent records: %w", err)
+	}
+	out := make([]*LoadedRecord, 0, len(l.Items))
+	for i := range l.Items {
+		r, err := decodeRecord(&l.Items[i], "")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // Save writes the record, creating its ConfigMap on first use. An update carries

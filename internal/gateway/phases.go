@@ -404,7 +404,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, err
 	}
 
-	rec, err := g.state.Load(ctx, key)
+	rec, err := g.state.Load(ctx, key, string(intent.UID))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
@@ -544,7 +544,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 			return nil, d.deny(codes.FailedPrecondition, "the phase cannot succeed: %d of %d steps succeeded", p.next, len(p.body.Steps))
 		}
 	}
-	rec, err := g.state.Load(ctx, key)
+	rec, err := g.state.LoadAny(ctx, key) // BeginPhase already bound the record to the Intent's UID
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}

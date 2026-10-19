@@ -50,7 +50,7 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 	if err := g.flushIndex(ctx, key); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "could not save the audit index: %v", err)
 	}
-	rec, err := g.state.Load(ctx, key)
+	rec, err := g.state.LoadAny(ctx, key)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}

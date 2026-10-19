@@ -35,7 +35,7 @@ rules:
     verbs: [get, list, create, delete]   # signing key, provider credentials, per-run token anchors
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, create, update]   # public key, LLM scripts, gateway-owned intent records
+    verbs: [get, list, create, update, delete]   # public key, LLM scripts, gateway-owned intent records (delete: a finished Intent's record)
   - apiGroups: [""]
     resources: [serviceaccounts/token]
     verbs: [create]                      # kubernetes Provider tokens, bound to the run anchor

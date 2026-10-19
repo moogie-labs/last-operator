@@ -58,7 +58,7 @@ func TestBeginPhaseOpensAnApprovedPlan(t *testing.T) {
 	if p.Plan != string(canonical) || p.Steps != 2 {
 		t.Fatalf("phase.begin payload = %+v", p)
 	}
-	rec, err := env.g.state.Load(context.Background(), envKey)
+	rec, err := env.g.state.LoadAny(context.Background(), envKey)
 	if err != nil || rec.Open == nil || rec.Open.BeginSeq != begin.Seq || rec.Open.Epoch != env.g.epoch {
 		t.Fatalf("record = %+v, %v", rec.IntentRecord, err)
 	}
@@ -230,7 +230,7 @@ func TestEndPhase(t *testing.T) {
 	if last.Type != audit.TypePhaseEnd || json.Unmarshal(last.Payload, &p) != nil || p.Outcome != outcomeFailed || last.Actor != testOperator {
 		t.Fatalf("last = %s %s", last.Type, last.Payload)
 	}
-	rec, _ := env.g.state.Load(context.Background(), envKey)
+	rec, _ := env.g.state.LoadAny(context.Background(), envKey)
 	if rec.Open != nil || rec.Executed != nil {
 		t.Fatalf("record after a failed phase = %+v", rec.IntentRecord)
 	}
@@ -306,7 +306,7 @@ func TestEndPhaseRetriesTheStateSaveWithoutASecondPhaseEnd(t *testing.T) {
 	if ends != 1 {
 		t.Fatalf("phase.end entries for the phase = %d, want 1", ends)
 	}
-	rec, _ := env.g.state.Load(context.Background(), envKey)
+	rec, _ := env.g.state.LoadAny(context.Background(), envKey)
 	if rec.Open != nil || rec.Executed == nil || rec.Executed.PlanHash != h {
 		t.Fatalf("record = %+v", rec.IntentRecord)
 	}

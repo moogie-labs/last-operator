@@ -86,7 +86,7 @@ func TestDiscoveryRunsAnApprovedCommandAsAOneStepPhase(t *testing.T) {
 	env := newProviderEnv(t, in, discoveryApproval("look", subject, lastv1alpha1.DecisionApprove))
 	env.runDiscovery(c, subject)
 
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || rec.Executed != nil || !slices.Contains(rec.UsedDiscovery, subject) || len(rec.Used) != 0 {
 		t.Fatalf("record = %+v, %v; want no executed plan and the subject used", rec, err)
 	}
@@ -179,7 +179,7 @@ func TestDiscoveryNeverReplacesTheExecutedPlan(t *testing.T) {
 	}
 	env.runDiscovery(c, pc.Hash)
 
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || rec.Executed == nil || rec.Executed.PlanHash != in.Status.Plan.Hash {
 		t.Fatalf("executed plan = %+v, %v; want the Create plan kept", rec.Executed, err)
 	}

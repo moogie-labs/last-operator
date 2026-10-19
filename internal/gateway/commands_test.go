@@ -129,7 +129,7 @@ func TestRunCommandRunsTheResolvedPlanAndEndsThePhase(t *testing.T) {
 	if _, err := env.end(h, true); err != nil {
 		t.Fatal(err)
 	}
-	rec, _ := env.g.state.Load(env.ctx, envKey)
+	rec, _ := env.g.state.LoadAny(env.ctx, envKey)
 	canonical, _ := plan.Canonical(plan.FromStatus(in.Status.Plan))
 	if rec.Executed == nil || rec.Executed.PlanHash != h || rec.Executed.Plan != string(canonical) {
 		t.Fatalf("executed record = %+v", rec.Executed)

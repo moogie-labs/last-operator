@@ -103,7 +103,7 @@ func (g *Gateway) saveIndexLocked(ctx context.Context, intent string) error {
 	if len(es) == 0 {
 		return nil
 	}
-	rec, err := g.state.Load(ctx, intent)
+	rec, err := g.state.LoadAny(ctx, intent)
 	if err != nil {
 		g.index.restore(intent, es)
 		return err

@@ -170,7 +170,7 @@ func TestQueryAuditReportsTruncation(t *testing.T) {
 	if _, err := env.query(&gatewayv1.QueryAuditRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestQueryAuditRefusesAnEntryThatIsNotWhatTheIndexSays(t *testing.T) {
 	if _, err := env.query(&gatewayv1.QueryAuditRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestQueryAuditRefusesAnEntryThatIsNotWhatTheIndexSays(t *testing.T) {
 
 func TestFlushIndexDropsOldestEntriesWhenTheRecordIsFull(t *testing.T) {
 	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestFlushIndexDropsOldestEntriesWhenTheRecordIsFull(t *testing.T) {
 	if err := env.g.flushIndex(env.ctx, envKey); err != nil {
 		t.Fatal(err)
 	}
-	rec, err = env.g.state.Load(env.ctx, envKey)
+	rec, err = env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || len(rec.Index) == 0 || len(rec.Index) == maxIndexEntries || rec.IndexFloor == 0 || rec.Executed == nil {
 		t.Fatalf("record = %d index entries, floor %d, executed %v; %v", len(rec.Index), rec.IndexFloor, rec.Executed != nil, err)
 	}
@@ -231,7 +231,7 @@ func TestFlushIndexDropsOldestEntriesWhenTheRecordIsFull(t *testing.T) {
 
 func TestSaveRecordDropsIndexEntriesSoPhaseStateAlwaysFits(t *testing.T) {
 	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestSaveRecordDropsIndexEntriesSoPhaseStateAlwaysFits(t *testing.T) {
 	if err := env.g.saveRecord(env.ctx, rec); err != nil {
 		t.Fatalf("saveRecord = %v", err)
 	}
-	got, err := env.g.state.Load(env.ctx, envKey)
+	got, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || got.Executed == nil || len(got.Index) >= maxIndexEntries || got.IndexFloor == 0 {
 		t.Fatalf("record = %d index entries, floor %d, executed %v; %v", len(got.Index), got.IndexFloor, got.Executed != nil, err)
 	}
@@ -318,7 +318,7 @@ func TestPeriodicFlushSkipsABusyIntentAndKeepsItsEntriesPending(t *testing.T) {
 		unlock()
 		t.Fatal("the periodic flush blocked on a busy Intent")
 	}
-	rec, err := env.g.state.Load(env.ctx, envKey)
+	rec, err := env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || len(rec.Index) != 0 {
 		t.Fatalf("busy Intent: record index = %v, %v; want nothing saved", rec.Index, err)
 	}
@@ -327,7 +327,7 @@ func TestPeriodicFlushSkipsABusyIntentAndKeepsItsEntriesPending(t *testing.T) {
 	}
 	unlock()
 	env.g.flushIndexes(env.ctx)
-	rec, err = env.g.state.Load(env.ctx, envKey)
+	rec, err = env.g.state.LoadAny(env.ctx, envKey)
 	if err != nil || len(rec.Index) != 2 || len(env.g.index.pending[envKey]) != 0 {
 		t.Fatalf("idle Intent: record index = %v, %v; want both entries saved", rec.Index, err)
 	}
