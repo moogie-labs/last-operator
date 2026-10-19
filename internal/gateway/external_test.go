@@ -360,6 +360,33 @@ func (ge *gcEnv) seedExternal(ext *imagestest.Registry, inst []lastv1alpha1.Argv
 	return hash, digest
 }
 
+// An external registry has no sidecar to protect, so a GC run there never pauses
+// builds: it finishes while a build is still running.
+func TestImageGCInExternalModeDoesNotPauseBuilds(t *testing.T) {
+	ext := imagestest.New(t, testExtUser, testExtPW)
+	ge := newGCEnv(t, externalOp(ext.Host+"/"+testExtPath))
+	useExternal(t, ge.imageEnv, ext)
+	_, digest := ge.seedExternal(ext, trueInstall, time.Now().Add(-31*day))
+	ge.fb.block = make(chan struct{})
+	built := make(chan error, 1)
+	go func() { _, err := ge.resolve(toolInstall); built <- err }()
+	ge.waitStarted()
+
+	if err := waitDone(t, ge.runAsync(context.Background())); err != nil {
+		t.Fatal(err)
+	}
+	if ge.g.builds.isPaused() {
+		t.Fatal("builds are paused in external mode")
+	}
+	if _, dels, r := ge.gcAudit(); len(dels) != 1 || !dels[0].RegistryDeleted || r.Deleted != 1 || ext.Has(t, testExtPath, digest) {
+		t.Fatalf("deletions %+v, result %+v; want the candidate deleted while the build ran", dels, r)
+	}
+	close(ge.fb.block)
+	if err := <-built; err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Review Focus 5: an external registry that refuses DELETE does not wedge GC.
 func TestImageGCInExternalMode(t *testing.T) {
 	ext := imagestest.New(t, testExtUser, testExtPW)
@@ -412,22 +439,41 @@ func TestImageGCInExternalMode(t *testing.T) {
 	ge.noSecretsIn(append(extSecrets(), testAdminPW)...)
 }
 
-// Carried from Task 3's review: a hung DELETE cannot hold builds paused.
+// Carried from Task 3's review: a hung DELETE cannot hold builds paused. The first
+// DELETE that times out ends the DELETE phase: the remaining candidates stay
+// indexed, untouched, for the next run, and the sidecar is still called.
 func TestImageGCBoundsEachManifestDelete(t *testing.T) {
 	ge := newGCEnv(t, imageOp(nil))
 	ge.g.gcDeleteTimeout = 100 * time.Millisecond
-	ge.seed(trueInstall, time.Now().Add(-31*day))
-	ge.holdDeletes() // never released: only the timeout ends the DELETE
+	old := time.Now().Add(-31 * day)
+	h1, d1 := ge.seed(trueInstall, old)
+	h2, d2 := ge.seed(falseInstall, old)
+	h3, d3 := ge.seed(toolInstall, old)
+	first := slices.Min([]string{h1, h2, h3}) // candidates go in sorted order
+	release := ge.holdDeletes()               // only the timeout ends the first DELETE
 	done := ge.runAsync(context.Background())
 	if err := waitDone(t, done); err != nil {
 		t.Fatal(err)
 	}
-	_, dels, result := ge.gcAudit()
-	if len(dels) != 1 || dels[0].RegistryDeleted || !strings.Contains(dels[0].Error, "deadline exceeded") {
-		t.Fatalf("image.deleted = %+v, want the timed-out DELETE recorded", dels)
+	release()
+	start, dels, result := ge.gcAudit()
+	if len(start.Candidates) != 3 || len(dels) != 1 || dels[0].SpecHash != first || dels[0].RegistryDeleted ||
+		!strings.Contains(dels[0].Error, "deadline exceeded") {
+		t.Fatalf("image.deleted = %+v, want only the first, timed-out DELETE recorded", dels)
 	}
-	if result.Deleted != 0 || ge.calls.Load() != 1 {
-		t.Fatalf("image.gc.result = %+v with %d sidecar calls; want the run to go on", result, ge.calls.Load())
+	if result.Deleted != 0 || *result.Deferred != 2 || *result.Kept != 0 || ge.calls.Load() != 1 {
+		t.Fatalf("image.gc.result = %+v with %d sidecar calls; want 2 deferred and the sidecar called", result, ge.calls.Load())
+	}
+	for h, d := range map[string]string{h1: d1, h2: d2, h3: d3} {
+		if h == first {
+			continue
+		}
+		if _, ok := ge.g.images.get(h); !ok || !ge.inRegistry(d) {
+			t.Fatalf("deferred candidate %s left the index or the registry", h)
+		}
+	}
+	if _, ok := ge.g.images.get(first); ok {
+		t.Fatal("the timed-out candidate is still indexed")
 	}
 	if ge.g.builds.isPaused() {
 		t.Fatal("builds are still paused")

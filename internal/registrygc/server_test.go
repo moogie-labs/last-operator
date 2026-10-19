@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -299,18 +300,23 @@ func TestLockIsReleasedAfterFailureAndAfterConflict(t *testing.T) {
 	}
 }
 
-func TestRunSurvivesClientDisconnect(t *testing.T) {
+// A client that disconnects (the gateway stepping down, or giving up after its
+// timeout) cancels the run, so it never sweeps while builds resume. The lock is
+// held until the process has ended, however long it takes to exit.
+func TestADisconnectCancelsTheRun(t *testing.T) {
 	f := newFixture(t, true)
 	started := make(chan struct{})
-	release := make(chan struct{})
-	runErr := make(chan error, 1)
+	cancelled := make(chan struct{})
+	exited := make(chan struct{})
 	var first atomic.Bool
 	first.Store(true)
 	f.run(func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 		if first.Swap(false) {
 			close(started)
-			<-release
-			runErr <- ctx.Err()
+			<-ctx.Done()
+			close(cancelled)
+			<-exited // the killed process takes a while to exit
+			return nil, ctx.Err()
 		}
 		return nil, nil
 	})
@@ -325,16 +331,18 @@ func TestRunSurvivesClientDisconnect(t *testing.T) {
 	}()
 	<-started
 	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a disconnect did not cancel the run")
+	}
 	if code := postAdmin(h).Code; code != http.StatusConflict {
-		t.Fatalf("status %d, want 409 while the abandoned run continues", code)
+		t.Fatalf("status %d, want 409 until the cancelled process has exited", code)
 	}
-	close(release)
+	close(exited)
 	<-done
-	if err := <-runErr; err != nil {
-		t.Fatalf("run context was cancelled: %v", err)
-	}
 	if code := postAdmin(h).Code; code != http.StatusOK {
-		t.Fatalf("status %d after the run ended", code)
+		t.Fatalf("status %d after the cancelled run ended", code)
 	}
 }
 

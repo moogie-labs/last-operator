@@ -29,12 +29,14 @@ const (
 	defaultImageGCInterval = 24 * time.Hour
 	// defaultUnusedRetention is images.unusedRetention's default (30 days).
 	defaultUnusedRetention = 30 * 24 * time.Hour
-	// registryGCTimeout bounds the sidecar's run of registry garbage-collect.
-	registryGCTimeout = 30 * time.Minute
+	// registryGCTimeout bounds the call to the GC sidecar. It is a minute above the
+	// sidecar's own 30-minute bound on its run, so the sidecar times out first and
+	// still answers with what it freed. Giving up disconnects, which kills the run.
+	registryGCTimeout = 31 * time.Minute
 	// maxSidecarError bounds the sidecar's answer quoted in a sidecarError.
 	maxSidecarError = 1 << 10
-	// maxSidecarAnswer bounds the sidecar's 200 answer the gateway reads; its log is
-	// at most 64 KiB.
+	// maxSidecarAnswer bounds the sidecar's answer the gateway reads; its log is at
+	// most 64 KiB.
 	maxSidecarAnswer = 1 << 20
 	// defaultGCDeleteTimeout bounds each manifest DELETE, so a hung one cannot hold
 	// builds paused.
@@ -55,7 +57,12 @@ type imageGCDeleter interface {
 
 // gcResult is one run's outcome, as image.gc.result records it.
 type gcResult struct {
-	Deleted      int
+	Deleted int
+	// Kept counts candidates used since the run started, which stay indexed.
+	Kept int
+	// Deferred counts candidates left for the next run, untouched, because a
+	// manifest DELETE timed out.
+	Deferred     int
 	BytesFreed   int64
 	SidecarError string
 }
@@ -77,6 +84,8 @@ type imageDeleted struct {
 // gcResultPayload is the image.gc.result audit payload.
 type gcResultPayload struct {
 	Deleted      int    `json:"deleted"`
+	Kept         int    `json:"kept"`
+	Deferred     int    `json:"deferred"`
 	BytesFreed   int64  `json:"bytesFreed"`
 	SidecarError string `json:"sidecarError,omitempty"`
 	DurationMs   int64  `json:"durationMs"`
@@ -96,15 +105,16 @@ func (g *Gateway) startImageGC(ctx context.Context, w *audit.Writer) bool {
 			slog.Error("Image garbage collection failed", "deleted", res.Deleted, "err", err)
 			return
 		}
-		slog.Info("Collected unused images", "deleted", res.Deleted, "bytesFreed", res.BytesFreed,
-			"sidecarError", res.SidecarError)
+		slog.Info("Collected unused images", "deleted", res.Deleted, "kept", res.Kept, "deferred", res.Deferred,
+			"bytesFreed", res.BytesFreed, "sidecarError", res.SidecarError)
 	})
 	return true
 }
 
 // runImageGC performs one collection (spec §11.3, design §6.1):
 //  1. write image.gc.start with the candidates;
-//  2. pause new builds and wait for running ones;
+//  2. in bundled mode, pause new builds and wait for running ones (an external
+//     registry has no sidecar to protect, so builds go on);
 //  3. for each candidate still unused, drop it from the index, delete its manifest,
 //     and write image.deleted;
 //  4. call the registry's GC sidecar (bundled mode, when there is one);
@@ -113,7 +123,9 @@ func (g *Gateway) startImageGC(ctx context.Context, w *audit.Writer) bool {
 //
 // Builds resume on every path. Failures before step 1 return an error and change
 // nothing. A failed DELETE is recorded in its image.deleted and a failed sidecar
-// call in image.gc.result; neither stops the run. Cancellation stops it: builds
+// call in image.gc.result; neither stops the run. A DELETE that times out ends
+// step 3: the remaining candidates stay indexed for the next run (counted as
+// deferred), and the run goes on to step 4. Cancellation stops the run: builds
 // resume, image.gc.result records what was done, and the error is returned.
 func (g *Gateway) runImageGC(ctx context.Context, w *audit.Writer) (gcResult, error) {
 	if !g.gcMu.TryLock() {
@@ -154,7 +166,8 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 	}
 	slices.Sort(candidates)
 	// An external registry has no sidecar; its own lifecycle policy reclaims storage.
-	callSidecar := !externalRegistry(op) && g.cfg.RegistryGCURL != ""
+	external := externalRegistry(op)
+	callSidecar := !external && g.cfg.RegistryGCURL != ""
 	var target registryTarget
 	var deleter imageGCDeleter
 	var admin *images.Credentials
@@ -184,27 +197,40 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 
 	var res gcResult
 	runErr := func() error {
-		resume, err := g.builds.pause(ctx)
-		if err != nil {
-			res.SidecarError = "not called: " + err.Error()
-			return fmt.Errorf("gateway: pause image builds: %w", err)
+		// The pause keeps uploads away from the sidecar's sweep; an external
+		// registry has no sidecar, so its builds go on.
+		resume := func() {}
+		if !external {
+			if resume, err = g.builds.pause(ctx); err != nil {
+				res.SidecarError = "not called: " + err.Error()
+				return fmt.Errorf("gateway: pause image builds: %w", err)
+			}
 		}
 		defer resume()
-		for _, h := range candidates {
+		for i, h := range candidates {
 			if err := ctx.Err(); err != nil {
 				res.SidecarError = "not called: " + err.Error()
 				return err
 			}
-			if err := g.deleteImage(ctx, actx, w, deleter, target, h, entries[h], cutoff, &res); err != nil {
+			timedOut, err := g.deleteImage(ctx, actx, w, deleter, target, h, entries[h], cutoff, &res)
+			if err != nil {
 				res.SidecarError = "not called: " + err.Error()
 				return err
+			}
+			if timedOut {
+				res.Deferred = len(candidates) - i - 1
+				if res.Deferred > 0 {
+					slog.Warn("Deferred unused images to the next GC run after a manifest DELETE timed out",
+						"deferred", res.Deferred)
+				}
+				break
 			}
 		}
 		if callSidecar {
 			freed, err := g.callRegistryGC(ctx, admin)
 			if err != nil {
 				res.SidecarError = err.Error()
-				slog.Warn("Registry garbage collection failed", "err", err)
+				slog.Warn("Registry garbage collection failed", "bytesFreed", freed, "err", err)
 			}
 			res.BytesFreed = freed
 		}
@@ -213,7 +239,7 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 	}()
 
 	if _, err := w.Append(actx, draft(audit.TypeImageGCResult, gcResultPayload{Deleted: res.Deleted,
-		BytesFreed: res.BytesFreed, SidecarError: res.SidecarError, DurationMs: time.Since(began).Milliseconds()})); err != nil {
+		Kept: res.Kept, Deferred: res.Deferred, BytesFreed: res.BytesFreed, SidecarError: res.SidecarError, DurationMs: time.Since(began).Milliseconds()})); err != nil {
 		return res, errors.Join(runErr, fmt.Errorf("gateway: write %s: %w", audit.TypeImageGCResult, err))
 	}
 	return res, runErr
@@ -222,12 +248,13 @@ func (g *Gateway) collectImages(ctx context.Context, w *audit.Writer) (gcResult,
 // deleteImage drops one candidate, if it is still unused, then deletes its manifest
 // from target and writes image.deleted. Dropping first means no resolve can hand out
 // the digest once the DELETE is sent; a resolve that used the entry before the drop
-// keeps it. Each DELETE gets gcDeleteTimeout. A registry that refuses DELETE (405 or
-// UNSUPPORTED) is recorded as registryDeleted false, like any failure, and the entry
-// stays out of the index. The error is set only when image.deleted could not be
-// written.
+// keeps it (counted in res.Kept). Each DELETE gets gcDeleteTimeout. A registry that
+// refuses DELETE (405 or UNSUPPORTED) is recorded as registryDeleted false, like any
+// failure, and the entry stays out of the index. timedOut reports a DELETE that ran
+// out of gcDeleteTimeout (not one cut short by ctx). The error is set only when
+// image.deleted could not be written.
 func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, deleter imageGCDeleter, target registryTarget,
-	specHash string, e imageEntry, cutoff time.Time, res *gcResult) error {
+	specHash string, e imageEntry, cutoff time.Time, res *gcResult) (timedOut bool, err error) {
 	digest, reg := e.Digest, g.entryRegistry(e)
 	dropped, err := g.images.dropUnused(actx, specHash, digest, cutoff)
 	if err != nil {
@@ -236,8 +263,9 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 		slog.Warn("Could not save the image index after dropping an entry", "specHash", specHash, "err", err)
 	}
 	if !dropped {
+		res.Kept++
 		slog.Info("Kept an image used since GC started", "specHash", specHash, "digest", digest)
-		return nil
+		return false, nil
 	}
 	g.builds.forgetHead(reg + "@" + digest)
 	rec := imageDeleted{SpecHash: specHash, Digest: digest}
@@ -248,9 +276,9 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 		slog.Info("Dropped an unused image built into another registry; its manifest stays there",
 			"specHash", specHash, "digest", digest, "registry", reg)
 		if _, err := w.Append(actx, audit.Draft{Type: audit.TypeImageDeleted, Actor: sandbox.GatewayActor, Payload: rec}); err != nil {
-			return fmt.Errorf("gateway: write %s: %w", audit.TypeImageDeleted, err)
+			return false, fmt.Errorf("gateway: write %s: %w", audit.TypeImageDeleted, err)
 		}
-		return nil
+		return false, nil
 	}
 	timeout := g.gcDeleteTimeout
 	if timeout <= 0 {
@@ -258,6 +286,7 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 	}
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	err = deleter.Delete(dctx, target.repo, digest)
+	timedOut = err != nil && errors.Is(dctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	cancel()
 	switch {
 	case errors.Is(err, images.ErrDeleteUnsupported):
@@ -272,9 +301,9 @@ func (g *Gateway) deleteImage(ctx, actx context.Context, w *audit.Writer, delete
 		res.Deleted++
 	}
 	if _, err := w.Append(actx, audit.Draft{Type: audit.TypeImageDeleted, Actor: sandbox.GatewayActor, Payload: rec}); err != nil {
-		return fmt.Errorf("gateway: write %s: %w", audit.TypeImageDeleted, err)
+		return false, fmt.Errorf("gateway: write %s: %w", audit.TypeImageDeleted, err)
 	}
-	return nil
+	return timedOut, nil
 }
 
 // adminCredential reads the bundled registry's admin credential. Neither value may
@@ -292,7 +321,9 @@ func (g *Gateway) adminCredential(ctx context.Context) (*images.Credentials, err
 }
 
 // callRegistryGC asks the GC sidecar to run registry garbage-collect and returns
-// the bytes it freed.
+// the bytes it freed. A failed run may have freed some before it stopped: its
+// answer's bytesFreed is returned with the error. Cancelling ctx, or reaching
+// registryGCTimeout, disconnects, and the sidecar then kills the run.
 func (g *Gateway) callRegistryGC(ctx context.Context, admin *images.Credentials) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, registryGCTimeout)
 	defer cancel()
@@ -301,24 +332,41 @@ func (g *Gateway) callRegistryGC(ctx context.Context, admin *images.Credentials)
 		return 0, fmt.Errorf("registry GC request: %w", err)
 	}
 	req.SetBasicAuth(admin.Username, admin.Password)
-	resp, err := (&http.Client{Timeout: registryGCTimeout}).Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("registry GC: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxSidecarError))
-		return 0, fmt.Errorf("registry GC answered %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
 	var reply struct {
 		BytesFreed int64  `json:"bytesFreed"`
 		Log        string `json:"log"`
+		Error      string `json:"error"`
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxSidecarAnswer))
+		if json.Unmarshal(body, &reply) != nil || reply.Error == "" {
+			return 0, fmt.Errorf("registry GC answered %s: %s", resp.Status, truncate(strings.TrimSpace(string(body)), maxSidecarError))
+		}
+		slog.Debug("Registry garbage collection log", "log", reply.Log)
+		msg := reply.Error
+		if l := strings.TrimSpace(reply.Log); l != "" {
+			msg += "; log ends: " + l[max(len(l)-maxSidecarError/2, 0):]
+		}
+		return max(reply.BytesFreed, 0), fmt.Errorf("registry GC answered %s: %s", resp.Status, truncate(msg, maxSidecarError))
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSidecarAnswer)).Decode(&reply); err != nil {
 		return 0, fmt.Errorf("registry GC answer: %w", err)
 	}
 	slog.Debug("Registry garbage collection log", "log", reply.Log)
 	return reply.BytesFreed, nil
+}
+
+// truncate cuts s to at most n bytes.
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // referencedSpecs returns the spec hashes, on baseDigest, of every image install in

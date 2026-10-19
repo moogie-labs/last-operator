@@ -41,7 +41,7 @@ type gcEnv struct {
 	called  chan struct{}                 // receives once per sidecar call, as it arrives
 	status  atomic.Int32                  // when set, the sidecar answers with it
 	release atomic.Pointer[chan struct{}] // when set, each sidecar call waits for it to close
-	answer  atomic.Pointer[string]        // when set, the sidecar answers 200 with it
+	answer  atomic.Pointer[string]        // when set, the sidecar answers with it (200 unless status is set)
 }
 
 func newGCEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Object) *gcEnv {
@@ -72,6 +72,11 @@ func newGCEnv(t *testing.T, op *lastv1alpha1.OperatorConfig, objs ...client.Obje
 			}
 		}
 		if code := ge.status.Load(); code != 0 {
+			if answer := ge.answer.Load(); answer != nil {
+				w.WriteHeader(int(code))
+				_, _ = io.WriteString(w, *answer)
+				return
+			}
 			http.Error(w, "garbage-collect exited 1", int(code))
 			return
 		}
@@ -184,6 +189,8 @@ type imageDeletedPayload struct {
 
 type gcResultAudit struct {
 	Deleted      int     `json:"deleted"`
+	Kept         *int    `json:"kept"`
+	Deferred     *int    `json:"deferred"`
 	BytesFreed   int64   `json:"bytesFreed"`
 	SidecarError *string `json:"sidecarError"`
 	DurationMs   *int64  `json:"durationMs"`
@@ -220,8 +227,8 @@ func (ge *gcEnv) gcAudit() (gcStartPayload, []imageDeletedPayload, gcResultAudit
 		}
 	}
 	res := payloadOf[gcResultAudit](t, results[0])
-	if res.DurationMs == nil {
-		t.Fatal("image.gc.result has no durationMs")
+	if res.DurationMs == nil || res.Kept == nil || res.Deferred == nil {
+		t.Fatalf("image.gc.result = %+v, want durationMs, kept and deferred", res)
 	}
 	return payloadOf[gcStartPayload](t, starts[0]), dels, res
 }
@@ -263,7 +270,7 @@ func TestImageGCDeletesUnusedImages(t *testing.T) {
 	if len(dels) != 1 || dels[0] != (imageDeletedPayload{SpecHash: oldHash, Digest: oldDigest, RegistryDeleted: true}) {
 		t.Fatalf("image.deleted = %+v, want the unused image deleted from the registry", dels)
 	}
-	if result.Deleted != 1 || result.BytesFreed != testBytesFreed || result.SidecarError != nil {
+	if result.Deleted != 1 || *result.Kept != 0 || *result.Deferred != 0 || result.BytesFreed != testBytesFreed || result.SidecarError != nil {
 		t.Fatalf("image.gc.result = %+v, want 1 deleted, %d bytes freed, no sidecar error", result, testBytesFreed)
 	}
 	if ge.calls.Load() != 1 {
@@ -437,8 +444,8 @@ func TestImageGCKeepsAnImageUsedDuringThePause(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, dels, result := ge.gcAudit()
-	if !slices.Equal(start.Candidates, []string{hash}) || len(dels) != 0 || result.Deleted != 0 {
-		t.Fatalf("start %+v, deletions %+v, result %+v; want the candidate kept", start, dels, result)
+	if !slices.Equal(start.Candidates, []string{hash}) || len(dels) != 0 || result.Deleted != 0 || *result.Kept != 1 {
+		t.Fatalf("start %+v, deletions %+v, result %+v; want the candidate kept and counted", start, dels, result)
 	}
 	if _, ok := ge.g.images.get(hash); !ok || !ge.inRegistry(digest) {
 		t.Fatal("GC deleted an image a resolve had just returned")
@@ -601,6 +608,27 @@ func TestImageGCRecordsASidecarFailure(t *testing.T) {
 	}
 	if _, err := ge.resolve(toolInstall); err != nil {
 		t.Fatalf("build after a sidecar failure: %v", err)
+	}
+}
+
+// A run that fails partway may have freed some storage: the sidecar's 500 answer
+// carries bytesFreed, which image.gc.result records beside the error.
+func TestImageGCRecordsAPartialSweep(t *testing.T) {
+	ge := newGCEnv(t, imageOp(nil))
+	ge.seed(trueInstall, time.Now().Add(-31*day))
+	ge.status.Store(http.StatusInternalServerError)
+	answer := `{"bytesFreed": 77, "log": "blob eligible for deletion\nfailed to delete blob", "error": "exit status 1"}`
+	ge.answer.Store(&answer)
+	res, err := ge.run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.BytesFreed != 77 || !strings.Contains(res.SidecarError, "500") || !strings.Contains(res.SidecarError, "exit status 1") ||
+		!strings.Contains(res.SidecarError, "failed to delete blob") {
+		t.Fatalf("result = %+v, want 77 bytes freed and the sidecar's error", res)
+	}
+	if _, _, r := ge.gcAudit(); r.BytesFreed != 77 || r.SidecarError == nil || *r.SidecarError != res.SidecarError {
+		t.Fatalf("image.gc.result = %+v, want the partial sweep recorded", r)
 	}
 }
 

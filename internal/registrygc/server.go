@@ -87,9 +87,12 @@ func (s *server) gc(w http.ResponseWriter, r *http.Request) {
 
 	before := dirSize(s.cfg.DataDir)
 	slog.Info("Started garbage collection", "bytesBefore", before)
-	// The run outlives the request: a client that times out or disconnects
-	// must not kill the sweep halfway, and the lock is held until it ends.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), runTimeout)
+	// The run ends with the request: a client that times out or disconnects (the
+	// gateway stepping down or resuming builds) kills it, so it never sweeps while
+	// builds upload. An interrupted run is safe; the next one collects what it left.
+	// Run returns only once the process has exited, so the lock is held until then.
+	// Shutdown waits for the request rather than cancelling it.
+	ctx, cancel := context.WithTimeout(r.Context(), runTimeout)
 	defer cancel()
 	out, err := s.cfg.Run(ctx, "registry", "garbage-collect", s.cfg.ConfigFile)
 	log := tail(out)
