@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -50,24 +51,15 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 		return nil, d.deny(codes.FailedPrecondition, "intent has no executed plan to probe")
 	}
 	d.subject = rec.Executed.PlanHash
-	// The record is canonical plan JSON: it must still hash to the approved subject.
-	sum := sha256.Sum256([]byte(rec.Executed.Plan))
-	if got := "sha256:" + hex.EncodeToString(sum[:]); got != rec.Executed.PlanHash {
-		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: it hashes to %s", got)
-	}
-	var body plan.Body
-	dec := json.NewDecoder(strings.NewReader(rec.Executed.Plan))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: %v", err)
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
+	body, err := executedBody(d, rec.Executed)
+	if err != nil {
+		return nil, err
 	}
 	// Probes are part of the executed plan: the record that its approved phase
 	// succeeded authorizes them, with no standing Approve and no age limit. A Deny
-	// of the executed plan for this Intent's UID, at any age, still stops them.
-	if deny, err := g.findDeny(ctx, &existing, lastv1alpha1.Stage(rec.Executed.Stage), rec.Executed.PlanHash); err != nil {
+	// of the executed plan for this Intent's UID, created since its phase began,
+	// still stops them.
+	if deny, err := g.findDeny(ctx, &existing, rec.Executed); err != nil {
 		return nil, err
 	} else if deny != nil {
 		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", deny.Name)
@@ -131,8 +123,36 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	return resp, nil
 }
 
-// findDeny returns a Deny of subject for the Intent's UID, whatever its age, or nil.
-func (g *Gateway) findDeny(ctx context.Context, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+// executedBody decodes the record's executed plan. The record is canonical plan
+// JSON: it must still hash to the approved subject and decode with no unknown
+// field or trailing data. Every refusal is audited through d.
+func executedBody(d denial, ex *ExecutedPlan) (plan.Body, error) {
+	sum := sha256.Sum256([]byte(ex.Plan))
+	if got := "sha256:" + hex.EncodeToString(sum[:]); got != ex.PlanHash {
+		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: it hashes to %s", got)
+	}
+	var body plan.Body
+	dec := json.NewDecoder(strings.NewReader(ex.Plan))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: %v", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return plan.Body{}, d.deny(codes.Internal, "executed plan record failed integrity check: trailing data after the plan")
+	}
+	return body, nil
+}
+
+// findDeny returns a Deny of the executed plan for the Intent's UID, or nil. A
+// Deny created before the plan's phase began is ignored: BeginPhase already
+// weighed it, and it had aged out or the phase would not have opened (R6). A
+// record without Began, or with one that does not parse, counts every Deny.
+func (g *Gateway) findDeny(ctx context.Context, intent *lastv1alpha1.Intent, ex *ExecutedPlan) (*lastv1alpha1.IntentApproval, error) {
+	stage, subject := lastv1alpha1.Stage(ex.Stage), ex.PlanHash
+	began, err := time.Parse(time.RFC3339, ex.Began)
+	if err != nil {
+		began = time.Time{}
+	}
 	var list lastv1alpha1.IntentApprovalList
 	if err := g.crd.List(ctx, &list, client.InNamespace(intent.Namespace)); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "list IntentApprovals: %v", err)
@@ -141,7 +161,8 @@ func (g *Gateway) findDeny(ctx context.Context, intent *lastv1alpha1.Intent, sta
 	for i := range list.Items {
 		a := &list.Items[i]
 		if a.Spec.IntentRef.Name != intent.Name || a.Spec.Stage != stage || a.Spec.SubjectHash != subject ||
-			a.Spec.Decision != lastv1alpha1.DecisionDeny || a.Spec.IntentUID != string(intent.UID) {
+			a.Spec.Decision != lastv1alpha1.DecisionDeny || a.Spec.IntentUID != string(intent.UID) ||
+			a.CreationTimestamp.Time.Before(began) {
 			continue
 		}
 		if found == nil || a.Name < found.Name {

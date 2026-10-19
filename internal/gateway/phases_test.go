@@ -156,12 +156,12 @@ func TestBeginPhaseDenials(t *testing.T) {
 	}
 }
 
-func TestBeginPhaseOpensCreateOnly(t *testing.T) {
+func TestBeginPhaseRefusesAnUnknownStage(t *testing.T) {
 	in := intentWithPlan(t, twoSteps())
 	env := newTestEnv(t, in, allowAll(), approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
-	_, err := env.g.beginPhase(env.ctx, &gatewayv1.BeginPhaseRequest{Intent: ref(), Stage: "Update", SubjectHash: in.Status.Plan.Hash})
+	_, err := env.g.beginPhase(env.ctx, &gatewayv1.BeginPhaseRequest{Intent: ref(), Stage: "Rollback", SubjectHash: in.Status.Plan.Hash})
 	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("Update phase = %v, want FailedPrecondition", err)
+		t.Fatalf("Rollback phase = %v, want FailedPrecondition", err)
 	}
 	if env.last().Type != audit.TypePolicyDenied {
 		t.Fatalf("last entry = %s, want policy.denied", env.last().Type)

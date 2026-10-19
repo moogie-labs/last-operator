@@ -92,6 +92,11 @@ type Plan struct {
 	UncoveredSteps []string `json:"uncoveredSteps,omitempty"`
 	// +optional
 	Generalizations map[string]Generalization `json:"generalizations,omitempty"`
+	// Nonce makes a Remediate plan its own approval subject: it is part of the
+	// hashed body, so the same repair for a recurring drift needs a new
+	// approval. Only Remediate plans carry one (32 lowercase hex characters).
+	// +optional
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // IntentStatus is written by the operator.

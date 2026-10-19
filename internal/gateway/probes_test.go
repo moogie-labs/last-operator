@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -247,4 +248,37 @@ func TestRunProbesRunAfterTheApprovalAges(t *testing.T) {
 	executeAll(t, env, in)
 	env.g.builds.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
 	env.runsProbes()
+}
+
+// A Deny older than the executed phase predates its approval, which outlived
+// it, and no longer stops probes (R6). One created since still does, and a
+// record without Began counts every Deny.
+func TestRunProbesIgnoresADenyOlderThanTheExecutedPhase(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps(), probedResource())
+	executeAll(t, env, in)
+	old := approvalFor("no-old", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+	old.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	env.approve(old)
+	env.runsProbes()
+
+	rec, err := env.g.state.Load(env.ctx, envKey, envIntentUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	began := rec.Executed.Began
+	rec.Executed.Began = "" // a record written before Began existed
+	if err := env.g.state.Save(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	env.refusesProbes()
+	rec.Executed.Began = began
+	if err := env.g.state.Save(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	env.runsProbes()
+
+	fresh := approvalFor("no-new", in.Status.Plan.Hash, lastv1alpha1.DecisionDeny, "bob")
+	fresh.CreationTimestamp = metav1.NewTime(time.Now().Add(time.Minute))
+	env.approve(fresh)
+	env.refusesProbes()
 }

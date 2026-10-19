@@ -673,9 +673,10 @@ timeout: 5m
 
 ```yaml
 plan:
-  hash: "sha256:…"   # SHA-256 of the RFC 8785 canonical JSON of steps + resources
+  hash: "sha256:…"   # SHA-256 of the RFC 8785 canonical JSON of steps + resources (+ nonce)
   steps:     [ …commands… ]
   resources: [ …ManagedResource specs with probes and teardown commands… ]
+  nonce: "…"         # Remediate plans only: 32 lowercase hex characters
 ```
 
 ### 8.3 Enforcement
@@ -716,7 +717,7 @@ The gateway checks that the
 hash matches the pending command and its nonce, that the command's step ID
 is `discovery`, and that it is at most 64 KiB. A Discovery phase never
 becomes the executed plan: probes and later stages keep following the last
-executed Create plan.
+executed Create or Update plan.
 
 **Delete phases** (stage `Delete`) open only for an Intent being deleted.
 The subject is the plan in `status.plan`, as for Create, and its `resources`
@@ -727,7 +728,19 @@ retried by replanning, and the only valid Delete plans are permutations of
 the same commands, so a one-command teardown could otherwise never run
 again; the approval of that Delete subject, bound to the Intent's UID and
 its age limit, authorizes the re-run. Every other stage stays run-once, and
-an Intent being deleted opens no Create phase.
+an Intent being deleted opens no Create, Update or Remediate phase.
+
+**Update and Remediate phases** need an executed plan in the gateway's
+record, and the gateway refuses them without one. An **Update** is checked as a Create, with the same record limit, and
+once it succeeds it becomes the executed plan. A **Remediate** plan must
+carry the executed plan's `resources` unchanged (canonical JSON, ignoring
+`intentRef`), so its outputs still name the executed plan's steps; a
+Remediate phase writes no output Secrets and never becomes the executed plan.
+Every Remediate plan carries a fresh `nonce`, part of its hash, so the same
+repair for a recurring drift is a new subject that needs its own approval.
+The gateway refuses a Remediate plan without a valid nonce, and a plan of any
+other stage with one. A nonce left empty is left out of the hash, so other
+plans hash as before.
 
 Any mismatch produces a `policy.denied` audit entry and an error to the
 operator. If a step fails, the Intent returns to **Planning** with the
@@ -761,7 +774,9 @@ gone or a recreated Intent of another UID holding the name.
 Intent's current UID means an approved phase of it succeeded, which needs no
 standing `Approve` and no age check. The gateway still refuses probes when an
 `IntentApproval` with decision `Deny` for the executed subject names the
-Intent's current UID, whatever its age: a Deny wins. The output Secrets are not the
+Intent's current UID and was created at or after the executed phase began
+(the record's `began`): a Deny wins. An older Deny was weighed when the phase
+opened, so it is ignored; a record without `began` counts every Deny. The output Secrets are not the
 gateway's to delete: they belong to their ManagedResources and go with them.
 
 - **Auto-mode remediation** is limited to re-running commands from that

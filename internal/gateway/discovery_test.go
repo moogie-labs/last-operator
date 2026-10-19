@@ -201,7 +201,7 @@ func TestDiscoveryRefusesAnOversizedCommand(t *testing.T) {
 
 func TestBeginPhaseStillRefusesOtherStages(t *testing.T) {
 	env, in := newRunEnv(t, twoSteps())
-	_, err := env.beginStage(lastv1alpha1.StageUpdate, in.Status.Plan.Hash)
+	_, err := env.beginStage("Rollback", in.Status.Plan.Hash)
 	env.wantDenied(err, codes.FailedPrecondition)
 }
 

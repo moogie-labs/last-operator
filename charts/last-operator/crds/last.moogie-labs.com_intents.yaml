@@ -315,6 +315,12 @@ spec:
                     type: object
                   hash:
                     type: string
+                  nonce:
+                    description: |-
+                      Nonce makes a Remediate plan its own approval subject: it is part of the
+                      hashed body, so the same repair for a recurring drift needs a new
+                      approval. Only Remediate plans carry one (32 lowercase hex characters).
+                    type: string
                   resources:
                     items:
                       description: |-

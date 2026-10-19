@@ -2,6 +2,7 @@
 package plan
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,15 +21,18 @@ import (
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
-// Body is the hashed part of a plan: its steps and resources (spec §8.2).
+// Body is the hashed part of a plan: its steps and resources (spec §8.2), and
+// a Remediate plan's nonce. An empty nonce is left out of the canonical JSON,
+// so a plan without one hashes as it did before nonces existed.
 type Body struct {
 	Steps     []lastv1alpha1.Command             `json:"steps"`
 	Resources []lastv1alpha1.ManagedResourceSpec `json:"resources,omitempty"`
+	Nonce     string                             `json:"nonce,omitempty"`
 }
 
 // FromStatus returns the hashed body of an Intent's status plan.
 func FromStatus(p *lastv1alpha1.Plan) Body {
-	b := Body{Steps: p.Steps, Resources: p.Resources}
+	b := Body{Steps: p.Steps, Resources: p.Resources, Nonce: p.Nonce}
 	if b.Steps == nil {
 		b.Steps = []lastv1alpha1.Command{}
 	}
@@ -59,22 +63,100 @@ func Hash(b Body) (string, error) {
 // valid Secret key and is a single reference to a step of the plan. A plan
 // that passes cannot fail at WriteOutputSecret for its shape alone.
 func Validate(b Body) error {
-	if len(b.Steps) == 0 {
-		return errors.New("plan: a plan needs at least one step")
+	seen, err := validateSteps(b.Steps)
+	if err != nil {
+		return err
+	}
+	return validateResources(b.Resources, seen)
+}
+
+// ErrResourcesChanged reports a Remediate plan whose resources are not the
+// executed plan's.
+var ErrResourcesChanged = errors.New("plan: a Remediate plan must carry the executed plan's resources unchanged")
+
+var noncePattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// ValidNonce reports whether s is a plan nonce: 32 lowercase hex characters.
+func ValidNonce(s string) bool { return noncePattern.MatchString(s) }
+
+// ValidateRemediate is Validate for a Remediate plan b, given the executed plan.
+// A remediation repairs and never redesigns (design D5): b must carry the
+// executed plan's resources unchanged (ErrResourcesChanged otherwise) and a
+// nonce. Its steps are checked as Validate checks them, while its resources'
+// outputs must name steps of the executed plan, which wrote them.
+func ValidateRemediate(b, executed Body) error {
+	if _, err := validateSteps(b.Steps); err != nil {
+		return err
+	}
+	if !ValidNonce(b.Nonce) {
+		return errors.New("plan: a Remediate plan needs a nonce of 32 lowercase hex characters")
+	}
+	same, err := SameResources(b.Resources, executed.Resources)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return ErrResourcesChanged
+	}
+	executedSteps := map[string]bool{}
+	for _, s := range executed.Steps {
+		executedSteps[s.ID] = true
+	}
+	return validateResources(b.Resources, executedSteps)
+}
+
+// SameResources reports whether a and b are the same resources, comparing
+// their canonical JSON with IntentRef cleared (the operator fills it in when it
+// creates the ManagedResources). Nil and empty are the same.
+func SameResources(a, b []lastv1alpha1.ManagedResourceSpec) (bool, error) {
+	ca, err := canonicalResources(a)
+	if err != nil {
+		return false, err
+	}
+	cb, err := canonicalResources(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(ca, cb), nil
+}
+
+func canonicalResources(rs []lastv1alpha1.ManagedResourceSpec) ([]byte, error) {
+	cleared := make([]lastv1alpha1.ManagedResourceSpec, len(rs))
+	for i, r := range rs {
+		r.IntentRef = nil
+		cleared[i] = r
+	}
+	c, err := audit.Canonical(cleared)
+	if err != nil {
+		return nil, fmt.Errorf("plan: %w", err)
+	}
+	return c, nil
+}
+
+// validateSteps checks that there is a step and that step IDs are present and
+// unique; it returns the set of IDs.
+func validateSteps(steps []lastv1alpha1.Command) (map[string]bool, error) {
+	if len(steps) == 0 {
+		return nil, errors.New("plan: a plan needs at least one step")
 	}
 	seen := map[string]bool{}
-	for i, s := range b.Steps {
+	for i, s := range steps {
 		if s.ID == "" {
-			return fmt.Errorf("plan: step %d has no id", i)
+			return nil, fmt.Errorf("plan: step %d has no id", i)
 		}
 		if seen[s.ID] {
-			return fmt.Errorf("plan: duplicate step id %q", s.ID)
+			return nil, fmt.Errorf("plan: duplicate step id %q", s.ID)
 		}
 		seen[s.ID] = true
 	}
+	return seen, nil
+}
+
+// validateResources checks resources whose outputs may name the steps in seen.
+func validateResources(resources []lastv1alpha1.ManagedResourceSpec, seen map[string]bool) error {
 	probes := map[string]bool{}
 	secrets := map[string]bool{}
-	for i, r := range b.Resources {
+	for i, r := range resources {
 		for _, p := range r.Probes {
 			if probes[p.ID] {
 				return fmt.Errorf("plan: duplicate probe id %q", p.ID)

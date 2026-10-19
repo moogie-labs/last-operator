@@ -100,6 +100,11 @@ func (g *Gateway) writeOutputSecret(ctx context.Context, req *gatewayv1.WriteOut
 	if p.closed {
 		return nil, d.deny(codes.FailedPrecondition, "phase is closed")
 	}
+	// A Remediate plan's outputs are the executed plan's, naming its steps: the
+	// repair's own step results must never stand in for them.
+	if p.stage == lastv1alpha1.StageRemediate {
+		return nil, d.deny(codes.FailedPrecondition, "a Remediate phase writes no output Secrets; the executed plan's outputs stand")
+	}
 	if req.GetManagedResource() == "" || len(req.GetValues()) == 0 {
 		return nil, d.deny(codes.InvalidArgument, "managed_resource and values are required")
 	}

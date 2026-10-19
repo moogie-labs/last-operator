@@ -224,3 +224,126 @@ func TestResolveRejectsMalformedAndFailedReferences(t *testing.T) {
 		}
 	}
 }
+
+const (
+	testNonce   = "0123456789abcdef0123456789abcdef"
+	nonceReason = "needs a nonce"
+)
+
+// fixtureBody is a plan whose hash was recorded before Body gained a nonce.
+func fixtureBody() plan.Body {
+	return plan.Body{
+		Steps: []lastv1alpha1.Command{step("s1", "kubectl", "get", "ns")},
+		Resources: []lastv1alpha1.ManagedResourceSpec{{Description: "namespace",
+			OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}, Outputs: map[string]string{"k": s1StdoutRef}}},
+	}
+}
+
+func TestHashIncludesTheNonce(t *testing.T) {
+	// Without a nonce, a plan hashes as it did before nonces existed: existing
+	// Create, Update and Delete subjects keep their approvals.
+	const pinned = "sha256:e15b57b8a849300ded5c7a1b4c6ea6f736198fcab07476d186d7170cf9b5ee7e"
+	b := fixtureBody()
+	if h, err := plan.Hash(b); err != nil || h != pinned {
+		t.Fatalf("Hash(fixture) = %q, %v; want the pinned %q", h, err, pinned)
+	}
+	b.Nonce = testNonce
+	h1, err := plan.Hash(b)
+	if err != nil || h1 == pinned {
+		t.Fatalf("Hash with a nonce = %q, %v; want a different subject", h1, err)
+	}
+	b.Nonce = strings.Repeat("f", 32)
+	if h2, _ := plan.Hash(b); h2 == h1 {
+		t.Fatal("two nonces gave the same subject")
+	}
+	if got := plan.FromStatus(&lastv1alpha1.Plan{Steps: b.Steps, Nonce: testNonce}); got.Nonce != testNonce {
+		t.Fatalf("FromStatus dropped the nonce: %+v", got)
+	}
+}
+
+func TestSameResourcesIgnoresIntentRef(t *testing.T) {
+	a := fixtureBody().Resources
+	b := fixtureBody().Resources
+	b[0].IntentRef = &lastv1alpha1.LocalRef{Name: "web"}
+	if same, err := plan.SameResources(a, b); err != nil || !same {
+		t.Fatalf("SameResources(intentRef set) = %v, %v; want equal", same, err)
+	}
+	b[0].Outputs = map[string]string{"k": s1StdoutRef}
+	if same, _ := plan.SameResources(a, b); !same {
+		t.Fatal("an equal map built separately compared unequal")
+	}
+	b[0].Description = "another namespace"
+	if same, err := plan.SameResources(a, b); err != nil || same {
+		t.Fatalf("SameResources(description changed) = %v, %v; want different", same, err)
+	}
+	if same, _ := plan.SameResources(nil, []lastv1alpha1.ManagedResourceSpec{}); !same {
+		t.Fatal("nil and empty resources compared unequal")
+	}
+	if same, _ := plan.SameResources(a, append(fixtureBody().Resources, lastv1alpha1.ManagedResourceSpec{})); same {
+		t.Fatal("an added resource compared equal")
+	}
+	if a[0].IntentRef != nil {
+		t.Fatal("SameResources changed its argument")
+	}
+}
+
+func TestValidateRemediateRequiresEqualResourcesAndANonce(t *testing.T) {
+	executed := fixtureBody()
+	// The repair's steps are its own; the copied outputs still name the executed plan's step.
+	ok := plan.Body{Steps: []lastv1alpha1.Command{step("fix", "kubectl", "apply", "-f", "/work/ns.yaml")},
+		Resources: fixtureBody().Resources, Nonce: testNonce}
+	if err := plan.ValidateRemediate(ok, executed); err != nil {
+		t.Fatalf("ValidateRemediate(ok) = %v", err)
+	}
+	if err := plan.Validate(ok); err == nil {
+		t.Fatal("Validate accepted outputs that name no step of the plan; ValidateRemediate is needed")
+	}
+
+	changed := ok
+	changed.Resources = []lastv1alpha1.ManagedResourceSpec{{Description: "something else"}}
+	if err := plan.ValidateRemediate(changed, executed); !errors.Is(err, plan.ErrResourcesChanged) {
+		t.Fatalf("changed resources = %v, want ErrResourcesChanged", err)
+	}
+	dropped := ok
+	dropped.Resources = nil
+	if err := plan.ValidateRemediate(dropped, executed); !errors.Is(err, plan.ErrResourcesChanged) {
+		t.Fatalf("dropped resources = %v, want ErrResourcesChanged", err)
+	}
+
+	cases := []struct {
+		name string
+		edit func(b *plan.Body)
+		want string
+	}{
+		{"no nonce", func(b *plan.Body) { b.Nonce = "" }, nonceReason},
+		{"short nonce", func(b *plan.Body) { b.Nonce = "abc" }, nonceReason},
+		{"uppercase nonce", func(b *plan.Body) { b.Nonce = strings.ToUpper(testNonce) }, nonceReason},
+		{"no steps", func(b *plan.Body) { b.Steps = nil }, "at least one step"},
+		{"empty id", func(b *plan.Body) { b.Steps = []lastv1alpha1.Command{step("", "true")} }, "has no id"},
+		{"duplicate id", func(b *plan.Body) { b.Steps = []lastv1alpha1.Command{step("a", "x"), step("a", "y")} }, `duplicate step id "a"`},
+	}
+	for _, tc := range cases {
+		b := ok
+		tc.edit(&b)
+		err := plan.ValidateRemediate(b, executed)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || errors.Is(err, plan.ErrResourcesChanged) {
+			t.Errorf("%s: ValidateRemediate = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	// Resources equal to an executed plan that fails today's checks are still refused.
+	bad := fixtureBody()
+	bad.Resources[0].Teardown = []lastv1alpha1.Command{{ID: "t1"}}
+	withBad := ok
+	withBad.Resources = bad.Resources
+	if err := plan.ValidateRemediate(withBad, bad); err == nil || !strings.Contains(err.Error(), "exactly one of run.argv and run.script") {
+		t.Fatalf("an invalid teardown = %v", err)
+	}
+	unknown := fixtureBody()
+	unknown.Resources[0].Outputs = map[string]string{"k": "${steps.gone.stdout}"}
+	withUnknown := ok
+	withUnknown.Resources = unknown.Resources
+	if err := plan.ValidateRemediate(withUnknown, unknown); err == nil || !strings.Contains(err.Error(), `unknown step "gone"`) {
+		t.Fatalf("an output naming no executed step = %v", err)
+	}
+}

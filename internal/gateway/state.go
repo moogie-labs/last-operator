@@ -83,6 +83,9 @@ type ExecutedPlan struct {
 	PlanHash string `json:"planHash"`
 	Plan     string `json:"plan"` // canonical JSON of plan.Body
 	EndSeq   uint64 `json:"endSeq"`
+	// Began is when the plan's phase began (RFC 3339). RunProbes ignores a Deny
+	// created before it; a record without it counts every Deny.
+	Began string `json:"began,omitempty"`
 }
 
 // MarkUsed records that subject opened a phase. Discovery subjects go to

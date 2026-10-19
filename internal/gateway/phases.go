@@ -53,6 +53,7 @@ type phase struct {
 	body     plan.Body
 	auth     *audit.Authorization
 	beginSeq uint64
+	began    time.Time    // the gateway clock at BeginPhase; the executed plan's Began
 	next     int          // index of the next step to run; also the count of steps that succeeded
 	results  plan.Results // results of steps that ran, by step ID
 	failed   bool         // a step failed or could not run; only EndPhase(failed) remains
@@ -278,9 +279,12 @@ func (g *Gateway) findApprovalFor(ctx context.Context, ns, name string, stage la
 	return g.findApproval(ctx, &intent, stage, subject)
 }
 
-// verifyPlan checks that the Intent's plan is encodable, bounded, valid and the
-// one the subject names; every refusal is audited through d.
-func verifyPlan(d denial, intent *lastv1alpha1.Intent, subject string) (plan.Body, []byte, error) {
+// verifyPlan checks that the Intent's plan is encodable, bounded, the one the
+// subject names, and carries a nonce exactly when the stage is Remediate. It
+// validates the plan for every other stage; a Remediate plan is validated
+// against the executed plan once the record is loaded (checkExecuted). Every
+// refusal is audited through d.
+func verifyPlan(d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (plan.Body, []byte, error) {
 	body := plan.FromStatus(intent.Status.Plan)
 	canonical, err := plan.Canonical(body)
 	if err != nil {
@@ -295,6 +299,15 @@ func verifyPlan(d denial, intent *lastv1alpha1.Intent, subject string) (plan.Bod
 	}
 	if hash != subject || intent.Status.Plan.Hash != subject {
 		return plan.Body{}, nil, d.deny(codes.PermissionDenied, "plan hash %s does not match the subject", hash)
+	}
+	if stage == lastv1alpha1.StageRemediate {
+		if !plan.ValidNonce(body.Nonce) {
+			return plan.Body{}, nil, d.deny(codes.InvalidArgument, "a Remediate plan needs a nonce of 32 lowercase hex characters")
+		}
+		return body, canonical, nil
+	}
+	if body.Nonce != "" {
+		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "only a Remediate plan carries a nonce; this %s plan has one", stage)
 	}
 	if err := plan.Validate(body); err != nil {
 		return plan.Body{}, nil, d.deny(codes.InvalidArgument, "%v", err)
@@ -350,19 +363,59 @@ func verifySubject(d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Sta
 	if intent.Status.Plan == nil {
 		return plan.Body{}, nil, "", d.deny(codes.FailedPrecondition, "intent has no plan")
 	}
-	body, canonical, err := verifyPlan(d, intent, subject)
+	body, canonical, err := verifyPlan(d, intent, stage, subject)
 	return body, canonical, "", err
 }
 
 // recordFits checks that the record still fits its ConfigMap once the plan is
 // recorded as Executed, or EndPhase could not save it after the steps ran.
-func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, canonical []byte) error {
+func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, canonical []byte, began time.Time) error {
 	prospective := rec.IntentRecord
 	prospective.Open = nil
 	prospective.Used = append(slices.Clone(rec.Used), subject)
-	prospective.Executed = &ExecutedPlan{Stage: string(stage), PlanHash: subject, Plan: string(canonical), EndSeq: math.MaxUint64}
+	prospective.Executed = &ExecutedPlan{Stage: string(stage), PlanHash: subject, Plan: string(canonical), EndSeq: math.MaxUint64,
+		Began: formatBegan(began)}
 	_, err := encodeRecord(prospective)
 	return err
+}
+
+// formatBegan is how the executed plan records when its phase began.
+func formatBegan(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// replacesExecuted reports whether a succeeded phase of stage becomes the
+// executed plan. A Discovery phase ran one inspection command, a Delete phase
+// only tears down, and a Remediate phase repairs the executed plan's resources
+// without changing them (design D5); probes and later stages keep following
+// the last executed Create or Update plan.
+func replacesExecuted(stage lastv1alpha1.Stage) bool {
+	return stage == lastv1alpha1.StageCreate || stage == lastv1alpha1.StageUpdate
+}
+
+// checkExecuted applies the rules Update and Remediate add once the record is
+// loaded: both change an executed plan, so one must exist, and a Remediate
+// plan must carry its resources unchanged (plan.ValidateRemediate).
+func checkExecuted(d denial, rec *LoadedRecord, stage lastv1alpha1.Stage, body plan.Body) error {
+	if stage != lastv1alpha1.StageUpdate && stage != lastv1alpha1.StageRemediate {
+		return nil
+	}
+	if rec.Executed == nil {
+		return d.deny(codes.FailedPrecondition, "intent has no executed plan to %s", strings.ToLower(string(stage)))
+	}
+	if stage == lastv1alpha1.StageUpdate {
+		return nil
+	}
+	executed, err := executedBody(d, rec.Executed)
+	if err != nil {
+		return err
+	}
+	err = plan.ValidateRemediate(body, executed)
+	switch {
+	case errors.Is(err, plan.ErrResourcesChanged):
+		return d.deny(codes.FailedPrecondition, "a Remediate plan must carry the executed plan's resources unchanged")
+	case err != nil:
+		return d.deny(codes.InvalidArgument, "%v", err)
+	}
+	return nil
 }
 
 // subjectNoun names a phase's approval subject in refusals that the model and
@@ -375,7 +428,8 @@ func subjectNoun(stage lastv1alpha1.Stage) string {
 }
 
 // openableStages are the stages this gateway opens phases for.
-var openableStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageDelete, lastv1alpha1.StageDiscovery}
+var openableStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageRemediate,
+	lastv1alpha1.StageDelete, lastv1alpha1.StageDiscovery}
 
 // checkDeletePlan applies a Delete phase's own rules: the Intent is being deleted,
 // and the plan has no resources, since it only orders the executed plan's teardown.
@@ -436,6 +490,26 @@ func (g *Gateway) noOpenPhase(ctx context.Context, d denial, ns, name, key strin
 	return d.deny(codes.FailedPrecondition, "no open phase for this plan")
 }
 
+// requireApproval returns the IntentApproval that authorizes opening a phase for
+// the subject: an Approve, with no Deny, from neither the operator nor a
+// gateway-namespace ServiceAccount. Every refusal is audited through d.
+func (g *Gateway) requireApproval(ctx context.Context, d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+	approval, err := g.findApproval(ctx, intent, stage, subject)
+	switch {
+	case errors.Is(err, errApprovalDenied):
+		return nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
+	case err != nil:
+		return nil, err
+	case approval == nil:
+		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
+	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
+		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
+	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
+		return nil, d.deny(codes.PermissionDenied, "approval %s names a gateway-namespace ServiceAccount as approver", approval.Name)
+	}
+	return approval, nil
+}
+
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
 	w, release, err := g.beginRPC()
 	if err != nil {
@@ -455,7 +529,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	actor := CallerFrom(ctx)
 	d := denial{ctx: ctx, w: w, actor: actor, intent: key, stage: string(stage), subject: subject, rpc: "BeginPhase"}
 	if !slices.Contains(openableStages, stage) {
-		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported yet; this gateway opens Create, Delete and Discovery phases only", stage)
+		return nil, d.deny(codes.FailedPrecondition, "stage %q is not supported; this gateway opens Create, Update, Remediate, Delete and Discovery phases only", stage)
 	}
 
 	var intent lastv1alpha1.Intent
@@ -482,6 +556,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
+	if err := checkExecuted(d, rec, stage, body); err != nil {
+		return nil, err
+	}
 	if rec.Open != nil {
 		if rec.Open.Epoch == g.epoch && g.phases.get(key) != nil {
 			return nil, d.deny(codes.AlreadyExists, "a phase is already open for this intent (subject %s)", rec.Open.SubjectHash)
@@ -493,8 +570,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := checkReplay(d, rec, &intent, stage, subject); err != nil {
 		return nil, err
 	}
-	if stage == lastv1alpha1.StageCreate {
-		if err := recordFits(rec, stage, subject, canonical); err != nil {
+	began := g.clock()
+	if replacesExecuted(stage) {
+		if err := recordFits(rec, stage, subject, canonical, began); err != nil {
 			return nil, d.deny(codes.InvalidArgument, "plan too large to record: %v", err)
 		}
 	}
@@ -508,18 +586,9 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := checkPlanPolicy(eff, body); err != nil {
 		return nil, d.deny(codes.PermissionDenied, "%v", err)
 	}
-	approval, err := g.findApproval(ctx, &intent, stage, subject)
-	switch {
-	case errors.Is(err, errApprovalDenied):
-		return nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
-	case err != nil:
+	approval, err := g.requireApproval(ctx, d, &intent, stage, subject)
+	if err != nil {
 		return nil, err
-	case approval == nil:
-		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
-	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
-		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
-	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
-		return nil, d.deny(codes.PermissionDenied, "approval %s names a gateway-namespace ServiceAccount as approver", approval.Name)
 	}
 
 	auth := &audit.Authorization{Kind: "approval", Name: ns + "/" + approval.Name}
@@ -542,7 +611,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		}
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, beginSeq: begin.Seq, results: plan.Results{}})
+	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, beginSeq: begin.Seq,
+		began: began, results: plan.Results{}})
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
 }
 
@@ -679,14 +749,13 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 		}
 	}
 	rec.Open = nil
-	// A Discovery phase ran one inspection command, and a Delete phase only tears
-	// down; probes and later stages keep following the last executed Create plan.
-	if p.outcome == outcomeSucceeded && p.stage != lastv1alpha1.StageDiscovery && p.stage != lastv1alpha1.StageDelete {
+	if p.outcome == outcomeSucceeded && replacesExecuted(p.stage) {
 		canonical, err := plan.Canonical(p.body)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
 		}
-		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq}
+		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq,
+			Began: formatBegan(p.began)}
 	}
 	// The record is saved without the open phase before a succeeded Delete drops
 	// it, so a failed deletion never leaves a phase for the next leader to interrupt.
