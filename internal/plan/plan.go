@@ -81,6 +81,11 @@ func Validate(b Body) error {
 			}
 			probes[p.ID] = true
 		}
+		for j, c := range r.Teardown {
+			if err := CheckCommand(fmt.Sprintf("plan: resource %d teardown command %d", i, j), c); err != nil {
+				return err
+			}
+		}
 		if r.OutputsSecretRef != nil {
 			if errs := validation.IsDNS1123Subdomain(r.OutputsSecretRef.Name); len(errs) > 0 {
 				return fmt.Errorf("plan: resource %d output secret %q is not a valid Secret name: %s",
@@ -108,6 +113,15 @@ func Validate(b Body) error {
 				return fmt.Errorf("plan: resource %d output %q names unknown step %q", i, k, m[1])
 			}
 		}
+	}
+	return nil
+}
+
+// CheckCommand mirrors the CRD's rule that a command sets exactly one of
+// run.argv and run.script. where names the command in the error.
+func CheckCommand(where string, c lastv1alpha1.Command) error {
+	if (len(c.Run.Argv) > 0) == (c.Run.Script != "") {
+		return fmt.Errorf("%s: set exactly one of run.argv and run.script", where)
 	}
 	return nil
 }

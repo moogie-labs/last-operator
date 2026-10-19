@@ -91,6 +91,10 @@ func TestValidate(t *testing.T) {
 		{"duplicate id", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a"), step("s1", "b")}}, `duplicate step id "s1"`},
 		{"duplicate probe", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Probes: []lastv1alpha1.Probe{probe("p")}}, {Probes: []lastv1alpha1.Probe{probe("p")}}}}, `duplicate probe id "p"`},
+		{"teardown with argv and script", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{Teardown: []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{"a"}, Script: "b"}}}}}}, "exactly one of run.argv and run.script"},
+		{"teardown with neither", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+			{Teardown: []lastv1alpha1.Command{{ID: "t1"}}}}}, "exactly one of run.argv and run.script"},
 		{"outputs without secret", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Outputs: map[string]string{"k": s1StdoutRef}}}}, "has outputs but no outputsSecretRef"},
 		{"literal output", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{

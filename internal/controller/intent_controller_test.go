@@ -147,18 +147,6 @@ var _ = Describe("Intent planning", func() {
 		Expect(approved).To(BeTrue())
 	})
 
-	It("fails when the API server rejects the plan", func() {
-		// plan.Validate and Parse pass a teardown command without argv or script; the CRD refuses it.
-		bad := lastv1alpha1.ManagedResourceSpec{Description: "db", Teardown: []lastv1alpha1.Command{{ID: "t1"}}}
-		gw.setScript(key, &script{llm: turns(answer(steps, bad))})
-		createIntent(key, "bad plan")
-
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
-		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
-		Expect(readyCondition(key).Message).To(ContainSubstring("rejected the plan"))
-		Expect(getIntent(key).Status.Plan).To(BeNil())
-	})
-
 	It("plans again when the spec changes before approval", func() {
 		v1 := []lastv1alpha1.Command{argvStep("s1", "echo", "v1")}
 		v2 := []lastv1alpha1.Command{argvStep("s1", "echo", "v2")}

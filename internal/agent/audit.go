@@ -12,6 +12,7 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // Auditor is the part of the gateway client that reads the audit log.
@@ -21,6 +22,10 @@ type Auditor interface {
 
 // queryLimit is the page size of every QueryAudit call: the gateway's maximum.
 const queryLimit = 200
+
+// outcomeSucceeded is the outcome of a phase.end whose phase ran to the end;
+// the gateway writes it.
+const outcomeSucceeded = "succeeded"
 
 // scan calls each with every indexed entry of type typ after sequence number
 // after, oldest first, and reports whether the gateway's index had already
@@ -96,6 +101,63 @@ func UsedPlans(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (map[st
 		return nil, err
 	}
 	return used, nil
+}
+
+// ExecutedPlan returns the plan the Intent last executed successfully, and its
+// hash: the plan in the newest phase.begin with stage Create or Update whose
+// phase.end, paired by beginSeq, has outcome succeeded. Remediate, Discovery
+// and Delete phases never count. found is false when no such phase exists or
+// when the index is truncated, since the newest one may then be missing. A plan
+// that does not hash to its entry's subject is an error. Gateway errors are
+// returned unchanged.
+func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (plan.Body, string, bool, error) {
+	begins := map[uint64]*gatewayv1.AuditEntry{}
+	truncated, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
+		if stage := e.GetStage(); stage == string(lastv1alpha1.StageCreate) || stage == string(lastv1alpha1.StageUpdate) {
+			begins[e.GetSeq()] = e
+		}
+	})
+	if err != nil {
+		return plan.Body{}, "", false, err
+	}
+	var newest *gatewayv1.AuditEntry
+	endTruncated, err := scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
+		var end struct {
+			BeginSeq uint64 `json:"beginSeq"`
+			Outcome  string `json:"outcome"`
+		}
+		if json.Unmarshal(e.GetPayload(), &end) != nil || end.Outcome != outcomeSucceeded {
+			return
+		}
+		// An end whose begin is not in the scan, lost to truncation, is skipped.
+		if b, ok := begins[end.BeginSeq]; ok && (newest == nil || b.GetSeq() > newest.GetSeq()) {
+			newest = b
+		}
+	})
+	if err != nil {
+		return plan.Body{}, "", false, err
+	}
+	if truncated || endTruncated || newest == nil {
+		return plan.Body{}, "", false, nil
+	}
+	var p struct {
+		Plan string `json:"plan"`
+	}
+	var body plan.Body
+	if err := json.Unmarshal(newest.GetPayload(), &p); err != nil {
+		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d: %w", newest.GetSeq(), err)
+	}
+	if err := json.Unmarshal([]byte(p.Plan), &body); err != nil {
+		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d holds an unreadable plan: %w", newest.GetSeq(), err)
+	}
+	hash, err := plan.Hash(body)
+	if err != nil {
+		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d: %w", newest.GetSeq(), err)
+	}
+	if hash != newest.GetSubjectHash() {
+		return plan.Body{}, "", false, fmt.Errorf("agent: the plan in phase.begin %d hashes to %s, not its subject %s", newest.GetSeq(), hash, newest.GetSubjectHash())
+	}
+	return body, hash, true, nil
 }
 
 // ErrNoReload means the audit log no longer holds the whole planning session,

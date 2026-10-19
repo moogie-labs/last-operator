@@ -80,8 +80,5 @@ func checkPlan(summary string, steps []lastv1alpha1.Command, resources []lastv1a
 
 // checkCommand mirrors the CRD's rule for commands.
 func checkCommand(where string, c lastv1alpha1.Command) error {
-	if (len(c.Run.Argv) > 0) == (c.Run.Script != "") {
-		return fmt.Errorf("%s: set exactly one of run.argv and run.script", where)
-	}
-	return nil
+	return plan.CheckCommand(where, c)
 }

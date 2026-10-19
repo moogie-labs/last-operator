@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -13,8 +14,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // fakeAuditor serves QueryAudit from entries, at most pageSize per call when set.
@@ -190,5 +193,86 @@ func TestUsedPlansSkipsDiscovery(t *testing.T) {
 	}
 	if _, err := UsedPlans(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref); err == nil {
 		t.Error("UsedPlans hid a gateway error")
+	}
+}
+
+func planBody(argv string) plan.Body {
+	return plan.Body{Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{argv}}}}}
+}
+
+// executedPhase returns the phase.begin for body at seq and its phase.end at seq+1.
+func executedPhase(t *testing.T, seq uint64, stage string, body plan.Body, outcome string) []*gatewayv1.AuditEntry {
+	t.Helper()
+	canonical, err := plan.Canonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := plan.Hash(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []*gatewayv1.AuditEntry{
+		entry(seq, audit.TypePhaseBegin, stage, hash, map[string]any{"plan": string(canonical), "steps": 1}),
+		entry(seq+1, audit.TypePhaseEnd, stage, hash, map[string]any{"beginSeq": seq, "outcome": outcome}),
+	}
+}
+
+func TestExecutedPlanIsTheLatestSucceededCreateOrUpdate(t *testing.T) {
+	entries := make([]*gatewayv1.AuditEntry, 0, 12)
+	for i, ph := range []struct{ stage, argv, outcome string }{
+		{"Create", "p1", outcomeSucceeded}, {"Discovery", "d", outcomeSucceeded}, {"Create", "p2", "failed"},
+		{"Update", "p3", outcomeSucceeded}, {"Remediate", "p4", outcomeSucceeded}, {"Delete", "p5", outcomeSucceeded},
+	} {
+		entries = append(entries, executedPhase(t, uint64(i*2+1), ph.stage, planBody(ph.argv), ph.outcome)...)
+	}
+	want := planBody("p3")
+	wantHash, _ := plan.Hash(want)
+	body, hash, found, err := ExecutedPlan(context.Background(), &fakeAuditor{pageSize: 1, entries: entries}, ref)
+	if err != nil || !found {
+		t.Fatalf("ExecutedPlan = found %v, err %v", found, err)
+	}
+	if hash != wantHash || !reflect.DeepEqual(body, want) {
+		t.Errorf("ExecutedPlan = %v %s, want %v %s", body, hash, want, wantHash)
+	}
+}
+
+func TestExecutedPlanNotFound(t *testing.T) {
+	entries := append(executedPhase(t, 1, "Create", planBody("p1"), "failed"), executedPhase(t, 3, "Remediate", planBody("p2"), outcomeSucceeded)...)
+	for name, a := range map[string]*fakeAuditor{"none": {}, "only failures and other stages": {entries: entries}} {
+		_, _, found, err := ExecutedPlan(context.Background(), a, ref)
+		if found || err != nil {
+			t.Errorf("%s: ExecutedPlan = found %v, err %v, want not found", name, found, err)
+		}
+	}
+}
+
+func TestExecutedPlanIsNotFoundWhenTheIndexIsTruncated(t *testing.T) {
+	a := &fakeAuditor{truncated: true, entries: executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded)}
+	if _, _, found, err := ExecutedPlan(context.Background(), a, ref); found || err != nil {
+		t.Errorf("ExecutedPlan = found %v, err %v, want not found", found, err)
+	}
+}
+
+func TestExecutedPlanSkipsAnEndWithoutItsBegin(t *testing.T) {
+	entries := append(executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded),
+		entry(9, audit.TypePhaseEnd, "Update", "sha256:gone", map[string]any{"beginSeq": 8, "outcome": outcomeSucceeded}))
+	body, _, found, err := ExecutedPlan(context.Background(), &fakeAuditor{entries: entries}, ref)
+	if err != nil || !found || !reflect.DeepEqual(body, planBody("p1")) {
+		t.Errorf("ExecutedPlan = %v, found %v, err %v, want p1", body, found, err)
+	}
+}
+
+func TestExecutedPlanRejectsAHashMismatch(t *testing.T) {
+	entries := executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded)
+	entries[0].SubjectHash = "sha256:other"
+	if _, _, found, err := ExecutedPlan(context.Background(), &fakeAuditor{entries: entries}, ref); err == nil || found {
+		t.Errorf("ExecutedPlan = found %v, err %v, want an error", found, err)
+	}
+}
+
+func TestExecutedPlanReturnsGatewayErrors(t *testing.T) {
+	a := &fakeAuditor{err: status.Error(codes.Unavailable, "down")}
+	if _, _, _, err := ExecutedPlan(context.Background(), a, ref); err == nil {
+		t.Error("ExecutedPlan hid a gateway error")
 	}
 }
