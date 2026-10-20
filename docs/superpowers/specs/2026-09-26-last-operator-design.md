@@ -942,12 +942,21 @@ for Remediate, `delete` for Delete) from the same `OperatorConfig` and
    cleared (`plan.CommandKey`, which the operator's Delete check also uses).
    - **Create, Update and Discovery:** any plan or command that passes
      the other checks.
-   - **Remediate:** every step equals some step of the executed plan, as
-     often as the plan likes. Auto remediation only re-runs commands the
-     approver of the executed plan saw.
+   - **Remediate:** every step has the extended key of some step of the
+     executed plan. A step's extended key (`plan.ExtendedKeys`) is its
+     `CommandKey` after each `${steps.X…}` reference in its argv names X's
+     own extended key instead of X's id, following the plan's step order;
+     a reference to a step that does not run earlier in the plan is
+     outside the limits. Auto remediation only re-runs commands the
+     approver of the executed plan saw: an Auto Remediate may run a subset
+     of the executed steps, in any order and as often as it likes, but
+     every step runs exactly as approved, including what its references
+     point at.
    - **Delete:** the steps are a permutation of the executed plan's
      teardown commands, gathered in resource order: each exactly once.
-     With no executed plan in the record, a Delete is outside the limits.
+     Teardown commands hold no `${steps…}` reference, so `CommandKey`
+     suffices. With no executed plan in the record, a Delete is outside
+     the limits.
    - An executed plan that fails its integrity check refuses the phase
      with `Internal`.
 3. Otherwise a valid `Approve` authorizes it, unless it names the
@@ -970,9 +979,12 @@ for the subject stops any phase. An Auto phase passes while the stage is
 still Auto for the same Intent UID; its plan was checked against Auto's
 limits at `BeginPhase` and cannot change within the phase, so the limits
 are not checked again. Once a policy edit turns the stage to Manual, the
-step needs a valid `Approve` from an approver other than the operator or a
-gateway-namespace ServiceAccount. An approved phase needs its `Approve` to
-still stand. Every refusal fails the phase: only `EndPhase(failed)` remains.
+step needs an `Approve`. An approved phase needs one too, though not
+necessarily the one it opened with: any `Approve` for the subject that is
+bound to the Intent's UID, within `approvals.maxAge`, and passes the
+approver checks (it names neither the operator nor a gateway-namespace
+ServiceAccount as approver; `BeginPhase` and every step share one check).
+Every refusal fails the phase: only `EndPhase(failed)` remains.
 
 ## 9. Allow rules and suggestions
 

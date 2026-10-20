@@ -67,6 +67,51 @@ func CommandKey(c lastv1alpha1.Command) (string, error) {
 	return string(b), err
 }
 
+// ExtendedKeys identifies each step as it will run, references included: a
+// step's key is the SHA-256 of its CommandKey after every ${steps.X…} reference
+// in its argv names X's own extended key instead of X's id. Two steps with the
+// same extended key run the same command on the output of the same commands,
+// whatever their ids. Only argv references resolve (Resolve), so a script or a
+// file is compared as written. A reference to a step that does not run earlier
+// in steps, or a malformed one, is an ErrReference: it could never resolve.
+// Errors name step ids only, never a command's text.
+func ExtendedKeys(steps []lastv1alpha1.Command) ([]string, error) {
+	keys := make([]string, len(steps))
+	earlier := make(map[string]string, len(steps)) // step id → extended key
+	for i, s := range steps {
+		c := s
+		if len(s.Run.Argv) > 0 {
+			c.Run.Argv = make([]string, len(s.Run.Argv))
+			for j, arg := range s.Run.Argv {
+				if strings.Contains(refPattern.ReplaceAllString(arg, ""), "${steps.") {
+					return nil, fmt.Errorf("%w: step %q has a malformed reference", ErrReference, s.ID)
+				}
+				missing := ""
+				c.Run.Argv[j] = refPattern.ReplaceAllStringFunc(arg, func(expr string) string {
+					m := refPattern.FindStringSubmatch(expr)
+					k, ok := earlier[m[1]]
+					if !ok {
+						missing = m[1]
+						return expr
+					}
+					return "${steps." + k + "." + m[2] + "}"
+				})
+				if missing != "" {
+					return nil, fmt.Errorf("%w: step %q refers to step %q, which does not run before it", ErrReference, s.ID, missing)
+				}
+			}
+		}
+		k, err := CommandKey(c)
+		if err != nil {
+			return nil, fmt.Errorf("plan: step %q: %w", s.ID, err)
+		}
+		sum := sha256.Sum256([]byte(k))
+		keys[i] = hex.EncodeToString(sum[:])
+		earlier[s.ID] = keys[i]
+	}
+	return keys, nil
+}
+
 // Validate checks what the gateway relies on: step IDs name the steps that
 // ${steps…} references and RunCommand use, probe IDs name probe outcomes, each
 // output Secret name is a DNS-1123 subdomain, and each declared output has a

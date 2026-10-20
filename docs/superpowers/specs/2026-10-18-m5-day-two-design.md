@@ -142,7 +142,7 @@ Probes follow an adaptive interval with jitter and a floor.
 ## 7. Security
 
 - **Approvals are bound** to the UID and expire (D1).
-- **Auto is bounded by policy** (`allowAutoModes`) and by D9's limits. Auto Remediate re-runs only commands the approver of the executed plan saw. Auto Delete runs only the recorded teardown commands.
+- **Auto is bounded by policy** (`allowAutoModes`) and by D9's limits. Auto Remediate re-runs only commands the approver of the executed plan saw. An Auto Remediate may run a subset of the executed steps, in any order, but every step runs exactly as approved, including what its `${steps…}` references point at (main spec §8.3, extended keys). Auto Delete runs only the recorded teardown commands.
 - **The operator still writes only status.** Every authority decision stays in the gateway. The executed plan, teardown commands and modes come from the gateway's audit-backed record and the policy CRDs, never from `status`.
 - **The finalizer can be removed by hand.** Anyone with `update` on `intents` can do it. Doing so abandons teardown. The ManagedResources and their output Secrets go by ownerReference garbage collection once the Intent is gone. The gateway's record goes in the leader's record sweep, which runs at lead and then hourly: it deletes a record with no open phase when its Intent is gone or a recreated Intent of another UID holds the name. This is a documented operational choice, recorded in §17.2.
 

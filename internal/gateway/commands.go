@@ -102,7 +102,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		return nil, d.deny(codes.FailedPrecondition, "step %s: %v", planned.ID, err)
 	}
 	if !sameCommand(given, expected) {
-		return nil, d.deny(codes.PermissionDenied, "command does not match approved step %s", planned.ID)
+		return nil, d.deny(codes.PermissionDenied, "command does not match %s step %s", authorizedAs(p), planned.ID)
 	}
 	// Authorization and policy are re-checked before every step (spec §8.3): a
 	// Deny, a narrowed policy or Auto turned off after BeginPhase stops the phase.
@@ -186,27 +186,27 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 			return err
 		}
 		p.failed = true
-		return d.deny(codes.NotFound, "approval withdrawn: %v", err)
+		return d.deny(codes.NotFound, "%s: %s", withdrawn(p), status.Convert(err).Message())
 	}
 	approval, err := g.findApproval(ctx, &intent, p.stage, p.subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
-		return d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this %s", approval.Name, subjectNoun(p.stage))
+		return d.deny(codes.PermissionDenied, "%s: %s denies this %s", withdrawn(p), approval.Name, subjectNoun(p.stage))
 	case err != nil:
 		return err
 	}
-	auto := p.auth != nil && p.auth.Kind == authAuto
+	auto := p.autoAuthorized()
 	if auto && string(intent.UID) == p.uid && layers.mode(&intent, p.stage) == lastv1alpha1.ModeAuto {
 		return nil
 	}
 	if approval == nil {
 		p.failed = true
 		if auto {
-			return d.deny(codes.PermissionDenied, "auto authorization withdrawn: the %s stage is no longer Auto for this Intent, "+
-				"and no IntentApproval approves this %s", p.stage, subjectNoun(p.stage))
+			return d.deny(codes.PermissionDenied, "%s: the %s stage is no longer Auto for this Intent, "+
+				"and no IntentApproval approves this %s", withdrawn(p), p.stage, subjectNoun(p.stage))
 		}
-		return d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
+		return d.deny(codes.PermissionDenied, "%s: no IntentApproval approves this %s", withdrawn(p), subjectNoun(p.stage))
 	}
 	// The same approver refusals as BeginPhase, for either kind of phase.
 	if err := g.checkApprover(d, approval); err != nil {
@@ -214,4 +214,23 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 		return err
 	}
 	return nil
+}
+
+// autoAuthorized reports whether Auto authorized the phase, not an approval.
+func (p *phase) autoAuthorized() bool { return p.auth != nil && p.auth.Kind == authAuto }
+
+// authorizedAs names how the phase's steps were authorized, for refusals.
+func authorizedAs(p *phase) string {
+	if p.autoAuthorized() {
+		return "Auto-authorized"
+	}
+	return "approved"
+}
+
+// withdrawn prefixes a refusal of a step whose phase's authorization no longer stands.
+func withdrawn(p *phase) string {
+	if p.autoAuthorized() {
+		return "auto authorization withdrawn"
+	}
+	return "approval withdrawn"
 }

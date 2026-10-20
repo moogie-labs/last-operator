@@ -379,3 +379,87 @@ func TestCommandKeyIgnoresOnlyTheID(t *testing.T) {
 		t.Fatal("CommandKey changed its argument")
 	}
 }
+
+// extendedKeys returns plan.ExtendedKeys(steps), failing the test on an error.
+func extendedKeys(t *testing.T, steps ...lastv1alpha1.Command) []string {
+	t.Helper()
+	keys, err := plan.ExtendedKeys(steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != len(steps) {
+		t.Fatalf("ExtendedKeys returned %d keys for %d steps", len(keys), len(steps))
+	}
+	return keys
+}
+
+func TestExtendedKeysIgnoreIDsButFollowReferences(t *testing.T) {
+	a := step("a", kubectl, "get", "ns", "x", "-o", "json")
+	c := step("c", kubectl, "get", "deployment", "web", "-o", "json")
+	b := step("b", "echo", "${steps.a.json.kind}")
+	executed := extendedKeys(t, a, c, b)
+
+	// The same chain under other ids has the same keys.
+	a2, b2 := a, step("y", "echo", "${steps.x.json.kind}")
+	a2.ID = "x"
+	if got := extendedKeys(t, a2, b2); got[0] != executed[0] || got[1] != executed[2] {
+		t.Fatalf("renamed chain keys = %v, want %v and %v", got, executed[0], executed[2])
+	}
+
+	// B's text, but its reference now points at C's command: a different key.
+	rewired := c
+	rewired.ID = "a"
+	if got := extendedKeys(t, rewired, b); got[1] == executed[2] {
+		t.Fatal("a step whose reference points at another command kept its key")
+	}
+
+	// Without references, the extended key changes exactly when CommandKey does.
+	same := extendedKeys(t, c, step("other", kubectl, "get", "deployment", "web", "-o", "json"))
+	if same[0] != same[1] || same[0] != executed[1] {
+		t.Fatalf("keys of equal commands = %v, want all %s", same, executed[1])
+	}
+}
+
+func TestExtendedKeysFollowAChainThreeDeep(t *testing.T) {
+	a := step("a", kubectl, "get", "ns", "x", "-o", "json")
+	b := step("b", "echo", "${steps.a.json.kind}")
+	d := step("d", "echo", "${steps.b.stdout}", "and", "${steps.a.stdout}")
+	executed := extendedKeys(t, a, b, d)
+
+	renamed := extendedKeys(t, step("1", kubectl, "get", "ns", "x", "-o", "json"),
+		step("2", "echo", "${steps.1.json.kind}"), step("3", "echo", "${steps.2.stdout}", "and", "${steps.1.stdout}"))
+	if renamed[2] != executed[2] {
+		t.Fatal("a renamed three-deep chain changed its last key")
+	}
+	// A change at the root reaches the top of the chain.
+	changed := extendedKeys(t, step("a", kubectl, "get", "ns", "y", "-o", "json"), b, d)
+	if changed[1] == executed[1] || changed[2] == executed[2] {
+		t.Fatal("a changed root left the keys of the steps that depend on it unchanged")
+	}
+}
+
+func TestExtendedKeysRefuseReferencesThatCannotResolve(t *testing.T) {
+	a := step("a", kubectl, "get", "ns", "x", "-o", "json")
+	for name, steps := range map[string][]lastv1alpha1.Command{
+		"an unknown step": {a, step("b", "echo", "${steps.zz.stdout}")},
+		"a later step":    {step("b", "echo", "${steps.a.stdout}"), a},
+		"itself":          {step("b", "echo", "${steps.b.stdout}")},
+		"a malformed one": {a, step("b", "echo", "${steps.a.nope}")},
+		"an unclosed one": {a, step("b", "echo", "${steps.a.stdout")},
+	} {
+		if _, err := plan.ExtendedKeys(steps); !errors.Is(err, plan.ErrReference) {
+			t.Errorf("%s: ExtendedKeys = %v, want ErrReference", name, err)
+		}
+	}
+}
+
+func TestExtendedKeysLeaveScriptsAlone(t *testing.T) {
+	// Only argv references resolve; a script's text is compared as written.
+	s := lastv1alpha1.Command{ID: "s", Run: lastv1alpha1.CommandRun{Script: "echo ${steps.zz.stdout}"}}
+	keys := extendedKeys(t, s)
+	other := s
+	other.Run.Script = "echo ${steps.yy.stdout}"
+	if extendedKeys(t, other)[0] == keys[0] {
+		t.Fatal("two different scripts share a key")
+	}
+}

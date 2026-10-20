@@ -586,12 +586,12 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 }
 
 // withinAutoLimits reports whether Auto may authorize the stage's plan without
-// an approval (design D9). Commands compare by plan.CommandKey, as written:
+// an approval (design D9):
 //   - Create, Update and Discovery: any plan or command that passed the checks;
-//   - Remediate: every step equals some step of the executed plan, however
-//     often;
+//   - Remediate: every step runs exactly as some step of the executed plan ran,
+//     references included (withinExecutedSteps);
 //   - Delete: the steps are a permutation of the executed plan's teardown
-//     commands, in resource order; with no executed plan, never.
+//     commands, in resource order (withinTeardown); with no executed plan, never.
 //
 // An executed plan that fails its integrity check, or a command that cannot be
 // encoded, is refused as Internal through d.
@@ -606,29 +606,63 @@ func withinAutoLimits(d denial, rec *LoadedRecord, stage lastv1alpha1.Stage, bod
 	if rec.Executed == nil {
 		return false, nil
 	}
-	eb, err := executedBody(d, rec.Executed)
+	executed, err := executedBody(d, rec.Executed)
 	if err != nil {
 		return false, err
 	}
-	executed := eb.Steps
-	if stage == lastv1alpha1.StageDelete {
-		executed = nil
-		for _, r := range eb.Resources {
-			executed = append(executed, r.Teardown...)
-		}
-		if len(body.Steps) != len(executed) {
+	if stage == lastv1alpha1.StageRemediate {
+		return withinExecutedSteps(d, executed.Steps, body.Steps)
+	}
+	return withinTeardown(d, executed, body.Steps)
+}
+
+// withinExecutedSteps reports whether every step has the extended key
+// (plan.ExtendedKeys) of some executed step: it runs the same command, and each
+// of its ${steps…} references reads the output of the same command the
+// executed step's did. A step may repeat, and steps may be left out or
+// reordered, but none runs anything the approver of the executed plan did not
+// see. A reference that cannot resolve is outside the limits.
+func withinExecutedSteps(d denial, executed, steps []lastv1alpha1.Command) (bool, error) {
+	have, err := plan.ExtendedKeys(executed)
+	if err != nil {
+		return false, d.deny(codes.Internal, "executed plan: %v", err)
+	}
+	keys, err := plan.ExtendedKeys(steps)
+	if errors.Is(err, plan.ErrReference) {
+		return false, nil
+	}
+	if err != nil {
+		return false, d.deny(codes.Internal, "%v", err)
+	}
+	for _, k := range keys {
+		if !slices.Contains(have, k) {
 			return false, nil
 		}
 	}
-	want := make(map[string]int, len(executed))
-	for i, c := range executed {
+	return true, nil
+}
+
+// withinTeardown reports whether steps are a permutation of the executed
+// plan's teardown commands, gathered in resource order, by plan.CommandKey:
+// each exactly once, unchanged but for its id. Teardown commands hold no
+// ${steps…} reference (plan.Validate refuses one).
+func withinTeardown(d denial, executed plan.Body, steps []lastv1alpha1.Command) (bool, error) {
+	var teardown []lastv1alpha1.Command
+	for _, r := range executed.Resources {
+		teardown = append(teardown, r.Teardown...)
+	}
+	if len(steps) != len(teardown) {
+		return false, nil
+	}
+	want := make(map[string]int, len(teardown))
+	for i, c := range teardown {
 		k, err := plan.CommandKey(c)
 		if err != nil {
-			return false, d.deny(codes.Internal, "executed plan command %d cannot be encoded: %v", i+1, err)
+			return false, d.deny(codes.Internal, "executed teardown command %d cannot be encoded: %v", i+1, err)
 		}
 		want[k]++
 	}
-	for _, s := range body.Steps {
+	for _, s := range steps {
 		k, err := plan.CommandKey(s)
 		if err != nil {
 			return false, d.deny(codes.Internal, "step %s cannot be encoded: %v", s.ID, err)
@@ -636,9 +670,7 @@ func withinAutoLimits(d denial, rec *LoadedRecord, stage lastv1alpha1.Stage, bod
 		if want[k] == 0 {
 			return false, nil
 		}
-		if stage == lastv1alpha1.StageDelete {
-			want[k]-- // a permutation uses each teardown command once
-		}
+		want[k]--
 	}
 	return true, nil
 }

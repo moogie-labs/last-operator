@@ -14,6 +14,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/policy"
+	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
 )
 
 // allKeys sets every stage key.
@@ -320,7 +321,7 @@ func TestADenyStopsAnAutoPhase(t *testing.T) {
 		before := len(env.entries())
 		_, err := env.run(h, argvStep("s2", "echo", "Namespace"))
 		env.wantDenied(err, codes.PermissionDenied)
-		if !strings.Contains(err.Error(), "no denies this plan") {
+		if !strings.Contains(err.Error(), "auto authorization withdrawn: no denies this plan") {
 			t.Fatalf("RunCommand = %v, want the Deny named", err)
 		}
 		wantNoCommandStart(t, env, before)
@@ -345,7 +346,8 @@ func TestTurningAutoOffMidPhaseNeedsAnApproval(t *testing.T) {
 		approval string // who approves the plan once Auto is off; "" for no one
 		refused  string
 	}{
-		{"without an approval", "", "no IntentApproval approves this plan"},
+		{"without an approval", "", "auto authorization withdrawn: the Create stage is no longer Auto for this Intent, " +
+			"and no IntentApproval approves this plan"},
 		{"with an approval", approver, ""},
 		{"with the operator's approval", testOperator, "names the operator"},
 		{"with a gateway ServiceAccount's approval", "system:serviceaccount:" + ns + ":anything", "gateway-namespace ServiceAccount"},
@@ -561,4 +563,146 @@ func TestAnApprovalPhaseRefusesAStepWhoseOnlyApproverIsTheOperator(t *testing.T)
 			env.wantDenied(err, codes.FailedPrecondition)
 		})
 	}
+}
+
+// The steps of chainEnv's executed plan: A and C read objects, B echoes what A
+// read, and D echoes what B printed.
+var (
+	chainA = argvStep("A", kubectlBin, "get", "ns", envNS, "-o", "json")
+	chainC = argvStep("C", kubectlBin, "get", "deployment", "web", "-n", envNS, "-o", "json")
+	chainB = argvStep("B", "echo", "${steps.A.json.kind}")
+	chainD = argvStep("D", "echo", "${steps.B.stdout}")
+)
+
+// chainEnv is an env whose Intent executed A, C, B, D (approved), now in Auto
+// mode; it returns the executed resources a Remediate plan must carry.
+func chainEnv(t *testing.T) (*testEnv, []lastv1alpha1.ManagedResourceSpec) {
+	t.Helper()
+	resources := []lastv1alpha1.ManagedResourceSpec{probedResource()}
+	in := intentWithPlan(t, []lastv1alpha1.Command{chainA, chainC, chainB, chainD}, resources...)
+	env := newProviderEnv(t, in, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
+	executeAll(t, env, in)
+	env.setDefaultModes(lastv1alpha1.ModeAuto)
+	return env, resources
+}
+
+// renamed is c under another id.
+func renamed(c lastv1alpha1.Command, id string) lastv1alpha1.Command {
+	c.ID = id
+	return c
+}
+
+func TestAutoRemediateCannotRewireAReference(t *testing.T) {
+	for name, steps := range map[string][]lastv1alpha1.Command{
+		// C's command under A's id: B, unchanged as written, would echo what C read.
+		"a referenced id given another command": {renamed(chainC, "A"), chainB},
+		// Three deep: D, unchanged, would echo a B that echoes what C read.
+		"a rewired chain three deep": {renamed(chainC, "A"), chainB, chainD},
+		// B with no A before it: its reference points at nothing the plan runs.
+		"a reference to a step the plan lacks": {chainB},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, resources := chainEnv(t)
+			h := env.recordPlan(lastv1alpha1.StageRemediate, plan.Body{Steps: steps, Resources: resources, Nonce: nonce1})
+			before := len(env.entries())
+			_, err := env.beginStage(lastv1alpha1.StageRemediate, h)
+			env.wantNeedsApproval(err, before)
+		})
+	}
+}
+
+func TestAutoRemediateRerunsAReferenceChainUnderNewIDs(t *testing.T) {
+	for name, steps := range map[string][]lastv1alpha1.Command{
+		"a faithful re-run under new ids": {renamed(chainA, "x"), argvStep("y", "echo", "${steps.x.json.kind}")},
+		"three deep under new ids": {renamed(chainA, "1"), argvStep("2", "echo", "${steps.1.json.kind}"),
+			argvStep("3", "echo", "${steps.2.stdout}")},
+		"a subset in another order": {chainC, chainA, chainB},
+		// Run twice, B refers to a step with A's text: the command it reads is the same.
+		"a reference to a step with the same text": {chainA, renamed(chainA, "A2"), argvStep("B", "echo", "${steps.A2.json.kind}")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, resources := chainEnv(t)
+			h := env.recordPlan(lastv1alpha1.StageRemediate, plan.Body{Steps: steps, Resources: resources, Nonce: nonce1})
+			before := len(env.entries())
+			if _, err := env.beginStage(lastv1alpha1.StageRemediate, h); err != nil {
+				t.Fatalf("BeginPhase(Remediate) = %v", err)
+			}
+			env.wantAuth(env.phaseBeginAfter(before, false), "auto", string(policy.KeyReconcile))
+			results := plan.Results{}
+			for _, s := range steps {
+				c, err := plan.Resolve(s, results)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := env.run(h, c)
+				if err != nil {
+					t.Fatalf("RunCommand(%s) = %v", s.ID, err)
+				}
+				results[s.ID] = runnerapi.Result{ID: s.ID, Stdout: resp.GetResult().GetStdout()}
+			}
+			if _, err := env.end(h, true); err != nil {
+				t.Fatalf("EndPhase = %v", err)
+			}
+		})
+	}
+}
+
+func TestAutoUpdateIsAuthorizedAsCreate(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.setDefaultModes(lastv1alpha1.ModeAuto)
+	h := env.recordPlan(lastv1alpha1.StageUpdate, plan.Body{Steps: twoSteps(), Resources: executedResources()})
+	before := len(env.entries())
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatalf("BeginPhase(Update) = %v", err)
+	}
+	env.wantAuth(env.phaseBeginAfter(before, false), "auto", string(policy.KeyCreate))
+}
+
+func TestAnIntentPolicyInAnotherNamespaceIsIgnored(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in)
+	env.setDefaultModes(lastv1alpha1.ModeAuto)
+	// Manual, and allowing no Auto, but for another namespace's Intents.
+	if err := env.crd.Create(env.ctx, &lastv1alpha1.IntentPolicy{ObjectMeta: metav1.ObjectMeta{Name: "manual", Namespace: tokOther},
+		Spec: lastv1alpha1.IntentPolicySpec{Modes: &lastv1alpha1.StageModes{Create: lastv1alpha1.ModeManual}}}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	env.wantAuth(env.phaseBeginAfter(before, false), "auto", string(policy.KeyCreate))
+}
+
+func TestAutoPhaseRefusalsDoNotSpeakOfAnApproval(t *testing.T) {
+	open := func(t *testing.T) (*testEnv, *lastv1alpha1.Intent) {
+		t.Helper()
+		in := intentWithPlan(t, twoSteps())
+		env := newProviderEnv(t, in)
+		env.setDefaultModes(lastv1alpha1.ModeAuto)
+		if _, err := env.begin(in.Status.Plan.Hash); err != nil {
+			t.Fatal(err)
+		}
+		return env, in
+	}
+	t.Run("a command that is not the step", func(t *testing.T) {
+		env, in := open(t)
+		_, err := env.run(in.Status.Plan.Hash, argvStep("s1", kubectlBin, "get", "ns", "kube-system", "-o", "json"))
+		env.wantDenied(err, codes.PermissionDenied)
+		if !strings.Contains(err.Error(), "command does not match Auto-authorized step s1") {
+			t.Fatalf("RunCommand = %v", err)
+		}
+	})
+	t.Run("the Intent is gone", func(t *testing.T) {
+		env, in := open(t)
+		if err := env.crd.Delete(env.ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.run(in.Status.Plan.Hash, twoSteps()[0])
+		env.wantDenied(err, codes.NotFound)
+		if !strings.Contains(err.Error(), "auto authorization withdrawn: intent not found") {
+			t.Fatalf("RunCommand = %v", err)
+		}
+	})
 }
