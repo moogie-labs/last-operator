@@ -76,7 +76,8 @@ type planningFailure string
 func (f planningFailure) Error() string { return string(f) }
 
 // msgNothingToRemediate is why a Remediate fails when the audit log does not
-// hold the executed plan (never executed, or a truncated index).
+// hold the executed plan (never executed, or an index trimmed past it before the
+// gateway kept the executed plan's entries).
 const msgNothingToRemediate planningFailure = "no executed plan found to remediate"
 
 // remediateMessage confirms the drift with a probe run (ruling R5) and

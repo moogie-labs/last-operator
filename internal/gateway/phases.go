@@ -394,7 +394,7 @@ func recordFits(rec *LoadedRecord, stage lastv1alpha1.Stage, subject string, can
 	prospective.Open = nil
 	prospective.Used = append(slices.Clone(rec.Used), subject)
 	prospective.Executed = &ExecutedPlan{Stage: string(stage), PlanHash: subject, Plan: string(canonical), EndSeq: math.MaxUint64,
-		Began: formatBegan(began)}
+		BeginSeq: math.MaxUint64, Began: formatBegan(began)}
 	_, err := encodeRecord(prospective)
 	return err
 }
@@ -804,7 +804,7 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
 		}
 		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq,
-			Began: formatBegan(p.began)}
+			BeginSeq: p.beginSeq, Began: formatBegan(p.began)}
 	}
 	// The record is saved without the open phase before a succeeded Delete drops
 	// it, so a failed deletion never leaves a phase for the next leader to interrupt.

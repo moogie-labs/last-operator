@@ -246,8 +246,20 @@ func TestExecutedPlanNotFound(t *testing.T) {
 	}
 }
 
-func TestExecutedPlanIsNotFoundWhenTheIndexIsTruncated(t *testing.T) {
-	a := &fakeAuditor{truncated: true, entries: executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded)}
+// A truncated index drops the oldest entries first and the phases of one Intent
+// never overlap, so a succeeded pair still visible is newer than any dropped one.
+func TestExecutedPlanIsFoundWhileTheIndexIsTruncated(t *testing.T) {
+	entries := append(executedPhase(t, 5, "Create", planBody("p1"), outcomeSucceeded), executedPhase(t, 7, "Update", planBody("p2"), outcomeSucceeded)...)
+	want := planBody("p2")
+	wantHash, _ := plan.Hash(want)
+	body, hash, found, err := ExecutedPlan(context.Background(), &fakeAuditor{truncated: true, entries: entries}, ref)
+	if err != nil || !found || hash != wantHash || !reflect.DeepEqual(body, want) {
+		t.Errorf("ExecutedPlan = %v %s, found %v, err %v; want p2 %s", body, hash, found, err, wantHash)
+	}
+}
+
+func TestExecutedPlanIsNotFoundWhenTruncationTookItsBegin(t *testing.T) {
+	a := &fakeAuditor{truncated: true, entries: executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded)[1:]}
 	if _, _, found, err := ExecutedPlan(context.Background(), a, ref); found || err != nil {
 		t.Errorf("ExecutedPlan = found %v, err %v, want not found", found, err)
 	}
@@ -330,7 +342,8 @@ func TestPhaseSucceededPairsBeginAndEnd(t *testing.T) {
 		"failed":          {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("bad"), false},
 		"another subject": {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("other"), false},
 		"another stage":   {&fakeAuditor{entries: entries}, lastv1alpha1.StageRemediate, hash("upd"), false},
-		"truncated":       {&fakeAuditor{entries: entries, truncated: true}, lastv1alpha1.StageRemediate, hash("ok"), false},
+		"truncated":       {&fakeAuditor{entries: entries, truncated: true}, lastv1alpha1.StageRemediate, hash("ok"), true},
+		"begin truncated": {&fakeAuditor{entries: entries[1:], truncated: true}, lastv1alpha1.StageRemediate, hash("ok"), false},
 	} {
 		got, err := PhaseSucceeded(context.Background(), c.a, ref, c.stage, c.subject)
 		if err != nil || got != c.want {

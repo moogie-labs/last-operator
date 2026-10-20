@@ -79,7 +79,7 @@ type script struct {
 	queryErr error // returned by QueryAudit
 	// queryHook, when set, is called with each QueryAudit call's types; an error it returns is the call's.
 	queryHook      func(types []string) error
-	auditTruncated bool // QueryAudit reports that the index dropped entries
+	auditTruncated bool // QueryAudit reports that the index dropped every entry, and serves none
 }
 
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
@@ -657,7 +657,7 @@ func (f *fakeGateway) QueryAudit(_ context.Context, in *gatewayv1.QueryAuditRequ
 	}
 	resp := &gatewayv1.QueryAuditResponse{Truncated: s.auditTruncated}
 	for _, e := range f.audit[key] {
-		if e.GetSeq() <= in.GetAfterSeq() || (len(in.GetTypes()) > 0 && !slices.Contains(in.GetTypes(), e.GetType())) {
+		if s.auditTruncated || e.GetSeq() <= in.GetAfterSeq() || (len(in.GetTypes()) > 0 && !slices.Contains(in.GetTypes(), e.GetType())) {
 			continue
 		}
 		if len(resp.Entries) == limit {

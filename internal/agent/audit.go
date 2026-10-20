@@ -106,13 +106,15 @@ func UsedPlans(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (map[st
 // ExecutedPlan returns the plan the Intent last executed successfully, and its
 // hash: the plan in the newest phase.begin with stage Create or Update whose
 // phase.end, paired by beginSeq, has outcome succeeded. Remediate, Discovery
-// and Delete phases never count. found is false when no such phase exists or
-// when the index is truncated, since the newest one may then be missing. A plan
-// that does not hash to its entry's subject is an error. Gateway errors are
-// returned unchanged.
+// and Delete phases never count. found is false when no such phase is visible.
+// Truncation does not hide a visible one: the index drops the oldest entries
+// first and the phases of one Intent never overlap, so a visible succeeded pair
+// is newer than any dropped one, and the gateway keeps the executed plan's pair
+// in the index. A plan that does not hash to its entry's subject is an error.
+// Gateway errors are returned unchanged.
 func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (plan.Body, string, bool, error) {
 	begins := map[uint64]*gatewayv1.AuditEntry{}
-	truncated, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
+	_, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
 		if stage := e.GetStage(); stage == string(lastv1alpha1.StageCreate) || stage == string(lastv1alpha1.StageUpdate) {
 			begins[e.GetSeq()] = e
 		}
@@ -121,7 +123,7 @@ func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (pla
 		return plan.Body{}, "", false, err
 	}
 	var newest *gatewayv1.AuditEntry
-	endTruncated, err := scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
+	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
 		var end struct {
 			BeginSeq uint64 `json:"beginSeq"`
 			Outcome  string `json:"outcome"`
@@ -137,7 +139,7 @@ func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (pla
 	if err != nil {
 		return plan.Body{}, "", false, err
 	}
-	if truncated || endTruncated || newest == nil {
+	if newest == nil {
 		return plan.Body{}, "", false, nil
 	}
 	var p struct {
@@ -266,11 +268,12 @@ func Reload(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, session ui
 }
 
 // PhaseSucceeded reports whether the Intent has a phase.begin of stage and
-// subject whose phase.end, paired by beginSeq, has outcome succeeded. A
-// truncated index gives false. Gateway errors are returned unchanged.
+// subject whose phase.end, paired by beginSeq, has outcome succeeded. A pair
+// visible in a truncated index counts; one truncation dropped gives false.
+// Gateway errors are returned unchanged.
 func PhaseSucceeded(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, stage lastv1alpha1.Stage, subject string) (bool, error) {
 	begins := map[uint64]bool{}
-	truncated, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
+	_, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
 		if e.GetStage() == string(stage) && e.GetSubjectHash() == subject {
 			begins[e.GetSeq()] = true
 		}
@@ -279,7 +282,7 @@ func PhaseSucceeded(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, st
 		return false, err
 	}
 	found := false
-	endTruncated, err := scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
+	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
 		var end struct {
 			BeginSeq uint64 `json:"beginSeq"`
 			Outcome  string `json:"outcome"`
@@ -291,5 +294,5 @@ func PhaseSucceeded(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, st
 	if err != nil {
 		return false, err
 	}
-	return found && !truncated && !endTruncated, nil
+	return found, nil
 }

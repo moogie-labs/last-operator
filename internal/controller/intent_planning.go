@@ -97,7 +97,7 @@ func resetSession(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, feedback st
 
 // sessionStage is the stage a new planning session plans for: Update when the
 // audit log holds the Intent's executed plan, Create when it does not (never
-// executed, or the index was truncated). The executed plan is never read from
+// executed, or the index was trimmed past it). The executed plan is never read from
 // status. A gateway without QueryAudit cannot say, so the session plans a
 // Create, as before Update existed. Any other error is returned for a retry.
 func (r *IntentReconciler) sessionStage(ctx context.Context, in *lastv1alpha1.Intent) (lastv1alpha1.Stage, error) {

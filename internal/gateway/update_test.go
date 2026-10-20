@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
@@ -796,4 +798,65 @@ func TestATerminatingManagedResourceIsNotDeletedAgain(t *testing.T) {
 	if n := env.countType(before, audit.TypeManagedResourceDeleted); n != 0 {
 		t.Fatalf("%d managedresource.deleted entries, want none", n)
 	}
+}
+
+// gatewayAuditor serves the operator's audit reads from the env's gateway.
+type gatewayAuditor struct{ e *testEnv }
+
+func (a gatewayAuditor) QueryAudit(ctx context.Context, in *gatewayv1.QueryAuditRequest, _ ...grpc.CallOption) (*gatewayv1.QueryAuditResponse, error) {
+	return a.e.g.queryAudit(ctx, in)
+}
+
+// operatorSeesExecuted asserts that the operator's audit read finds subject as
+// the executed plan.
+func (e *testEnv) operatorSeesExecuted(subject string) {
+	e.t.Helper()
+	_, hash, found, err := agent.ExecutedPlan(e.ctx, gatewayAuditor{e}, ref())
+	if err != nil || !found || hash != subject {
+		e.t.Fatalf("ExecutedPlan = %s, found %v, %v; want %s", hash, found, err, subject)
+	}
+}
+
+// The executed plan's phase.begin and phase.end never age out of the index, so
+// the operator still finds the plan to update or remediate after many more
+// indexed entries; QueryAudit still reports the truncation.
+func TestTheExecutedPhaseOutlivesIndexTrimming(t *testing.T) {
+	env, _ := executedEnv(t)
+	h, steps := env.oneResourceUpdate()
+	env.runPhase(lastv1alpha1.StageUpdate, h, steps)
+	if ex := env.executed(); ex.BeginSeq == 0 || ex.EndSeq <= ex.BeginSeq {
+		t.Fatalf("executed = begin %d, end %d; want both recorded", ex.BeginSeq, ex.EndSeq)
+	}
+	for range 300 {
+		env.indexedEntry()
+	}
+	resp, err := env.query(&gatewayv1.QueryAuditRequest{Types: []string{audit.TypePhaseBegin}})
+	if err != nil || !resp.GetTruncated() {
+		t.Fatalf("QueryAudit = %+v, %v; want truncated", resp, err)
+	}
+	env.operatorSeesExecuted(h)
+	if rec, _ := env.g.state.LoadAny(env.ctx, envKey); len(rec.Index) > maxIndexEntries {
+		t.Fatalf("index holds %d entries; the limit is %d", len(rec.Index), maxIndexEntries)
+	}
+}
+
+// A recreated Intent inherits its predecessor's last seq as its index floor,
+// so its every query is truncated; its own succeeded Create is still found.
+func TestARecreatedIntentFindsItsOwnExecutedPlan(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	env := newProviderEnv(t, in, approvalFor("ok", in.Status.Plan.Hash, lastv1alpha1.DecisionApprove, approver))
+	env.indexedEntry()
+	head, _, _ := env.g.writer.Load().Head()
+	rec, _ := env.g.state.LoadAny(env.ctx, envKey)
+	rec.IntentUID = testOldUID
+	rec.AddIndex([]IndexEntry{{Seq: head, Type: audit.TypeLLMRequest}})
+	if err := env.g.state.Save(env.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	env.g.index.take(envKey)
+	executeAll(t, env, in)
+	if resp, err := env.query(&gatewayv1.QueryAuditRequest{}); err != nil || !resp.GetTruncated() {
+		t.Fatalf("QueryAudit = %+v, %v; want truncated by the inherited floor", resp, err)
+	}
+	env.operatorSeesExecuted(in.Status.Plan.Hash)
 }

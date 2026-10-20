@@ -63,7 +63,8 @@ type IntentRecord struct {
 	// Index lists the Intent's recent indexed audit entries, oldest first.
 	Index []IndexEntry `json:"index,omitempty"`
 	// IndexFloor is the highest seq ever dropped from Index; QueryAudit reports
-	// truncation for cursors below it.
+	// truncation for cursors below it. The executed plan's pinned entries stay in
+	// Index below it.
 	IndexFloor uint64 `json:"indexFloor,omitempty"`
 }
 
@@ -83,6 +84,10 @@ type ExecutedPlan struct {
 	PlanHash string `json:"planHash"`
 	Plan     string `json:"plan"` // canonical JSON of plan.Body
 	EndSeq   uint64 `json:"endSeq"`
+	// BeginSeq is the seq of the plan's phase.begin. Index trimming keeps the
+	// entries of BeginSeq and EndSeq, so the operator can always read the plan it
+	// updates or remediates; a record without it pins nothing.
+	BeginSeq uint64 `json:"beginSeq,omitempty"`
 	// Began is when the plan's phase began (RFC 3339). RunProbes ignores a Deny
 	// created before it; a record without it counts every Deny.
 	Began string `json:"began,omitempty"`
@@ -269,12 +274,38 @@ func (r *IntentRecord) AddIndex(es []IndexEntry) {
 	}
 }
 
-// DropIndex drops the n oldest index entries and raises IndexFloor past them.
-func (r *IntentRecord) DropIndex(n int) {
-	n = min(n, len(r.Index))
-	if n == 0 {
-		return
+// DropIndex drops the n oldest index entries and raises IndexFloor past them,
+// and reports how many it dropped. It keeps the executed plan's phase.begin and
+// phase.end (pinned), which stay below the floor so QueryAudit still serves them.
+func (r *IntentRecord) DropIndex(n int) int {
+	pinned := r.pinned()
+	kept := make([]IndexEntry, 0, len(r.Index))
+	dropped := 0
+	for _, e := range r.Index {
+		if dropped < n && !pinned[e.Seq] {
+			r.IndexFloor = max(r.IndexFloor, e.Seq)
+			dropped++
+			continue
+		}
+		kept = append(kept, e)
 	}
-	r.IndexFloor = max(r.IndexFloor, r.Index[n-1].Seq)
-	r.Index = slices.Clone(r.Index[n:])
+	if dropped > 0 {
+		r.Index = kept
+	}
+	return dropped
+}
+
+// pinned returns the seqs index trimming keeps: the executed plan's phase.begin
+// and phase.end, and the open phase's phase.begin, which a phase with many steps
+// could otherwise lose before it becomes the executed plan. An executed plan
+// recorded without BeginSeq pins nothing.
+func (r *IntentRecord) pinned() map[uint64]bool {
+	pins := map[uint64]bool{}
+	if r.Executed != nil && r.Executed.BeginSeq != 0 {
+		pins[r.Executed.BeginSeq], pins[r.Executed.EndSeq] = true, true
+	}
+	if r.Open != nil {
+		pins[r.Open.BeginSeq] = true
+	}
+	return pins
 }

@@ -162,6 +162,34 @@ func TestRecordIndexKeepsTheNewestEntriesAndRecordsTheFloor(t *testing.T) {
 	}
 }
 
+func TestIndexTrimmingKeepsTheExecutedPlansEntries(t *testing.T) {
+	r := IntentRecord{Executed: &ExecutedPlan{BeginSeq: 3, EndSeq: 7}}
+	var es []IndexEntry
+	for seq := uint64(1); seq <= maxIndexEntries+10; seq++ {
+		es = append(es, IndexEntry{Seq: seq, Type: audit.TypePhaseBegin})
+	}
+	r.AddIndex(es)
+	if len(r.Index) != maxIndexEntries || r.Index[0].Seq != 3 || r.Index[1].Seq != 7 || r.Index[2].Seq != 13 || r.IndexFloor != 12 {
+		t.Fatalf("index has %d entries starting %v, floor %d; want 3 and 7 kept below floor 12", len(r.Index), r.Index[:3], r.IndexFloor)
+	}
+	// Only pinned entries left: nothing more to drop, so saveRecord stops.
+	r.Index = r.Index[:2]
+	if n := r.DropIndex(indexDropStep); n != 0 || len(r.Index) != 2 {
+		t.Fatalf("DropIndex = %d, index %v; want the pinned entries kept", n, r.Index)
+	}
+	// The open phase's phase.begin is kept too.
+	r.Open = &OpenPhase{BeginSeq: 150}
+	r.Index = []IndexEntry{{Seq: 3}, {Seq: 7}, {Seq: 140}, {Seq: 150}, {Seq: 160}}
+	if r.DropIndex(2); !slices.Equal(r.Index, []IndexEntry{{Seq: 3}, {Seq: 7}, {Seq: 150}}) || r.IndexFloor != 160 {
+		t.Fatalf("index %v, floor %d; want 3, 7 and 150 kept", r.Index, r.IndexFloor)
+	}
+	// A record from before BeginSeq was recorded pins nothing.
+	old := IntentRecord{Executed: &ExecutedPlan{EndSeq: 7}, Index: []IndexEntry{{Seq: 7}, {Seq: 9}}}
+	if n := old.DropIndex(1); n != 1 || old.Index[0].Seq != 9 {
+		t.Fatalf("DropIndex = %d, index %v; want the oldest dropped", n, old.Index)
+	}
+}
+
 func TestARecordForAnotherUIDStartsClean(t *testing.T) {
 	in := intentWithPlan(t, twoSteps())
 	h := in.Status.Plan.Hash

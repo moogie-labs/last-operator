@@ -163,12 +163,12 @@ func (g *Gateway) afterTeardown(ctx context.Context, intent string) (uid string,
 }
 
 // saveRecord saves rec. The QueryAudit index is best-effort: when the record would
-// outgrow its ConfigMap, the oldest index entries go first, so phase state always fits.
+// outgrow its ConfigMap, the oldest index entries go first, so phase state always
+// fits. The executed plan's pinned entries never go.
 func (g *Gateway) saveRecord(ctx context.Context, rec *LoadedRecord) error {
 	for {
 		err := g.state.Save(ctx, rec)
-		if errors.Is(err, errRecordTooLarge) && len(rec.Index) > 0 {
-			rec.DropIndex(indexDropStep)
+		if errors.Is(err, errRecordTooLarge) && rec.DropIndex(indexDropStep) > 0 {
 			continue
 		}
 		return err
