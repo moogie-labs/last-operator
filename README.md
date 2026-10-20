@@ -4,11 +4,14 @@ An AI-driven Kubernetes operator that turns natural-language requests into
 reviewed, audited, continuously reconciled infrastructure.
 Design: [`docs/superpowers/specs/2026-09-26-last-operator-design.md`](docs/superpowers/specs/2026-09-26-last-operator-design.md).
 
-**Status:** M3 (real LLMs). The operator plans with Anthropic Claude or an
-OpenAI-compatible model, asks clarifying questions, runs approved discovery
-commands, and executes approved plans in sandbox pods. Every action goes
-through the gateway, which records it in a write-once audit log. Image builds,
-allow rules and rule suggestions arrive in M4–M7.
+**Status:** M5b (day two: delete, edit and drift). The operator plans with
+Anthropic Claude or an OpenAI-compatible model, asks clarifying questions, runs
+approved discovery commands, and executes approved plans in sandbox pods,
+building the images their commands need. It tears an Intent down when you
+delete it, plans an Update when you edit it, and plans a Remediate when its
+probes find drift. Every action goes through the gateway, which records it in a
+write-once audit log. Auto modes and adaptive probing arrive in M5c, allow
+rules in M6 and rule suggestions in M7.
 
 ## What works today
 
@@ -125,7 +128,10 @@ An Intent that has executed is not frozen.
   `(stage Update)`; approve it as usual. When it succeeds, the gateway deletes
   the ManagedResources the Update dropped, each audited as
   `managedresource.deleted`, and the Intent runs its probes and returns to Ready.
-  The Update's own steps must remove the real objects of a dropped resource.
+  The Update's own steps must remove the real objects of a dropped resource. A
+  kept resource keeps its output Secret, which the gateway moves to the
+  resource's new ManagedResource when an earlier one is dropped, audited as
+  `output.moved`.
 - **Drift.** A scheduled probe that fails moves the Intent to `Drifted`. The
   operator runs the probes again to confirm. If they all pass, the Intent goes
   back to Ready with a Warning `DriftCleared` event and nothing to approve.
@@ -145,8 +151,9 @@ An Intent that has executed is not frozen.
 - **Approving.** `approve` and `deny` act only while the Intent is
   `AwaitingApproval`: during planning, `status.plan` is still the previous plan
   and is never approvable. A plan that carries a nonce is shown as
-  `(stage Remediate)`. After a `DriftCleared` return the plan shown is the
-  executed one, labelled `(executed plan)`.
+  `(stage Remediate)`. After a `DriftCleared` return the plan shown is the last
+  one recorded: the executed plan, labelled `(executed plan)`, or an earlier
+  remediation's plan, labelled `(stage Remediate)`.
 
 ## Upgrading to M5a
 
@@ -167,6 +174,17 @@ An Intent that has executed is not frozen.
   reconcile after the upgrade. Review and approve it, or set `spec.request` back.
 - **Use a `kubectl last` as new as the operator.** Older plugins refuse a
   Remediate plan, which they cannot approve.
+- **Drifted Intents start a remediation.** An Intent already `Drifted` when you
+  upgrade starts a Remediate on the first reconcile: the operator confirms the
+  drift, then asks for your approval.
+- **The first sweep deletes extra ManagedResources.** At lead, the gateway's
+  record sweep deletes the ManagedResources each Intent controls beyond its
+  executed plan's resources, with their output Secrets, each audited as
+  `managedresource.deleted`.
+- **Some older plans cannot be remediated.** An executed plan from before M5a
+  whose teardown commands use `${steps…}` references fails the gateway's checks
+  for a Remediate, so its drift cannot be repaired. Edit the Intent to plan an
+  Update instead.
 
 ## Demo against Claude (opt-in)
 

@@ -337,7 +337,8 @@ after the Intent last became Ready, resets it to 0, and so does a spec
 edit that starts a new planning session (§7).
 
 Changing `spec.request` or `spec.answers` increments `generation` and
-starts an **Update** planning cycle.
+starts a new planning cycle: an **Update** once a plan has executed, a
+Create before that (§7).
 
 ### 5.2 IntentApproval
 
@@ -596,7 +597,7 @@ Pending → Clarifying ⇄ (user answers)
   - **Stage.** The operator chooses the session's stage before it
     records the new session, from the audit log, never from status.
     The executed plan, read as Delete reads it (below), means `Update`.
-    No executed plan (never executed, or a truncated index) means
+    No executed plan (never executed, or an index trimmed past it) means
     `Create`, and so does a gateway without `QueryAudit`, which cannot
     say. Any other error reading the audit log is retried, never
     guessed.
@@ -604,17 +605,21 @@ Pending → Clarifying ⇄ (user answers)
     resources. The model plans steps that take the cluster from what
     that plan created to what the request now asks. Its resources list
     everything the Intent manages afterwards, and its steps remove the
-    real objects of any resource it drops. If the executed plan has
-    left the audit log by the time the session starts, the stage is
-    chosen again.
+    real objects of any resource it drops. Kept resources stay in their
+    executed order; a kept resource's outputs name this plan's steps, or
+    are left out to keep its output Secret as it is (§15). The message
+    tells the model not to repeat the executed plan as its answer. If
+    the executed plan has left the audit log by the time the session
+    starts, the stage is chosen again.
   - **Approval** is for stage `Update`. An approval of the same plan
     for stage `Create` authorizes nothing.
   - **Executing** runs the plan as for a Create. A step that exits
     non-zero plans the Update again, with the failure as context; the
     executed plan is unchanged. At `EndPhase(Update, succeeded)` the
     gateway makes the Update the executed plan and deletes the
-    ManagedResources it dropped, auditing each (§15). Verifying then
-    probes the new executed plan.
+    ManagedResources it dropped, auditing each (§15); a Create that
+    replaced an executed plan (the operator could not read the audit
+    log) does the same. Verifying then probes the new executed plan.
 - **Drift.** A scheduled probe run that fails on a ManagedResource of the
   Intent's plan moves a Ready Intent to `Drifted`; from there the
   operator starts a Remediate. A Drifted Intent whose spec was edited
@@ -824,10 +829,9 @@ the gateway records each subject as used, so an approval runs at most once
 while its subject is remembered: the gateway keeps the last 200 Discovery
 subjects and the last 50 plan subjects per Intent, separately, so discovery
 never evicts a plan subject. An approval counts only for the Intent UID it
-names and until it is older than `approvals.maxAge` (§5.2, §5.6).
-The gateway checks that the
-hash matches the pending command and its nonce, that the command's step ID
-is `discovery`, and that it is at most 64 KiB. A Discovery phase never
+names and until it is older than `approvals.maxAge` (§5.2, §5.6). The
+gateway checks that the hash matches the pending command and its nonce,
+that the command's step ID is `discovery`, and that it is at most 64 KiB. A Discovery phase never
 becomes the executed plan: probes and later stages keep following the last
 executed Create or Update plan.
 
@@ -843,16 +847,17 @@ its age limit, authorizes the re-run. Every other stage stays run-once, and
 an Intent being deleted opens no Create, Update or Remediate phase.
 
 **Update and Remediate phases** need an executed plan in the gateway's
-record, and the gateway refuses them without one. An **Update** is checked as a Create, with the same record limit, and
-once it succeeds it becomes the executed plan. A **Remediate** plan must
-carry the executed plan's `resources` unchanged (canonical JSON, ignoring
-`intentRef`), so its outputs still name the executed plan's steps; a
-Remediate phase writes no output Secrets and never becomes the executed plan.
-Every Remediate plan carries a fresh `nonce`, part of its hash, so the same
-repair for a recurring drift is a new subject that needs its own approval.
-The gateway refuses a Remediate plan without a valid nonce, and a plan of any
-other stage with one. A nonce left empty is left out of the hash, so other
-plans hash as before.
+record, and the gateway refuses them without one. An **Update** is
+checked as a Create, with the same record limit, and once it succeeds it
+becomes the executed plan. A **Remediate** plan must carry the executed
+plan's `resources` unchanged (canonical JSON, ignoring `intentRef`), so
+its outputs still name the executed plan's steps; a Remediate phase
+writes no output Secrets and never becomes the executed plan. Every
+Remediate plan carries a fresh `nonce`, part of its hash, so the same
+repair for a recurring drift is a new subject that needs its own
+approval. The gateway refuses a Remediate plan without a valid nonce,
+and a plan of any other stage with one. A nonce left empty is left out
+of the hash, so other plans hash as before.
 
 Any mismatch produces a `policy.denied` audit entry and an error to the
 operator. If a step fails, the Intent returns to **Planning** with the
@@ -869,8 +874,24 @@ open phase and the last executed plan per Intent) in a gateway-owned
 ConfigMap in `last-gateway`, written only after the matching
 `phase.begin`/`phase.end`. The operator has no access to it, and a
 gateway restart closes an open phase as `interrupted` rather than
-resuming it. The record is bounded (about 900 KiB), so the
+resuming it, unless the phase's `phase.end` is already in the audit log
+(the record save after it failed). The gateway looks for it in the
+Intent's index, then in the audit entries written after the newest
+indexed one, and closes the phase as it ended without a second
+`phase.end`: a succeeded Create or Update becomes the executed plan,
+read from its `phase.begin`, and a succeeded Delete drops the record.
+While the gateway that ended such a phase still runs, the next
+`BeginPhase` finishes the save itself, so an operator that abandoned the
+phase is never refused. The record is bounded (about 900 KiB), so the
 gateway refuses at `BeginPhase` a plan too large to record once executed.
+The record also holds the Intent's `QueryAudit` index, at most 200
+entries, oldest dropped first. Trimming never drops the executed plan's
+`phase.begin` and `phase.end` (the record keeps both seqs) or the open
+phase's `phase.begin`; `QueryAudit` still serves them below the
+truncation floor, so the operator can always read the plan it updates,
+remediates or tears down. A succeeded pair still in the index is the
+newest one, since one Intent's phases never overlap, so the operator
+reads it even when the index reports truncation.
 A succeeded Delete phase deletes the record, after its `phase.end` is in the
 audit log, together with the in-memory phase and the Intent's unsaved
 index entries; no later index flush recreates it, and no phase opens again
@@ -884,7 +905,7 @@ gone or a recreated Intent of another UID holding the name. When the live read
 instead finds the Intent with the record's UID, the record holds an executed
 plan, and no phase is open in the record or held in the gateway's memory, the
 sweep deletes the ManagedResources the Intent controls beyond the executed
-plan's resources, as EndPhase(Update, succeeded) does (§15): a restart between
+plan's resources, as EndPhase(Create or Update, succeeded) does (§15): a restart between
 that EndPhase's record save and its deletions loses the phase that would
 retry them, and the sweep at lead finishes them. Each deletion is audited as
 `managedresource.deleted` under the executed plan's stage and subject, with
@@ -901,9 +922,10 @@ Intent's current UID means an approved phase of it succeeded, which needs no
 standing `Approve` and no age check. The gateway still refuses probes when an
 `IntentApproval` with decision `Deny` for the executed subject names the
 Intent's current UID and was created at or after the executed phase began
-(the record's `began`): a Deny wins. An older Deny was weighed when the phase
-opened, so it is ignored; a record without `began` counts every Deny. The output Secrets are not the
-gateway's to delete: they belong to their ManagedResources and go with them.
+(the record's `began`): a Deny wins. An older Deny was weighed when the
+phase opened, so it is ignored; a record without `began` counts every
+Deny. The output Secrets are not the gateway's to delete: they belong to
+their ManagedResources and go with them.
 
 - **Auto-mode remediation** is limited to re-running commands from that
   plan. If the remediation plan contains any other command, it needs
@@ -1059,11 +1081,12 @@ probes:
   The operator then runs the probes once more to confirm. If every probe
   passes, the Intent returns to Ready with a Warning `DriftCleared` event
   and nothing is planned. Otherwise the LLM builds a remediation plan,
-  which needs its own approval for stage Remediate (§7). A remediation
-  that still leaves a probe failing counts toward the cap of 3 in
-  `status.remediations`, after which the Intent fails with
-  `RemediationFailed`; a scheduled run in which every probe passes resets
-  the count.
+  which needs its own approval for stage Remediate (§7). Every
+  remediation that drift starts counts in `status.remediations`; at 3,
+  the next drift fails the Intent with `RemediationFailed`. A scheduled
+  run in which every probe passes, finishing after the Intent last
+  became Ready, resets the count, and so does a spec edit that starts a
+  Create or Update session (§7).
 
 ### 10.1 Scheduling
 
@@ -1588,8 +1611,10 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
 `approval.observed`, `rule.observed` (a rule created, changed, or
 deleted, seen via watch), `suggestion.decided`, `policy.denied`,
 `output.written` (records a WriteOutputSecret with each value as its SHA-256),
-`managedresource.deleted` (a ManagedResource a succeeded Update dropped,
-deleted by the gateway with its output Secret; §15).
+`managedresource.deleted` (a ManagedResource a succeeded Create or Update
+dropped, deleted by the gateway with its output Secret; §15),
+`output.moved` (an output Secret moved, unchanged, to the ManagedResource
+that now declares it; names only; §15).
 
 `phase.end` records an outcome: `succeeded` (every step ran and exited 0),
 `failed` (the operator ended a phase whose step failed or was refused),
@@ -1734,11 +1759,24 @@ configuration.
   resource). Each deletion is audited as `managedresource.deleted`, with
   the ManagedResource's name and UID and never its Secret's contents. If
   the operator moves on before its EndPhase retry finishes them, the next
-  BeginPhase for the Intent does, its Delete included; if a gateway
-  restart cuts them short, the leader's record sweep (§8.3) does.
-  EndPhase deletes nothing for a failed or aborted Update; the ManagedResources
-  it created beyond the executed plan's resources are removed by the
-  leader's record sweep.
+  BeginPhase for the Intent does, except the Intent's Delete, whose
+  deletion garbage-collects them; if a gateway restart cuts them short,
+  the leader's record sweep (§8.3) does. A succeeded Create that replaced
+  an executed plan deletes the ManagedResources it dropped the same way.
+  EndPhase deletes nothing for a failed or aborted Update; the
+  ManagedResources it created beyond the executed plan's resources are
+  removed by the leader's record sweep.
+- ManagedResource names are positional, so an Update that drops an
+  earlier resource moves a kept one to another ManagedResource, while its
+  output Secret is still owned by the old one. `WriteOutputSecret`
+  accepts a Secret labelled with the Intent's UID and controlled by
+  another ManagedResource the Intent controls when the approved plan
+  declares that Secret at this ManagedResource's position; the write
+  replaces its owner, audited as `output.written`. Before deleting stale
+  ManagedResources, the gateway moves each output Secret the executed
+  plan declares to the ManagedResource that now declares it, its data
+  unchanged, audited as `output.moved`, so a kept resource whose plan
+  leaves its `outputs` out keeps its Secret.
 
 ## 16. Observability
 

@@ -51,12 +51,12 @@ Probes follow an adaptive interval with jitter and a floor.
 ### 3.2 Record keyed by UID
 - **Name:** the record ConfigMap keeps its name, `last-intent-` and a hash of the Intent's namespace and name. The record stores the Intent's UID (`intentUID`), and `Load` resets a record that names another UID, keeping only its index floor, so a recreated Intent starts clean.
 - **Old Intents:** a record written before M5a has no UID. `Load` adopts it for the Intent that next uses it, so its used-subject history and executed plan carry over; D1's UID binding of approvals still blocks replays.
-- **At lead,** the gateway lists every record and closes each open phase from another epoch as interrupted. This closes the M2b follow-up.
+- **At lead,** the gateway lists every record and closes each open phase from another epoch as interrupted. This closes the M2b follow-up. A phase whose `phase.end` is already in the audit log (its record save failed) is closed as it ended instead, with no second `phase.end`; while its gateway still runs, the next BeginPhase finishes that save.
 
 ### 3.3 The executed plan from the audit log
 - **Audit index:** the gateway keeps indexing `phase.begin` and `phase.end` (M3).
 - **`agent.ExecutedPlan(ctx, auditor, ref) (*plan.Body, hash string, found bool, err error)`** reads the latest succeeded Create or Update `phase.begin` payload. It pairs begin and end by `beginSeq` and verifies that the plan's canonical hash equals the entry's subject.
-- **A truncated index** without the entry means the executed plan is unknown. Delete then falls back to the ManagedResources' `teardown` with a warning, and needs approval even in Auto mode; Remediate fails with `PlanningFailed`.
+- **A truncated index** does not hide a succeeded pair it still holds: the index drops the oldest entries first and one Intent's phases never overlap, so a visible pair is the newest. The gateway never trims the executed plan's `phase.begin` and `phase.end` (the record keeps `beginSeq` and `endSeq`), nor the open phase's `phase.begin`, and still serves them below the truncation floor. An index without the entry (a record from before M5b, trimmed past it) means the executed plan is unknown. Delete then falls back to the ManagedResources' `teardown` with a warning, and needs approval even in Auto mode; Remediate fails with `PlanningFailed`.
 
 ### 3.4 Delete
 - **Finalizer (D7):** added in `startPlanning` before the first Create phase begins.
@@ -86,7 +86,7 @@ Probes follow an adaptive interval with jitter and a floor.
 - **The first message** includes the executed plan (steps, resources, and probes summarised) and the new request and answers.
 - **Approval** is for stage Update.
 - **Gateway:** BeginPhase accepts stage `Update`, treated like Create (same record limits). A successful Update becomes the executed plan.
-- **At EndPhase(Update, succeeded) (R1):** the gateway deletes the ManagedResources the new plan dropped: those the Intent controls whose names (`<intent>-<i>`) are not among the new plan's. It does this, not the operator after Verifying, because the operator has no delete on ManagedResources: deleting one garbage-collects its output Secret, which main spec §4.1 forbids the operator doing unaudited. The gateway audits each deletion as `managedresource.deleted`. A failed delete keeps the phase, and the operator's EndPhase retry finishes it; if the operator moved on instead (say, to the Intent's Delete), the next BeginPhase finishes it, answering Unavailable while a delete still fails. A gateway restart loses that phase, so the leader's record sweep, at lead and then hourly, also deletes the ManagedResources an Intent controls beyond its executed plan's resources, when the Intent is live with the record's UID and no phase is open in the record or in memory. Their real objects were removed by the plan's steps, which the approver saw (D4).
+- **At EndPhase(Update, succeeded) (R1):** the gateway deletes the ManagedResources the new plan dropped: those the Intent controls whose names (`<intent>-<i>`) are not among the new plan's. It does this, not the operator after Verifying, because the operator has no delete on ManagedResources: deleting one garbage-collects its output Secret, which main spec §4.1 forbids the operator doing unaudited. The gateway audits each deletion as `managedresource.deleted`. A failed delete keeps the phase, and the operator's EndPhase retry finishes it; if the operator moved on instead, the next BeginPhase finishes it, answering Unavailable while a delete still fails. A BeginPhase for the Intent's Delete does not wait for it: the deletion garbage-collects the ManagedResources, and the sweep is the backstop. A Create that replaced an executed plan (the operator could not read the audit log) deletes the ManagedResources it dropped the same way. Before deleting, the gateway moves each output Secret the new plan declares to the ManagedResource that now declares it (`output.moved`), since positional names shift when an earlier resource is dropped. A gateway restart loses that phase, so the leader's record sweep, at lead and then hourly, also deletes the ManagedResources an Intent controls beyond its executed plan's resources, when the Intent is live with the record's UID and no phase is open in the record or in memory. Their real objects were removed by the plan's steps, which the approver saw (D4).
 
 ### 4.2 Remediate
 - **Starting:** on `Drifted` (InSync false on any ManagedResource), the operator goes to Planning, stage `Remediate`.
@@ -98,7 +98,7 @@ Probes follow an adaptive interval with jitter and a floor.
   - BeginPhase accepts stage `Remediate`, and requires the plan's `resources` to equal the executed plan's, canonically;
   - EndPhase(Remediate) does not replace the executed plan;
   - RunProbes keeps following the executed plan.
-- **Afterwards:** Verifying runs, then Ready. `status.remediations` counts consecutive remediations and is reset by a fully passing probe run (D11).
+- **Afterwards:** Verifying runs, then Ready. `status.remediations` counts consecutive remediations. A fully passing scheduled probe run, finishing after the Intent last became Ready, resets it (D11), and so does a spec edit that starts a Create or Update session: a changed plan starts a new episode.
 
 ### 4.3 Edits during Remediate or Delete
 - **A spec edit while Remediating** abandons the remediation, ending its phase as aborted if one is open, and starts an Update.
