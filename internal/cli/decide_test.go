@@ -11,6 +11,8 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 )
 
+const verbApprove = "approve"
+
 const seeWhatExists = "see what exists"
 
 // h3 is the real hash of lookCommand asked again, with a fresh nonce.
@@ -211,5 +213,90 @@ func TestApproveSetsTheIntentUID(t *testing.T) {
 	got := approvalsIn(t, c)
 	if len(got) != 1 || in.UID == "" || got[0].Spec.IntentUID != string(in.UID) {
 		t.Fatalf("approvals = %+v, want one carrying intent UID %q", got, in.UID)
+	}
+}
+
+// remediatePlanned is an Intent awaiting approval of a Remediate plan: it carries a nonce.
+func remediatePlanned() *lastv1alpha1.Intent {
+	in := inStage(plannedIntent(), lastv1alpha1.StageRemediate)
+	in.Status.Plan.Nonce = "0123456789abcdef0123456789abcdef"
+	in.Status.Plan.Hash = planHash(in.Status.Plan)
+	return in
+}
+
+func TestApproveARemediatePlan(t *testing.T) {
+	in := remediatePlanned()
+	in.UID = "uid-1"
+	c := fakeClient(in)
+	d, out := depsFor(c, "")
+	if err := execute(d, "approve", webName, "--hash", in.Status.Plan.Hash); err != nil {
+		t.Fatal(err)
+	}
+	got := approvalsIn(t, c)
+	if len(got) != 1 {
+		t.Fatalf("%d IntentApprovals", len(got))
+	}
+	s := got[0].Spec
+	if s.Stage != lastv1alpha1.StageRemediate || s.SubjectHash != in.Status.Plan.Hash || s.IntentUID != "uid-1" ||
+		s.Decision != lastv1alpha1.DecisionApprove {
+		t.Fatalf("approval = %+v", s)
+	}
+	if !strings.Contains(out.String(), "Plan "+in.Status.Plan.Hash+" (stage Remediate)") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// A plan that carries a nonce is a Remediate plan, whatever status.stage says.
+func TestANoncedPlanIsRemediateWhateverTheStageSays(t *testing.T) {
+	in := remediatePlanned()
+	in.Status.Stage = lastv1alpha1.StageCreate
+	d, out := depsFor(fakeClient(in), "")
+	if err := execute(d, "plan", webName); err != nil || !strings.Contains(out.String(), "(stage Remediate)") {
+		t.Fatalf("plan = %v:\n%s", err, out)
+	}
+}
+
+// After a DriftCleared return status.stage stays Remediate while the plan is
+// the earlier one: it is labelled as the executed plan and never decidable.
+func TestPlanWithoutANonceUnderRemediateIsTheExecutedPlan(t *testing.T) {
+	in := inStage(plannedIntent(), lastv1alpha1.StageRemediate)
+	in.Status.Phase = lastv1alpha1.PhaseReady
+	d, out := depsFor(fakeClient(in), "")
+	if err := execute(d, "plan", webName); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "(executed plan)") || strings.Contains(out.String(), "(stage") || strings.Contains(out.String(), "Approve:") {
+		t.Errorf("plan:\n%s", out)
+	}
+	// Even awaiting approval, a Remediate without a nonce is not approvable.
+	in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
+	d, _ = depsFor(fakeClient(in), "")
+	if err := execute(d, "approve", webName); err == nil {
+		t.Fatal("approved a Remediate plan without a nonce")
+	}
+}
+
+// While the operator plans, status.plan is still the previous plan: it is
+// never approvable.
+func TestPreviousPlanIsNotApprovableWhilePlanning(t *testing.T) {
+	for _, phase := range []lastv1alpha1.Phase{lastv1alpha1.PhasePlanning, lastv1alpha1.PhaseClarifying, lastv1alpha1.PhaseExecuting,
+		lastv1alpha1.PhaseRemediating, lastv1alpha1.PhaseReady, lastv1alpha1.PhaseDrifted} {
+		in := plannedIntent()
+		in.Status.Phase = phase
+		c := fakeClient(in)
+		d, out := depsFor(c, "")
+		for _, verb := range [][]string{{verbApprove, webName}, {"deny", webName, "--reason", "no"}} {
+			err := execute(d, verb...)
+			if err == nil || !strings.Contains(err.Error(), "only while it is AwaitingApproval") {
+				t.Fatalf("%s in %s = %v", verb[0], phase, err)
+			}
+		}
+		if n := len(approvalsIn(t, c)); n != 0 {
+			t.Fatalf("%d approvals in phase %s", n, phase)
+		}
+		out.Reset()
+		if err := execute(d, "plan", webName); err != nil || strings.Contains(out.String(), "Approve:") {
+			t.Fatalf("plan in %s = %v:\n%s", phase, err, out)
+		}
 	}
 }

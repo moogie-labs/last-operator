@@ -18,7 +18,8 @@ import (
 
 // approvablePlanStages are the stages this CLI knows how to put a plan to the
 // user for. Any other stage is refused, never approved as Create.
-var approvablePlanStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageDelete}
+var approvablePlanStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageDelete,
+	lastv1alpha1.StageRemediate}
 
 // subjectOf returns what the Intent asks its user to decide, with the hash
 // the operator states for it: the pending discovery command in
@@ -34,11 +35,16 @@ func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	return "", "", false
 }
 
-// planStageOf returns the stage the Intent's plan is for: status.stage, which
+// planStageOf returns the stage the Intent's plan is for. A plan that carries a
+// nonce is a Remediate plan, whatever status.stage says (main spec §7). Else it
+// is status.stage, which
 // holds the planning session's stage even while a discovery command is pending
 // (main spec §7). An empty stage, from before stages were recorded, or the
 // Discovery stage an older operator recorded during a session, means Create.
 func planStageOf(in *lastv1alpha1.Intent) lastv1alpha1.Stage {
+	if in.Status.Plan != nil && in.Status.Plan.Nonce != "" {
+		return lastv1alpha1.StageRemediate
+	}
 	if s := in.Status.Stage; s != "" && s != lastv1alpha1.StageDiscovery {
 		return s
 	}
@@ -59,6 +65,11 @@ func verifiedSubject(in *lastv1alpha1.Intent) (stage lastv1alpha1.Stage, hash st
 	if stage != lastv1alpha1.StageDiscovery && !slices.Contains(approvablePlanStages, stage) {
 		return stage, stated, true, fmt.Errorf("intent %s/%s: the plan is for stage %s, which this kubectl-last cannot approve "+
 			"(is kubectl-last as new as the operator?)", in.Namespace, in.Name, clean(string(stage)))
+	}
+	if stage == lastv1alpha1.StageRemediate && in.Status.Plan.Nonce == "" {
+		// status.stage stays Remediate after a DriftCleared return, while the plan is the earlier one.
+		return stage, stated, true, fmt.Errorf("intent %s/%s: the plan is the executed plan, not a Remediate plan "+
+			"(it carries no nonce); refusing to decide it", in.Namespace, in.Name)
 	}
 	hash, err = verifyHash(in, stage)
 	if err != nil {
@@ -157,6 +168,10 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 				return err
 			}
 			if !ok {
+				if in.Status.Plan != nil {
+					return fmt.Errorf("intent %s/%s has nothing to decide (phase %s): status.plan is not awaiting a decision, "+
+						"a plan can be approved or denied only while it is AwaitingApproval", in.Namespace, in.Name, phaseOf(in))
+				}
 				return fmt.Errorf("intent %s/%s has nothing to decide (phase %s)", in.Namespace, in.Name, phaseOf(in))
 			}
 			if hash != "" && hash != subject {

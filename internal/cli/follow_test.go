@@ -374,3 +374,38 @@ func TestPrintReadyEscapesTheOutputSecretName(t *testing.T) {
 		t.Errorf("output:\n%q", b.String())
 	}
 }
+
+func TestFollowShowsRemediating(t *testing.T) {
+	c := fakeClient()
+	d, out := depsFor(c, "y\n")
+	var remediate *lastv1alpha1.Plan
+	w := &world{t: t, c: c}
+	w.steps = []step{
+		{apply: func(in *lastv1alpha1.Intent) {
+			in.Status.Stage = lastv1alpha1.StageRemediate
+			in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
+			in.Status.Plan = webPlan()
+			in.Status.Plan.Nonce = "0123456789abcdef0123456789abcdef"
+			in.Status.Plan.Hash = planHash(in.Status.Plan)
+			remediate = in.Status.Plan
+		}},
+		{ready: func(*lastv1alpha1.Intent) bool { return len(approvalsIn(t, c)) == 1 }, apply: func(in *lastv1alpha1.Intent) {
+			in.Status.Phase = lastv1alpha1.PhaseRemediating
+			setReady(in, "Remediating", "Running the remediation")
+		}},
+		{apply: func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhaseReady }},
+	}
+	d.Wait = w.wait
+	if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
+		t.Fatalf("kubectl last = %v\n%s", err, out)
+	}
+	a := approvalsIn(t, c)
+	if len(a) != 1 || a[0].Spec.Stage != lastv1alpha1.StageRemediate || a[0].Spec.SubjectHash != remediate.Hash {
+		t.Fatalf("approvals = %+v", a)
+	}
+	for _, want := range []string{"(stage Remediate)", "Intent team-x/web: Remediating (Running the remediation)\n", "is Ready."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}

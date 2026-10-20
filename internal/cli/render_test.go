@@ -184,11 +184,11 @@ func TestRenderShowsTheStageBeingApproved(t *testing.T) {
 func TestAPlanForAnUnknownStageIsNeverDecidedAsCreate(t *testing.T) {
 	in := testIntent(webName, func(in *lastv1alpha1.Intent) {
 		in.Status.Phase = lastv1alpha1.PhaseAwaitingApproval
-		in.Status.Stage = lastv1alpha1.StageRemediate
+		in.Status.Stage = "Rename"
 		in.Status.Plan = webPlan()
 	})
 	_, _, ok, err := verifiedSubject(in)
-	if !ok || err == nil || !strings.Contains(err.Error(), "stage Remediate") {
-		t.Fatalf("verifiedSubject = ok %v, err %v; want a refusal naming stage Remediate", ok, err)
+	if !ok || err == nil || !strings.Contains(err.Error(), "stage Rename") {
+		t.Fatalf("verifiedSubject = ok %v, err %v; want a refusal naming stage Rename", ok, err)
 	}
 }

@@ -56,7 +56,12 @@ func shellWord(s string) string {
 // the hash the CLI computed from what it shows; stage is the stage the plan
 // is approved for; files shows file contents.
 func renderPlan(w io.Writer, p *lastv1alpha1.Plan, stage lastv1alpha1.Stage, hash string, files bool) {
-	writef(w, "Plan %s (stage %s)\n", hash, stage)
+	label := "stage " + string(stage)
+	if stage == lastv1alpha1.StageRemediate && p.Nonce == "" {
+		// status.stage stays Remediate after a DriftCleared return; the plan shown is the earlier one.
+		label = "executed plan"
+	}
+	writef(w, "Plan %s (%s)\n", hash, label)
 	if p.Summary != "" {
 		writef(w, "Summary: %s\n", clean(p.Summary))
 	}
