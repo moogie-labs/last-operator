@@ -60,7 +60,9 @@ func (m EffectiveModes) Status() *lastv1alpha1.StageModes {
 //   - Auto is allowed only when every layer sets allowAutoModes for it; a missing
 //     defaults layer or allowAutoModes does not allow it.
 //   - The policies' mode is Manual if any IntentPolicy sets Manual, else Auto if
-//     the defaults or any IntentPolicy set Auto, else Manual.
+//     the defaults or any IntentPolicy set Auto, else Manual. An IntentPolicy's
+//     Manual is final: the Intent's Auto cannot override it, and can loosen only
+//     the defaults layer's Manual.
 //   - The mode is Auto only when Auto is allowed and the Intent sets Auto, or the
 //     Intent sets nothing and the policies' mode is Auto. An Intent's Manual wins.
 func Modes(op *lastv1alpha1.OperatorConfig, policies []lastv1alpha1.IntentPolicy, intent *lastv1alpha1.StageModes) EffectiveModes {
