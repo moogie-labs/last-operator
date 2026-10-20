@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -624,5 +625,106 @@ func TestStaleDenyIsIgnored(t *testing.T) {
 	}, cfg, nil)
 	if err != nil {
 		t.Fatalf("a stale Deny stopped a valid Approve: %v", err)
+	}
+}
+
+// endedButUnsaved opens and runs the env Intent's plan, then ends it as
+// succeeded while the record cannot be saved: the phase.end is in the audit
+// log, and the record still holds the open phase. It returns the phase.
+func endedButUnsaved(t *testing.T, env *testEnv, h string) *phase {
+	t.Helper()
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	p := env.g.phases.get(envKey)
+	p.next = len(p.body.Steps) // both steps ran
+	var fail atomic.Bool
+	fail.Store(true)
+	failRecordSaves(env, &fail)
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase while the record cannot be saved = %v, want Unavailable", err)
+	}
+	fail.Store(false)
+	if rec, _ := env.g.state.LoadAny(env.ctx, envKey); rec.Open == nil {
+		t.Fatal("setup: the record lost its open phase")
+	}
+	return p
+}
+
+// wantEndedOnce asserts that the phase has one phase.end, succeeded, and that
+// the record holds it as the executed plan with no open phase.
+func wantEndedOnce(t *testing.T, env *testEnv, p *phase) {
+	t.Helper()
+	var ends []phaseEnd
+	for _, e := range env.entries() {
+		var pe phaseEnd
+		if e.Type == audit.TypePhaseEnd && json.Unmarshal(e.Payload, &pe) == nil && pe.BeginSeq == p.beginSeq {
+			ends = append(ends, pe)
+		}
+	}
+	if len(ends) != 1 || ends[0].Outcome != outcomeSucceeded {
+		t.Fatalf("phase.end entries for the phase = %+v, want one, succeeded", ends)
+	}
+	rec, _ := env.g.state.LoadAny(env.ctx, envKey)
+	if ex := rec.Executed; ex == nil || ex.PlanHash != p.subject || ex.BeginSeq != p.beginSeq || ex.EndSeq != p.endSeq || ex.Began == "" {
+		t.Fatalf("executed = %+v, want the ended phase (begin %d, end %d)", rec.Executed, p.beginSeq, p.endSeq)
+	}
+}
+
+// A succeeded phase whose record save failed, abandoned by its operator, never
+// blocks the next phase: BeginPhase finishes the save.
+func TestABeginPhaseFinishesTheSaveOfAnEndedPhase(t *testing.T) {
+	in := intentWithPlan(t, twoSteps())
+	h := in.Status.Plan.Hash
+	env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	p := endedButUnsaved(t, env, h)
+	_, err := env.end(h, false) // the operator abandons the phase
+	env.wantDenied(err, codes.FailedPrecondition)
+
+	u := env.recordPlan(lastv1alpha1.StageUpdate, plan.Body{Steps: []lastv1alpha1.Command{argvStep("u1", kubectlBin, "get", "ns")}})
+	env.approve(stageApproval("update", lastv1alpha1.StageUpdate, u))
+	p.mu.Lock()
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, u); status.Code(err) != codes.Aborted {
+		t.Fatalf("BeginPhase while the ended phase is held = %v, want Aborted", err)
+	}
+	p.mu.Unlock()
+	var fail atomic.Bool
+	fail.Store(true)
+	failRecordSaves(env, &fail)
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, u); status.Code(err) != codes.Unavailable {
+		t.Fatalf("BeginPhase while the record cannot be saved = %v, want Unavailable", err)
+	}
+	fail.Store(false)
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, u); err != nil {
+		t.Fatalf("BeginPhase once the record saves = %v", err)
+	}
+	wantEndedOnce(t, env, p)
+}
+
+// A gateway that restarts before an ended phase's record is saved closes it at
+// lead as it ended, from its phase.end in the index or the audit log, without
+// writing a second, interrupted phase.end.
+func TestLeadClosesAnEndedPhaseAsItEnded(t *testing.T) {
+	for _, indexed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("indexed=%v", indexed), func(t *testing.T) {
+			in := intentWithPlan(t, twoSteps())
+			h := in.Status.Plan.Hash
+			env := newTestEnv(t, in, allowAll(), approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+			p := endedButUnsaved(t, env, h)
+			if indexed {
+				if err := env.g.flushIndex(env.ctx, envKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env.g = env.newGateway() // the gateway restarted; unsaved index entries are lost
+			env.indexedEntry()       // the audit log has moved on
+			if err := env.g.closeInterruptedPhases(env.ctx, env.g.writer.Load()); err != nil {
+				t.Fatal(err)
+			}
+			wantEndedOnce(t, env, p)
+			if rec, _ := env.g.state.LoadAny(env.ctx, envKey); rec.Open != nil {
+				t.Fatalf("open = %+v, want closed", rec.Open)
+			}
+		})
 	}
 }

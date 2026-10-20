@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -576,7 +577,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if err := checkExecuted(d, rec, stage, body); err != nil {
+	if err := g.finishEnded(ctx, w, actor, key, ns, name, string(intent.UID), rec); err != nil {
 		return nil, err
 	}
 	if rec.Open != nil {
@@ -588,6 +589,10 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		}
 	}
 	if err := g.finishEnding(ctx, w, actor, key, ns, name, string(intent.UID)); err != nil {
+		return nil, err
+	}
+	// After the previous phase is finished: it may have become the executed plan.
+	if err := checkExecuted(d, rec, stage, body); err != nil {
 		return nil, err
 	}
 	if err := checkReplay(d, rec, &intent, stage, subject); err != nil {
@@ -665,6 +670,52 @@ func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key,
 	return nil
 }
 
+// finishEnded finishes a phase of this process whose phase.end is written but
+// whose record save failed: the record still holds it as open. Its operator may
+// have abandoned it (an EndPhase(failed) is refused as already succeeded), and
+// a restart would otherwise interrupt a phase the audit log says ended. So
+// BeginPhase saves the record as EndPhase would have, and finishes what follows
+// the save (finishEnding). A step-holder of the phase answers Aborted and a
+// failed save Unavailable; the operator retries both. The caller holds the
+// Intent's lock, under which endSeq and outcome are written.
+func (g *Gateway) finishEnded(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string, rec *LoadedRecord) error {
+	p := g.phases.get(key)
+	if rec.Open == nil || rec.Open.Epoch != g.epoch || p == nil || p.endSeq == 0 || p.uid != uid || p.beginSeq != rec.Open.BeginSeq {
+		return nil
+	}
+	if !p.mu.TryLock() {
+		return status.Error(codes.Aborted, "the previous phase is still ending; retry")
+	}
+	defer p.mu.Unlock()
+	if err := g.saveEnded(ctx, rec, p); err != nil {
+		return err
+	}
+	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
+		return status.Errorf(codes.Unavailable, "finish the previous phase (subject %s): %v", p.subject, err)
+	}
+	g.phases.remove(key)
+	return nil
+}
+
+// saveEnded saves the record of an ended phase: without the open phase, and,
+// for a succeeded Create or Update, with the phase's plan as the executed one.
+// The caller holds the Intent's lock and p.mu.
+func (g *Gateway) saveEnded(ctx context.Context, rec *LoadedRecord, p *phase) error {
+	rec.Open = nil
+	if p.outcome == outcomeSucceeded && replacesExecuted(p.stage) {
+		canonical, err := plan.Canonical(p.body)
+		if err != nil {
+			return status.Errorf(codes.Internal, "encode executed plan: %v", err)
+		}
+		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq,
+			BeginSeq: p.beginSeq, Began: formatBegan(p.began)}
+	}
+	if err := g.saveRecord(ctx, rec); err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	return nil
+}
+
 // closePredecessorPhase ends the open phase of a record that belongs to another
 // UID (the Intent was recreated), so the record's reset never drops a phase.begin
 // without its phase.end.
@@ -711,14 +762,143 @@ func (g *Gateway) closeInterrupted(ctx context.Context, w *audit.Writer, key str
 }
 
 // closeOpen is closeInterrupted; held is the key's in-memory phase when the
-// caller already holds its mutex, nil when closeOpen should take it.
+// caller already holds its mutex, nil when closeOpen should take it. A phase
+// whose phase.end is already in the audit log (its record save failed before a
+// restart) is closed as it ended, without a second phase.end (closeEnded).
 func (g *Gateway) closeOpen(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord, held *phase) error {
 	open := *rec.Open
+	end, err := g.loggedEnd(ctx, w, key, rec, held)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "look for the phase's phase.end: %v", err)
+	}
+	if end != nil {
+		return g.closeEnded(ctx, key, rec, held, *end)
+	}
 	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseEnd, Actor: sandbox.GatewayActor, Intent: key, Stage: open.Stage,
 		SubjectHash: open.SubjectHash, AuthorizedBy: open.Auth, Payload: phaseEnd{BeginSeq: open.BeginSeq, Outcome: outcomeInterrupted,
 			Reason: "the gateway restarted or lost leadership during the phase"}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record phase.end: %v", err)
 	}
+	g.forgetPhase(key, held)
+	rec.Open = nil
+	if err := g.saveRecord(ctx, rec); err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	return nil
+}
+
+// maxEndScan bounds how many audit entries past the Intent's index closeOpen
+// reads to find an open phase's phase.end.
+const maxEndScan = 1000
+
+// loggedPhaseEnd is a phase.end already in the audit log.
+type loggedPhaseEnd struct {
+	seq     uint64
+	outcome string
+}
+
+// loggedEnd returns the phase.end the record's open phase already has in the
+// audit log, or nil when it has none: EndPhase wrote it, then could not save
+// the record. This process's phase knows it; otherwise the Intent's indexed
+// phase.end entries after the phase.begin are read, then the entries written
+// after the newest indexed one, which a restart may have kept from the index,
+// up to the head and at most maxEndScan of them.
+func (g *Gateway) loggedEnd(ctx context.Context, w *audit.Writer, key string, rec *LoadedRecord, held *phase) (*loggedPhaseEnd, error) {
+	open := rec.Open
+	p := held
+	if p == nil {
+		p = g.phases.get(key)
+	}
+	if p != nil && p.beginSeq == open.BeginSeq && p.endSeq != 0 {
+		return &loggedPhaseEnd{seq: p.endSeq, outcome: p.outcome}, nil
+	}
+	match := func(e audit.Entry) *loggedPhaseEnd {
+		var pe phaseEnd
+		if e.Intent != key || e.Type != audit.TypePhaseEnd || json.Unmarshal(e.Payload, &pe) != nil || pe.BeginSeq != open.BeginSeq {
+			return nil
+		}
+		return &loggedPhaseEnd{seq: e.Seq, outcome: pe.Outcome}
+	}
+	from := open.BeginSeq
+	for _, ie := range rec.Index {
+		from = max(from, ie.Seq)
+		if ie.Seq <= open.BeginSeq || ie.Type != audit.TypePhaseEnd {
+			continue
+		}
+		e, err := g.readEntry(ctx, ie.Seq)
+		if err != nil {
+			return nil, err
+		}
+		if m := match(e); m != nil {
+			return m, nil
+		}
+	}
+	head, _, ok := w.Head()
+	if !ok {
+		return nil, nil
+	}
+	to := min(head, from+maxEndScan)
+	for seq := from + 1; seq <= to; seq++ {
+		e, err := g.readEntry(ctx, seq)
+		if errors.Is(err, audit.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if m := match(e); m != nil {
+			return m, nil
+		}
+	}
+	if to < head {
+		slog.Warn("Gave up looking for the phase.end of an open phase", "intent", key, "beginSeq", open.BeginSeq, "scannedTo", to, "head", head)
+	}
+	return nil, nil
+}
+
+// closeEnded closes the record's open phase as its logged phase.end says,
+// without writing another: a succeeded Create or Update becomes the executed
+// plan, read from its phase.begin, and a succeeded Delete drops the record, as
+// EndPhase would have done.
+func (g *Gateway) closeEnded(ctx context.Context, key string, rec *LoadedRecord, held *phase, end loggedPhaseEnd) error {
+	open := *rec.Open
+	stage := lastv1alpha1.Stage(open.Stage)
+	g.forgetPhase(key, held)
+	if end.outcome == outcomeSucceeded && stage == lastv1alpha1.StageDelete {
+		g.tornDown.Store(key, rec.IntentUID)
+		if err := g.dropRecord(ctx, key); err != nil {
+			return status.Errorf(codes.Unavailable, "%v", err)
+		}
+		slog.Info("Closed an ended phase", "intent", key, "beginSeq", open.BeginSeq, "outcome", end.outcome)
+		return nil
+	}
+	rec.Open = nil
+	if end.outcome == outcomeSucceeded && replacesExecuted(stage) {
+		begin, err := g.readEntry(ctx, open.BeginSeq)
+		if err != nil {
+			return status.Errorf(codes.Unavailable, "read phase.begin %d: %v", open.BeginSeq, err)
+		}
+		var pb phaseBegin
+		if err := json.Unmarshal(begin.Payload, &pb); err != nil || begin.Type != audit.TypePhaseBegin || begin.Intent != key {
+			return status.Errorf(codes.Internal, "audit entry %d is not the phase.begin of %s", open.BeginSeq, key)
+		}
+		began, err := time.Parse(audit.TimeFormat, begin.TS)
+		if err != nil {
+			return status.Errorf(codes.Internal, "phase.begin %d: %v", open.BeginSeq, err)
+		}
+		rec.Executed = &ExecutedPlan{Stage: open.Stage, PlanHash: open.SubjectHash, Plan: pb.Plan, EndSeq: end.seq,
+			BeginSeq: open.BeginSeq, Began: formatBegan(began)}
+	}
+	if err := g.saveRecord(ctx, rec); err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	slog.Info("Closed an ended phase", "intent", key, "beginSeq", open.BeginSeq, "outcome", end.outcome)
+	return nil
+}
+
+// forgetPhase marks the key's in-memory phase closed and drops it; held is that
+// phase when the caller holds its mutex.
+func (g *Gateway) forgetPhase(key string, held *phase) {
 	if held != nil {
 		held.closed = true
 	} else if p := g.phases.get(key); p != nil {
@@ -727,11 +907,6 @@ func (g *Gateway) closeOpen(ctx context.Context, w *audit.Writer, key string, re
 		p.mu.Unlock()
 	}
 	g.phases.remove(key)
-	rec.Open = nil
-	if err := g.saveRecord(ctx, rec); err != nil {
-		return status.Errorf(codes.Unavailable, "%v", err)
-	}
-	return nil
 }
 
 func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) (*gatewayv1.EndPhaseResponse, error) {
@@ -797,19 +972,10 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 			return nil, err
 		}
 	}
-	rec.Open = nil
-	if p.outcome == outcomeSucceeded && replacesExecuted(p.stage) {
-		canonical, err := plan.Canonical(p.body)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "encode executed plan: %v", err)
-		}
-		rec.Executed = &ExecutedPlan{Stage: string(p.stage), PlanHash: p.subject, Plan: string(canonical), EndSeq: p.endSeq,
-			BeginSeq: p.beginSeq, Began: formatBegan(p.began)}
-	}
 	// The record is saved without the open phase before a succeeded Delete drops
 	// it, so a failed deletion never leaves a phase for the next leader to interrupt.
-	if err := g.saveRecord(ctx, rec); err != nil {
-		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	if err := g.saveEnded(ctx, rec, p); err != nil {
+		return nil, err
 	}
 	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)

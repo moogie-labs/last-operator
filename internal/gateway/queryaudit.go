@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -87,24 +88,42 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 	return resp, nil
 }
 
+// errUnverified marks an audit entry that failed verification.
+var errUnverified = errors.New("failed verification")
+
+// readEntry reads the audit entry of seq from the sink and verifies it: strict
+// decoding, the signature, and its seq. A missing entry wraps audit.ErrNotFound.
+func (g *Gateway) readEntry(ctx context.Context, seq uint64) (audit.Entry, error) {
+	body, err := g.sink.Get(ctx, audit.EntryKey(g.cfg.ChainID, seq), "")
+	if err != nil {
+		return audit.Entry{}, fmt.Errorf("read audit entry %d: %w", seq, err)
+	}
+	e, err := audit.DecodeEntry(body)
+	if err == nil {
+		err = audit.CheckSeal(g.signer.Public(), e)
+	}
+	if err == nil && e.Seq != seq {
+		err = fmt.Errorf("it holds seq %d", e.Seq)
+	}
+	if err != nil {
+		return audit.Entry{}, fmt.Errorf("audit entry %d %w: %w", seq, errUnverified, err)
+	}
+	return e, nil
+}
+
 // readIndexed reads one indexed entry from the sink and verifies it: strict
 // decoding, the signature, and that it is the entry the index says it is.
 func (g *Gateway) readIndexed(ctx context.Context, intent string, ie IndexEntry) (audit.Entry, error) {
-	body, err := g.sink.Get(ctx, audit.EntryKey(g.cfg.ChainID, ie.Seq), "")
-	if errors.Is(err, audit.ErrNotFound) {
+	e, err := g.readEntry(ctx, ie.Seq)
+	switch {
+	case errors.Is(err, audit.ErrNotFound):
 		return audit.Entry{}, status.Errorf(codes.Internal, "indexed audit entry %d does not exist", ie.Seq)
+	case errors.Is(err, errUnverified):
+		return audit.Entry{}, status.Errorf(codes.Internal, "%v", err)
+	case err != nil:
+		return audit.Entry{}, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if err != nil {
-		return audit.Entry{}, status.Errorf(codes.Unavailable, "read audit entry %d: %v", ie.Seq, err)
-	}
-	e, err := audit.DecodeEntry(body)
-	if err != nil {
-		return audit.Entry{}, status.Errorf(codes.Internal, "audit entry %d failed verification: %v", ie.Seq, err)
-	}
-	if err := audit.CheckSeal(g.signer.Public(), e); err != nil {
-		return audit.Entry{}, status.Errorf(codes.Internal, "audit entry %d failed verification: %v", ie.Seq, err)
-	}
-	if e.Seq != ie.Seq || e.Intent != intent || e.Type != ie.Type {
+	if e.Intent != intent || e.Type != ie.Type {
 		return audit.Entry{}, status.Errorf(codes.Internal, "audit entry %d is not the indexed %s of %s", ie.Seq, ie.Type, intent)
 	}
 	return e, nil
