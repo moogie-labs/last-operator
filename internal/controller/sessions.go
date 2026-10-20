@@ -68,7 +68,8 @@ func (s *sessionStore) drop(key types.NamespacedName) {
 // conversation returns the Intent's planning session so far. fresh means a new
 // session starts: the Intent has none yet, or its session can no longer be
 // rebuilt. A session this process does not hold, after an operator restart or
-// a leader change, is reloaded from the audit log (M3 spec §4.3).
+// a leader change, is reloaded from the audit log (M3 spec §4.3). Each gateway
+// call is bounded on its own.
 func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.Intent) (conv agent.Conversation, fresh bool, err error) {
 	if in.Status.PlanningSessionSeq == 0 {
 		conv, err = r.newConversation(ctx, in, "")
@@ -77,7 +78,9 @@ func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.In
 	if conv, ok := r.sessions.get(in); ok {
 		return conv, false, nil
 	}
-	conv, err = agent.Reload(ctx, r.Gateway, intentRef(in), uint64(in.Status.PlanningSessionSeq), recordedTurn(in))
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+	conv, err = agent.Reload(actx, r.Gateway, intentRef(in), uint64(in.Status.PlanningSessionSeq), recordedTurn(in))
+	cancel()
 	switch {
 	case err == nil:
 		logf.FromContext(ctx).Info("Reloaded planning conversation", "session", in.Status.PlanningSessionSeq, "messages", len(conv))
@@ -94,16 +97,27 @@ func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.In
 // newConversation starts a session for the Intent's current spec, telling the
 // model what the namespace's policy lets commands use. An Update session also
 // shows the executed plan, read from the audit log; errNoExecutedPlan means it
-// is no longer there.
+// is no longer there. A Remediate session first confirms the drift with a
+// probe run (remediateMessage); it has no note, since its first message
+// carries everything the model needs.
 func (r *IntentReconciler) newConversation(ctx context.Context, in *lastv1alpha1.Intent, note string) (agent.Conversation, error) {
-	env, err := r.environment(ctx, in.Namespace)
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+	defer cancel()
+	env, err := r.environment(actx, in.Namespace)
 	if err != nil {
 		return nil, err
+	}
+	if planStage(in) == lastv1alpha1.StageRemediate {
+		first, err := r.remediateMessage(ctx, in, env)
+		if err != nil {
+			return nil, err
+		}
+		return agent.NewConversation(first), nil
 	}
 	req := agent.Request{Namespace: in.Namespace, Name: in.Name, Text: in.Spec.Request, Answers: in.Spec.Answers,
 		Feedback: replanFeedback(in), Note: note, Env: env}
 	if planStage(in) == lastv1alpha1.StageUpdate {
-		executed, _, found, err := agent.ExecutedPlan(ctx, r.Gateway, intentRef(in))
+		executed, _, found, err := agent.ExecutedPlan(actx, r.Gateway, intentRef(in))
 		switch {
 		case err != nil && status.Code(err) != codes.Unimplemented:
 			return nil, err

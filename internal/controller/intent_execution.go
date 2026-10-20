@@ -15,6 +15,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/sandbox/runnerapi"
@@ -45,15 +46,19 @@ func setExecuted(in *lastv1alpha1.Intent, s metav1.ConditionStatus, reason, msg 
 }
 
 // execute runs the approved plan (spec §8.3): a Create or Update plan in phase
-// Executing, or a Delete plan in phase TearingDown. Step results live only in
-// this process, so the Executed checkpoint decides what a reconcile may do:
-// open the phase, abandon one this process lost, or confirm one whose steps all
-// succeeded. A phase is never resumed.
+// Executing, a Remediate plan in phase Remediating, or a Delete plan in phase
+// TearingDown. Step results live only in this process, so the Executed
+// checkpoint decides what a reconcile may do: open the phase, abandon one this
+// process lost, or confirm one whose steps all succeeded. A phase is never
+// resumed. A spec edit abandons a Remediate that has not run its steps.
 func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Status.Plan == nil {
 		return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, "The Intent has no plan to run")
 	}
 	stage := planStage(in)
+	if stage == lastv1alpha1.StageRemediate && in.Generation != in.Status.ObservedGeneration && checkpoint(in) != ReasonStepsSucceeded {
+		return r.abandonRemediation(ctx, in)
+	}
 	switch checkpoint(in) {
 	case ReasonStepsSucceeded:
 		return r.finishPhase(ctx, in)
@@ -95,6 +100,7 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 
 // runSteps runs every step in order, resolving ${steps…} references from the
 // results so far, then creates the ManagedResources and writes their outputs.
+// A Remediate does neither: what is managed, and its outputs, do not change.
 func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	results := plan.Results{}
 	for _, step := range in.Status.Plan.Steps {
@@ -119,11 +125,13 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 		}
 		results[step.ID] = runnerapi.Result{ID: step.ID, Stdout: res.GetStdout(), StdoutTruncated: res.GetStdoutTruncated()}
 	}
-	if err := r.ensureManagedResources(ctx, in); err != nil {
-		return r.endFailed(ctx, in, "Could not create ManagedResources: "+err.Error(), false)
-	}
-	if err := r.writeOutputs(ctx, in); err != nil {
-		return r.endFailed(ctx, in, "Could not write an output Secret: "+err.Error(), false)
+	if planStage(in) != lastv1alpha1.StageRemediate {
+		if err := r.ensureManagedResources(ctx, in); err != nil {
+			return r.endFailed(ctx, in, "Could not create ManagedResources: "+err.Error(), false)
+		}
+		if err := r.writeOutputs(ctx, in); err != nil {
+			return r.endFailed(ctx, in, "Could not write an output Secret: "+err.Error(), false)
+		}
 	}
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		setExecuted(in, metav1.ConditionUnknown, ReasonStepsSucceeded, "Every step succeeded; closing the phase")
@@ -236,9 +244,11 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 	}
 }
 
-// endFailed closes the phase as failed. A failure of a Create or Update plan
-// itself returns the Intent to Planning in the same stage, with the failure as
-// context (spec §8.3); anything else, and any failed teardown, fails the Intent.
+// endFailed closes the phase as failed. A failure of a Create, Update or
+// Remediate plan itself returns the Intent to Planning in the same stage, with
+// the failure as context (spec §8.3); anything else, and any failed teardown,
+// fails the Intent. A Remediate replan is the same drift episode: it is not
+// counted again.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
 	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
@@ -254,8 +264,8 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)
 }
 
-// specEditHint tells the user how to plan a Create or Update again; a teardown
-// has the retry annotation instead (failRun).
+// specEditHint tells the user how to plan again after a failed Create, Update
+// or Remediate; a teardown has the retry annotation instead (failRun).
 func specEditHint(in *lastv1alpha1.Intent) string {
 	if planStage(in) == lastv1alpha1.StageDelete {
 		return ""
@@ -278,9 +288,9 @@ func (r *IntentReconciler) abandonPhase(ctx context.Context, in *lastv1alpha1.In
 // finishPhase closes a phase whose steps all succeeded. If the gateway refuses
 // (FailedPrecondition), an earlier EndPhase may have succeeded before its
 // result was recorded here, a gateway restart may have interrupted the phase,
-// or the gateway may hold the phase open but refuse to let it succeed:
-// RunProbes reports which plan the gateway last executed. Unless it is this
-// plan, the phase is ended as failed, in case it is still open.
+// or the gateway may hold the phase open but refuse to let it succeed
+// (succeededBefore says which). Unless the phase succeeded, it is ended as
+// failed, in case it is still open.
 //
 // A Delete phase has no executed plan to compare: a refusal fails the teardown.
 // Once the gateway records it as succeeded, the Intent is released.
@@ -290,11 +300,11 @@ func (r *IntentReconciler) finishPhase(ctx context.Context, in *lastv1alpha1.Int
 		return r.finishTeardown(ctx, in, err)
 	}
 	if status.Code(err) == codes.FailedPrecondition {
-		executed, perr := r.executedPlan(ctx, in)
+		succeeded, perr := r.succeededBefore(ctx, in)
 		if perr != nil {
 			return ctrl.Result{}, perr
 		}
-		if executed != in.Status.Plan.Hash {
+		if !succeeded {
 			why := "The phase ended before it succeeded (" + describe(err) + ")"
 			if eerr := r.endPhase(ctx, in, in.Status.Plan.Hash, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
 				return ctrl.Result{}, eerr // still StepsSucceeded: the next attempt asks again
@@ -338,6 +348,25 @@ func (r *IntentReconciler) finishTeardown(ctx context.Context, in *lastv1alpha1.
 		return ctrl.Result{}, err // the next attempt's EndPhase is refused as torn down, which releases the Intent
 	}
 	return ctrl.Result{}, r.release(ctx, in, "Teardown succeeded")
+}
+
+// succeededBefore reports whether the gateway recorded the Intent's current
+// phase as succeeded. RunProbes reports which plan it last executed, which a
+// succeeded Create or Update plan becomes. A Remediate never becomes the
+// executed plan, so the audit log says instead (agent.PhaseSucceeded); a
+// gateway that cannot read it cannot vouch for the phase.
+func (r *IntentReconciler) succeededBefore(ctx context.Context, in *lastv1alpha1.Intent) (bool, error) {
+	if planStage(in) != lastv1alpha1.StageRemediate {
+		executed, err := r.executedPlan(ctx, in)
+		return executed == in.Status.Plan.Hash, err
+	}
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+	defer cancel()
+	ok, err := agent.PhaseSucceeded(actx, r.Gateway, intentRef(in), lastv1alpha1.StageRemediate, in.Status.Plan.Hash)
+	if terminal(err) {
+		return false, nil
+	}
+	return ok, err
 }
 
 // executedPlan returns the hash of the plan the gateway last executed for the

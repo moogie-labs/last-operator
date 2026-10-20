@@ -632,6 +632,14 @@ spec:
                   - text
                   type: object
                 type: array
+              remediations:
+                description: |-
+                  Remediations counts the consecutive remediations drift started. At 3,
+                  the next drift fails the Intent with RemediationFailed instead of
+                  planning. A scheduled probe run in which every probe passes, after the
+                  Intent last became Ready, resets it to 0.
+                format: int32
+                type: integer
               stage:
                 description: Stage identifies what an approval subject or allow rule
                   applies to.

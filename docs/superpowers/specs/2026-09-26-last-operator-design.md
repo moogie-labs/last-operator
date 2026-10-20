@@ -325,8 +325,14 @@ status:
     generalizations:             # LLM-proposed wildcard pattern per uncovered command (§9.4)
       s2: { argv: ["kubectl", "apply", "-n", "team-x", "-f", "..."], lint: ["file argument"] }
   suggestedRules: [ … names of CommandRuleSuggestions created for this plan … ]
+  remediations: 1                # consecutive remediations drift started (§7)
   conditions: [ … ]
 ```
+
+`status.remediations` counts the consecutive remediations that drift
+started. At 3, the next drift fails the Intent with `RemediationFailed`
+instead of planning. A scheduled probe run in which every probe passes,
+after the Intent last became Ready, resets it to 0 (§7).
 
 Changing `spec.request` or `spec.answers` increments `generation` and
 starts an **Update** planning cycle.
@@ -568,7 +574,7 @@ Pending → Clarifying ⇄ (user answers)
     one-step Discovery phase. Its result, a denial, or the gateway's
     refusal goes back to the model.
   - **`status.stage` during discovery.** It keeps the session's stage
-    (`Create` or `Update`) while a command is pending. The phase and
+    (`Create`, `Update` or `Remediate`) while a command is pending. The phase and
     `status.pendingCommand` mark the discovery, and the operator sends
     stage `Discovery` to the gateway, and looks for approvals of it,
     from them, never from `status.stage`. Operators before M5b set
@@ -607,6 +613,53 @@ Pending → Clarifying ⇄ (user answers)
     gateway makes the Update the executed plan and deletes the
     ManagedResources it dropped, auditing each (§15). Verifying then
     probes the new executed plan.
+- **Drift.** A scheduled probe run that fails on a ManagedResource of the
+  Intent's plan moves a Ready Intent to `Drifted`; from there the
+  operator starts a Remediate. A Drifted Intent whose spec was edited
+  plans an Update instead.
+- **Remediate.** A remediation repairs what the executed plan manages and
+  never changes it (D5).
+  - **Count.** Starting a remediation counts it in `status.remediations`.
+    At 3, the next drift fails the Intent with `RemediationFailed`, naming
+    the count, and plans nothing. A scheduled probe run that passes on
+    every probed ManagedResource, finishing after the Intent last became
+    Ready, resets the count to 0; the Verifying run never does.
+  - **Confirming the drift.** The session's first message is built only
+    after the operator runs the probes once more (`RunProbes`) and
+    records the outcomes on the ManagedResources. If every probe passes,
+    the Intent returns to Ready with a Warning `DriftCleared` event: no
+    plan, no approval prompt, and the count is given back. Otherwise the
+    first message shows the executed plan, read from the audit log, and
+    each failing probe's resource, assert and output, truncated. If the
+    audit log no longer holds the executed plan, the Intent fails with
+    `PlanningFailed` ("no executed plan found to remediate").
+  - **Turns.** The model may run discovery commands but may not ask
+    questions, and its plan answers `"resources": []`. Either mistake
+    gets a correction. The operator copies the executed plan's resources
+    into the plan and sets a fresh nonce, so the same repair for a
+    recurring drift is a new subject that needs a new approval. The
+    gateway refuses a Remediate whose resources differ from the executed
+    plan's.
+  - **Approval and running.** The plan awaits an `IntentApproval` for
+    stage `Remediate`, and runs in phase `Remediating`. It creates no
+    ManagedResources and writes no output Secrets, and it never becomes
+    the executed plan. A step that exits non-zero plans the Remediate
+    again, with the failure as context; that replan is not counted
+    again. If the gateway refuses to end the phase as succeeded, the
+    operator accepts the remediation only when the audit log shows the
+    phase succeeded; otherwise it fails with `ExecutionInterrupted`.
+  - **Verifying** compares the probed plan with the executed plan read
+    from the audit log, not with the Remediate plan in status, then
+    returns the Intent to Ready.
+  - **Edits during a remediation.** A spec edit while the stage is
+    Remediate, in Planning, AwaitingDiscoveryApproval, AwaitingApproval or
+    Remediating, abandons the remediation: any open phase is ended as
+    failed ("Aborted: the spec changed"), an approved but unrun discovery
+    command's phase is ended as for any edit, and an Update is planned.
+    In Remediating the operator checks before `BeginPhase`; once the
+    steps run, they finish first and the edit is planned after.
+  - **Deletion** during Remediating aborts the phase like any other, and
+    the Intent starts Delete.
 - **Delete.** A finalizer, `last.moogie-labs.com/teardown`, is added
   before the first Create and holds the Intent until its teardown
   completes. A deletion overrides everything else: any open phase is
@@ -651,6 +704,7 @@ Pending → Clarifying ⇄ (user answers)
   - `ExecutionFailed`
   - `ExecutionInterrupted`
   - `VerificationFailed`
+  - `RemediationFailed` (drift returned after 3 consecutive remediations)
   - `TeardownFailed` (a Delete; retried with the annotation above)
 
   A spec edit retries a failed Intent, planning a Create or an Update

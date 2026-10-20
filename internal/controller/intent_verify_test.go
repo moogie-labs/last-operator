@@ -58,16 +58,16 @@ var _ = Describe("Intent verification", func() {
 		Expect(c.Message).To(Equal("Probes failed: p2"))
 	})
 
-	It("follows its ManagedResources between Ready and Drifted", func() {
+	It("goes Drifted when a ManagedResource of its plan is out of sync, and remediates from there", func() {
 		run(&script{})
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 
-		setInSync(key.Namespace, "web-0", metav1.ConditionFalse)
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseDrifted))
-		Expect(readyReason(key)).To(Equal(ReasonDrifted))
-
-		setInSync(key.Namespace, "web-0", metav1.ConditionTrue)
+		setOutOfSync(key.Namespace, "web-0")
+		Eventually(func() []string { return eventNotes(key, string(lastv1alpha1.PhaseDrifted)) }).Should(
+			ContainElement("Probes failed on web-0"))
+		// The gateway's probes pass, so the confirming run clears the drift.
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+		Expect(readyReason(key)).To(Equal(ReasonDriftCleared))
 	})
 
 	It("ignores a ManagedResource that an earlier plan left out of sync", func() {
@@ -79,7 +79,7 @@ var _ = Describe("Intent verification", func() {
 			Spec: lastv1alpha1.ManagedResourceSpec{Description: "cache", IntentRef: &lastv1alpha1.LocalRef{Name: key.Name}}}
 		Expect(controllerutil.SetControllerReference(getIntent(key), stale, k8sClient.Scheme())).To(Succeed())
 		Expect(k8sClient.Create(ctx, stale)).To(Succeed())
-		setInSync(key.Namespace, "web-1", metav1.ConditionFalse)
+		setOutOfSync(key.Namespace, "web-1")
 		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		Expect(readyReason(key)).To(Equal(ReasonReady))
 	})

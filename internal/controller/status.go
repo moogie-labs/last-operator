@@ -44,6 +44,11 @@ const (
 	ReasonVerificationFailed        = "VerificationFailed"
 	ReasonTearingDown               = "TearingDown"
 	ReasonTeardownFailed            = "TeardownFailed"
+	ReasonRemediating               = "Remediating"
+	ReasonRemediationFailed         = "RemediationFailed"
+	// ReasonDriftCleared is also the reason of the Warning event: the
+	// confirming probe run found no drift, so no Remediate was planned.
+	ReasonDriftCleared = "DriftCleared"
 )
 
 // Event reasons of a teardown.

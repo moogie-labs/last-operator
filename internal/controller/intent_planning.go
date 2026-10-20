@@ -36,10 +36,13 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 }
 
 // startSession is startPlanning for a session whose stage may already be
-// known. A failed Create or Update phase leaves the executed plan unchanged,
-// so its replan keeps its stage without reading the audit log: a failed read
-// there would leave the phase's checkpoint open and fail the Intent as
-// interrupted. An empty stage is chosen by sessionStage.
+// known. A failed Create, Update or Remediate phase leaves the executed plan
+// unchanged, so its replan keeps its stage without reading the audit log: a
+// failed read there would leave the phase's checkpoint open and fail the
+// Intent as interrupted. An empty stage is chosen by sessionStage.
+//
+// A Remediate session keeps observedGeneration, so a spec edit made meanwhile
+// still plans an Update, and keeps status.plan (see startRemediate).
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
@@ -61,21 +64,29 @@ func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.In
 		}
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		in.Status.Stage = stage
-		in.Status.ObservedGeneration = in.Generation
-		in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
-		in.Status.PlanningSessionSeq = 0
-		in.Status.Questions = nil
-		in.Status.PendingCommand = nil
-		in.Status.Plan = nil
-		meta.RemoveStatusCondition(&in.Status.Conditions, CondExecuted)
-		if feedback == "" {
-			meta.RemoveStatusCondition(&in.Status.Conditions, CondPlanned)
-		} else {
-			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionFalse, ReasonReplanning, feedback)
+		if stage != lastv1alpha1.StageRemediate {
+			in.Status.ObservedGeneration = in.Generation
+			in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
+			in.Status.Plan = nil
 		}
+		resetSession(in, stage, feedback)
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM for a plan")
 	})
+}
+
+// resetSession clears the Intent's planning session for a new one of stage.
+// feedback, when set, is the failure the new plan must address.
+func resetSession(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, feedback string) {
+	in.Status.Stage = stage
+	in.Status.PlanningSessionSeq = 0
+	in.Status.Questions = nil
+	in.Status.PendingCommand = nil
+	meta.RemoveStatusCondition(&in.Status.Conditions, CondExecuted)
+	if feedback == "" {
+		meta.RemoveStatusCondition(&in.Status.Conditions, CondPlanned)
+	} else {
+		setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionFalse, ReasonReplanning, feedback)
+	}
 }
 
 // sessionStage is the stage a new planning session plans for: Update when the
@@ -124,20 +135,14 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	if in.Generation != in.Status.ObservedGeneration {
 		return r.startPlanning(ctx, in, "")
 	}
-	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout) // reload and result reads
-	defer cancel()
-	conv, fresh, err := r.conversation(actx, in)
-	switch {
-	case errors.Is(err, errBadPolicy):
-		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
-	case errors.Is(err, errNoExecutedPlan):
-		// The executed plan went missing from the audit log since the stage was
-		// chosen: choose it again.
-		logf.FromContext(ctx).Info("Could not find the executed plan to update; planning again")
-		return r.startPlanning(ctx, in, replanFeedback(in))
-	case err != nil:
-		return ctrl.Result{}, err // transient: retried with backoff
+	// The calls inside bound themselves: a Remediate's confirming probe run
+	// takes longer than the audit reads.
+	conv, fresh, err := r.conversation(ctx, in)
+	if res, done, err := r.sessionFailed(ctx, in, err); done {
+		return res, err
 	}
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout) // result and used-plan reads
+	defer cancel()
 	if !fresh {
 		next, err := r.pendingTurn(actx, in)
 		if err != nil {
@@ -146,21 +151,21 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		if next == "" {
 			// Nothing in the Intent's state continues the session, which ends
 			// with the model's own answer: start a new one.
+			if planStage(in) == lastv1alpha1.StageRemediate {
+				return r.startSession(ctx, in, lastv1alpha1.StageRemediate, replanFeedback(in))
+			}
 			return r.startPlanning(ctx, in, replanFeedback(in))
 		}
 		conv = conv.With(next)
 	}
-	used, err := agent.UsedPlans(actx, r.Gateway, intentRef(in))
-	switch {
-	case status.Code(err) == codes.Unimplemented:
-		used = nil // a gateway without QueryAudit cannot say; its replay refusal stays the backstop
-	case err != nil:
+	feedback := replanFeedback(in)
+	check, err := r.turnCheck(actx, in, feedback)
+	if err != nil {
 		return ctrl.Result{}, err // transient: retried with backoff
 	}
-	feedback := replanFeedback(in)
 	pctx, pcancel := context.WithTimeout(ctx, planTimeout)
 	defer pcancel()
-	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, both(answeredCheck(in), rerunCheck(used, feedback)))
+	turn, conv, seq, err := r.Planner.Next(pctx, intentRef(in), conv, check)
 	var capped *agent.CapError
 	switch {
 	case errors.Is(err, agent.ErrNoTurn) && errors.Is(err, errPlanAlreadyRan):
@@ -176,11 +181,64 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 		// (M3 spec §6).
 		return ctrl.Result{}, err
 	}
+	if turn.Kind == agent.KindPlan && planStage(in) == lastv1alpha1.StageRemediate {
+		var failure planningFailure
+		err := r.completeRemediate(ctx, in, turn.Plan)
+		switch {
+		case errors.As(err, &failure):
+			return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, string(failure))
+		case err != nil:
+			return ctrl.Result{}, err // transient: the model is asked again
+		}
+	}
 	session := in.Status.PlanningSessionSeq
 	if fresh {
 		session = int64(seq)
 	}
 	return ctrl.Result{}, r.record(ctx, in, turn, conv, session)
+}
+
+// sessionFailed handles an error building the planning session's
+// conversation; done reports that it did.
+func (r *IntentReconciler) sessionFailed(ctx context.Context, in *lastv1alpha1.Intent, err error) (ctrl.Result, bool, error) {
+	var failure planningFailure
+	switch {
+	case err == nil:
+		return ctrl.Result{}, false, nil
+	case errors.Is(err, errBadPolicy):
+		return ctrl.Result{}, true, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
+	case errors.As(err, &failure):
+		return ctrl.Result{}, true, r.fail(ctx, in, ReasonPlanningFailed, string(failure))
+	case errors.Is(err, errNoExecutedPlan):
+		// The executed plan went missing from the audit log since the stage was
+		// chosen: choose it again.
+		logf.FromContext(ctx).Info("Could not find the executed plan to update; planning again")
+		res, err := r.startPlanning(ctx, in, replanFeedback(in))
+		return res, true, err
+	case errors.Is(err, errDriftCleared):
+		return ctrl.Result{}, true, r.driftCleared(ctx, in)
+	case errors.Is(err, errProbeInFlight):
+		return ctrl.Result{RequeueAfter: r.RetryDelay}, true, nil // never overlap a probe run
+	}
+	return ctrl.Result{}, true, err // transient: retried with backoff
+}
+
+// turnCheck returns the check the model's next turn must pass. A Remediate
+// turn may not ask questions or name resources (remediateCheck); it is never
+// refused as a rerun, since each Remediate plan carries a new nonce. Other
+// turns may not reuse answered question ids or repeat a plan that already ran.
+func (r *IntentReconciler) turnCheck(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (func(agent.Turn) error, error) {
+	if planStage(in) == lastv1alpha1.StageRemediate {
+		return remediateCheck, nil
+	}
+	used, err := agent.UsedPlans(ctx, r.Gateway, intentRef(in))
+	switch {
+	case status.Code(err) == codes.Unimplemented:
+		used = nil // a gateway without QueryAudit cannot say; its replay refusal stays the backstop
+	case err != nil:
+		return nil, err
+	}
+	return both(answeredCheck(in), rerunCheck(used, feedback)), nil
 }
 
 // record writes the model's turn to the Intent's status and moves the Intent
@@ -314,15 +372,16 @@ func planStage(in *lastv1alpha1.Intent) lastv1alpha1.Stage {
 }
 
 // replannable reports whether a plan of stage is planned again for a spec edit
-// or after one of its own steps failed: a Create or Update plan is. A Delete
-// plan is not: a deletion raises the generation too, and a failed teardown
-// waits for the retry annotation.
+// or after one of its own steps failed: a Create, Update or Remediate plan is.
+// A spec edit plans a Create or an Update; a failed step plans its own stage
+// again. A Delete plan is not: a deletion raises the generation too, and a
+// failed teardown waits for the retry annotation.
 func replannable(stage lastv1alpha1.Stage) bool {
-	return stage == lastv1alpha1.StageCreate || stage == lastv1alpha1.StageUpdate
+	return stage == lastv1alpha1.StageCreate || stage == lastv1alpha1.StageUpdate || stage == lastv1alpha1.StageRemediate
 }
 
 // awaitApproval waits for an IntentApproval of the current plan for its stage.
-// A spec edit plans a Create or Update again. A deletion raises the generation,
+// A spec edit plans a Create or Update again, abandoning a Remediate. A deletion raises the generation,
 // and spec edits no longer matter, so a Delete plan never goes back to
 // planning for one.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
@@ -353,8 +412,12 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 			in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval || in.Status.Plan == nil || in.Status.Plan.Hash != subject {
 			return
 		}
-		if stage == lastv1alpha1.StageDelete {
+		switch stage {
+		case lastv1alpha1.StageDelete:
 			setPhase(in, lastv1alpha1.PhaseTearingDown, ReasonTearingDown, "Running teardown plan "+subject)
+			return
+		case lastv1alpha1.StageRemediate:
+			setPhase(in, lastv1alpha1.PhaseRemediating, ReasonRemediating, "Running Remediate plan "+subject)
 			return
 		}
 		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+subject)

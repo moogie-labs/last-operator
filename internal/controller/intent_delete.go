@@ -84,15 +84,19 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 	return ctrl.Result{}, r.startDelete(ctx, in, feedback)
 }
 
-// abortOpenPhase ends the phase an Intent being deleted may hold open: a
-// running or lost Create or Update phase, or an approved discovery command's
-// phase. The
-// gateway answers FailedPrecondition when none is open.
+// abortOpenPhase ends the phase an Intent being deleted may hold open (abortPhase).
 func (r *IntentReconciler) abortOpenPhase(ctx context.Context, in *lastv1alpha1.Intent) error {
-	const why = "Aborted: the Intent is being deleted"
+	return r.abortPhase(ctx, in, "Aborted: the Intent is being deleted")
+}
+
+// abortPhase ends, as failed for why, the phase the Intent may hold open: a
+// running or lost Create, Update, Remediate or Delete phase, or an approved
+// discovery command's phase. The gateway answers FailedPrecondition when none
+// is open.
+func (r *IntentReconciler) abortPhase(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
 	subject := ""
 	switch in.Status.Phase {
-	case lastv1alpha1.PhaseExecuting, lastv1alpha1.PhaseTearingDown:
+	case lastv1alpha1.PhaseExecuting, lastv1alpha1.PhaseRemediating, lastv1alpha1.PhaseTearingDown:
 		if in.Status.Plan == nil || checkpoint(in) == ReasonPhaseEnded {
 			return nil
 		}
@@ -114,7 +118,7 @@ func (r *IntentReconciler) abortOpenPhase(ctx context.Context, in *lastv1alpha1.
 		return nil // no phase was open
 	}
 	if err == nil {
-		logf.FromContext(ctx).Info("Aborted phase of the deleted Intent", "subject", subject)
+		logf.FromContext(ctx).Info("Aborted open phase", "subject", subject, "reason", why)
 	}
 	return err
 }

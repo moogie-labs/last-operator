@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -75,7 +76,8 @@ var _ = Describe("ManagedResource probe schedule", func() {
 		gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
 		reconcileAt(last.Add(5 * time.Minute))
 		Expect(meta.IsStatusConditionFalse(getMR(key.Namespace, "web-0").Status.Conditions, CondInSync)).To(BeTrue())
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseDrifted))
+		Eventually(func() []string { return eventReasons(key, corev1.EventTypeNormal) }).Should(
+			ContainElement(string(lastv1alpha1.PhaseDrifted)))
 		Expect(testutil.ToFloat64(probeRuns.WithLabelValues(key.Namespace, key.Name, "failed"))).To(Equal(1.0))
 	})
 

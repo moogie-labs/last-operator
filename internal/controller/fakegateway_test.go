@@ -68,6 +68,7 @@ type script struct {
 	endErrs  []error           // errors returned by the next EndPhase calls, in order
 	loseEnd  bool              // the next EndPhase takes effect, but its answer is lost (Unavailable), once
 	failing  map[string]bool   // probe ID → fails; other probes pass
+	probeOut map[string]string // probe ID → the probe's stdout
 	probeErr error             // RunProbes error
 	onProbe  func()            // called during a successful RunProbes
 	onEnd    func(bool)        // called with the outcome of each EndPhase that closes a phase, with f.mu held
@@ -84,11 +85,14 @@ type script struct {
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
 // phase rules the operator depends on (approval before BeginPhase, one open
 // phase, calls only within it, probes only of an executed plan, Delete only for
-// an Intent being deleted, Update only of an executed plan, nothing after a
-// succeeded Delete) and records every call per Intent. Its phase.begin and
-// phase.end entries carry the gateway's payloads, so agent.ExecutedPlan reads
-// them. A succeeded Update becomes the executed plan and deletes the
-// ManagedResources it dropped, as the gateway does (ruling R1).
+// an Intent being deleted, Update and Remediate only of an executed plan,
+// nothing after a succeeded Delete) and records every call per Intent. Its
+// phase.begin and phase.end entries carry the gateway's payloads, so
+// agent.ExecutedPlan reads them. A succeeded Update becomes the executed plan
+// and deletes the ManagedResources it dropped, as the gateway does (ruling R1).
+// A Remediate needs a nonce and the executed plan's resources unchanged, runs
+// once per subject, and never becomes the executed plan (rulings R2, R3); every
+// other stage refuses a nonce.
 type fakeGateway struct {
 	gatewayv1.GatewayServiceClient // unimplemented RPCs panic
 
@@ -107,8 +111,10 @@ type fakeGateway struct {
 	openSteps map[types.NamespacedName]int                          // steps of the open phase that succeeded
 	openKept  map[types.NamespacedName]int                          // resources of the open phase's plan
 	tornDown  map[types.NamespacedName]types.UID                    // Intent UID whose Delete succeeded
-	used      map[string]bool                                       // Discovery subjects already opened: they are single-use
+	used      map[string]bool                                       // Discovery and Remediate subjects already opened: they are single-use
 	executed  map[types.NamespacedName]string                       // hash of the last executed plan
+	openBody  map[types.NamespacedName]plan.Body                    // plan of the open phase
+	execBody  map[types.NamespacedName]plan.Body                    // the last executed plan, when a phase of this gateway executed it
 	seq       uint64                                                // the last audit sequence number, across Intents
 	audit     map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
 }
@@ -120,7 +126,8 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		openStage: map[types.NamespacedName]string{}, openBegin: map[types.NamespacedName]uint64{},
 		openUID: map[types.NamespacedName]types.UID{}, openSteps: map[types.NamespacedName]int{}, openKept: map[types.NamespacedName]int{},
 		tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
-		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
+		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{},
+		openBody: map[types.NamespacedName]plan.Body{}, execBody: map[types.NamespacedName]plan.Body{}}
 }
 
 func keyOf(ref *gatewayv1.IntentRef) types.NamespacedName {
@@ -273,6 +280,30 @@ func (f *fakeGateway) stageRule(intent *lastv1alpha1.Intent, stage string) error
 	return nil
 }
 
+// nonceRule applies the gateway's nonce and Remediate rules to a plan: only a
+// Remediate carries a nonce, and it must carry the executed plan's resources
+// unchanged. f.mu must be held.
+func (f *fakeGateway) nonceRule(key types.NamespacedName, stage string, body plan.Body) error {
+	if stage != string(lastv1alpha1.StageRemediate) {
+		if body.Nonce != "" {
+			return status.Errorf(codes.InvalidArgument, "only a Remediate plan carries a nonce; this %s plan has one", stage)
+		}
+		return nil
+	}
+	if !plan.ValidNonce(body.Nonce) {
+		return status.Error(codes.InvalidArgument, "a Remediate plan needs a nonce of 32 lowercase hex characters")
+	}
+	executed, ok := f.execBody[key]
+	if !ok {
+		return nil // executed by setExecuted, whose plan this fake does not know
+	}
+	same, err := plan.SameResources(body.Resources, executed.Resources)
+	if err != nil || !same {
+		return status.Error(codes.FailedPrecondition, "a Remediate plan must carry the executed plan's resources unchanged")
+	}
+	return nil
+}
+
 func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.BeginPhaseResponse, error) {
 	key, stage, subject := keyOf(in.GetIntent()), in.GetStage(), in.GetSubjectHash()
 	discovery := stage == string(lastv1alpha1.StageDiscovery)
@@ -288,10 +319,10 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	if err := f.c.Get(ctx, key, &intent); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	payload, kept := map[string]any{}, 0
+	payload, kept, body := map[string]any{}, 0, plan.Body{}
 	if p := intent.Status.Plan; !discovery && p != nil {
-		kept = len(p.Resources)
-		canonical, err := plan.Canonical(plan.FromStatus(p))
+		kept, body = len(p.Resources), plan.FromStatus(p)
+		canonical, err := plan.Canonical(body)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
@@ -309,6 +340,9 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	}
 	// The gateway's order: the subject, then an open phase, then the rest.
 	ruleErr := f.stageRule(&intent, stage)
+	if ruleErr == nil && !discovery {
+		ruleErr = f.nonceRule(key, stage, body)
+	}
 	switch {
 	case pendingErr != nil:
 		return nil, pendingErr
@@ -316,14 +350,17 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 		return nil, ruleErr
 	case f.open[key] != "":
 		return nil, status.Error(codes.AlreadyExists, "a phase is already open for this intent")
-	case f.used[subject]:
+	case f.used[subject] && discovery:
 		return nil, status.Error(codes.FailedPrecondition, "this discovery command was already run")
+	case f.used[subject]:
+		return nil, status.Error(codes.FailedPrecondition, "this plan already opened a phase; a plan runs only once, so plan a different one")
 	case !approved:
 		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	}
 	f.open[key], f.openStage[key], f.openUID[key], f.openKept[key] = subject, stage, intent.UID, kept
+	f.openBody[key] = body
 	f.openBegin[key] = f.appendAudit(key, "phase.begin", stage, subject, payload)
-	if discovery {
+	if discovery || stage == string(lastv1alpha1.StageRemediate) {
 		f.used[subject] = true
 	}
 	return &gatewayv1.BeginPhaseResponse{}, nil
@@ -426,7 +463,7 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 		defer f.mu.Lock()
 		return nil, f.noOpenPhase(ctx, key)
 	}
-	stage, uid, kept := f.openStage[key], f.openUID[key], f.openKept[key]
+	stage, uid, kept, body := f.openStage[key], f.openUID[key], f.openKept[key], f.openBody[key]
 	f.closePhase(key, outcome, in.GetReason())
 	if s := f.scriptFor(key); s.onEnd != nil {
 		s.onEnd(in.GetSucceeded())
@@ -435,10 +472,12 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 	case in.GetSucceeded() && stage == string(lastv1alpha1.StageDelete):
 		// A succeeded Delete drops the record: no executed plan, and no phase opens again.
 		delete(f.executed, key)
+		delete(f.execBody, key)
 		f.tornDown[key] = uid
-	case in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery):
-		// A Discovery phase ran one inspection command; it never becomes the executed plan.
-		f.executed[key] = in.GetSubjectHash()
+	case in.GetSucceeded() && stage != string(lastv1alpha1.StageDiscovery) && stage != string(lastv1alpha1.StageRemediate):
+		// A Discovery phase ran one inspection command, and a Remediate
+		// repaired the executed plan: neither becomes the executed plan.
+		f.executed[key], f.execBody[key] = in.GetSubjectHash(), body
 	}
 	if in.GetSucceeded() && stage == string(lastv1alpha1.StageUpdate) {
 		if err := f.deleteStale(ctx, key, uid, kept, in.GetSubjectHash()); err != nil {
@@ -494,6 +533,7 @@ func (f *fakeGateway) closePhase(key types.NamespacedName, outcome, reason strin
 	delete(f.openBegin, key)
 	delete(f.openUID, key)
 	delete(f.openKept, key)
+	delete(f.openBody, key)
 }
 
 func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequest, _ ...grpc.CallOption) (*gatewayv1.RunProbesResponse, error) {
@@ -501,6 +541,7 @@ func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequ
 	f.mu.Lock()
 	f.record(key, runProbes)
 	executed := f.executed[key]
+	body, known := f.execBody[key]
 	s := f.scriptFor(key)
 	f.mu.Unlock()
 	if s.probeErr != nil {
@@ -513,16 +554,19 @@ func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequ
 	if err := f.c.Get(ctx, key, &intent); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
+	// The executed plan's probes, as the gateway runs them; the Intent's plan
+	// stands in for one executed through setExecuted.
 	resp := &gatewayv1.RunProbesResponse{PlanHash: executed}
-	if intent.Status.Plan != nil {
-		for _, r := range intent.Status.Plan.Resources {
-			for _, p := range r.Probes {
-				o := &gatewayv1.ProbeOutcome{Id: p.ID, Passed: !s.failing[p.ID], Result: &gatewayv1.CommandResult{}}
-				if s.failing[p.ID] {
-					o.Result.ExitCode, o.Error = 1, "assertion failed"
-				}
-				resp.Outcomes = append(resp.Outcomes, o)
+	if !known && intent.Status.Plan != nil {
+		body = plan.FromStatus(intent.Status.Plan)
+	}
+	for _, r := range body.Resources {
+		for _, p := range r.Probes {
+			o := &gatewayv1.ProbeOutcome{Id: p.ID, Passed: !s.failing[p.ID], Result: &gatewayv1.CommandResult{Stdout: s.probeOut[p.ID]}}
+			if s.failing[p.ID] {
+				o.Result.ExitCode = 1 // an assert that evaluates false: a result, and no error
 			}
+			resp.Outcomes = append(resp.Outcomes, o)
 		}
 	}
 	if s.onProbe != nil {

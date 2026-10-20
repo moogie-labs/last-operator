@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/meta"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
@@ -17,9 +18,17 @@ import (
 
 // verify runs every probe of the executed plan once; all must pass (spec §7).
 // A failure here surfaces a bad probe at creation time instead of as drift.
+// After a Remediate, the probed plan is the executed plan it repaired.
 func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Status.Plan == nil {
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "The Intent has no plan to verify")
+	}
+	want, err := probedPlanHash(ctx, r.Gateway, in)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, err
+	case want == "":
+		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "The audit log holds no executed plan to verify the remediation against")
 	}
 	start := time.Now()
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -32,9 +41,9 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "The gateway refused the probe run: "+describe(err))
 	case err != nil:
 		return ctrl.Result{}, err
-	case resp.GetPlanHash() != in.Status.Plan.Hash:
+	case resp.GetPlanHash() != want:
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed,
-			fmt.Sprintf("The gateway probed plan %s, not %s", resp.GetPlanHash(), in.Status.Plan.Hash))
+			fmt.Sprintf("The gateway probed plan %s, not %s", resp.GetPlanHash(), want))
 	}
 	if err := applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), start); err != nil {
 		return ctrl.Result{}, err
@@ -48,8 +57,11 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 }
 
 // followProbes moves a Ready Intent to Drifted when any ManagedResource of its
-// plan is out of sync, and back when all are in sync again. ManagedResources an
-// earlier plan left behind do not count. Remediation arrives in M5.
+// plan is out of sync, and starts a remediation for a Drifted one
+// (startRemediate); a spec edit has already planned an Update instead.
+// ManagedResources an earlier plan left behind do not count. A scheduled probe
+// run that passed everywhere since the Intent became Ready resets
+// status.remediations (D11).
 func (r *IntentReconciler) followProbes(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	mrs, err := planManagedResources(ctx, r.Reader, in)
 	if err != nil {
@@ -62,13 +74,18 @@ func (r *IntentReconciler) followProbes(ctx context.Context, in *lastv1alpha1.In
 		}
 	}
 	switch {
-	case len(drifted) > 0 && in.Status.Phase == lastv1alpha1.PhaseReady:
+	case in.Status.Phase == lastv1alpha1.PhaseDrifted:
+		return r.startRemediate(ctx, in)
+	case len(drifted) > 0:
 		return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 			setPhase(in, lastv1alpha1.PhaseDrifted, ReasonDrifted, "Probes failed on "+strings.Join(drifted, ", "))
 		})
-	case len(drifted) == 0 && in.Status.Phase == lastv1alpha1.PhaseDrifted:
+	case in.Status.Remediations > 0 && probedSinceReady(in, mrs):
+		logf.FromContext(ctx).Info("Reset the remediation count", "remediations", in.Status.Remediations)
 		return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-			setPhase(in, lastv1alpha1.PhaseReady, ReasonReady, "Every probe passed")
+			if in.Status.Phase == lastv1alpha1.PhaseReady {
+				in.Status.Remediations = 0
+			}
 		})
 	}
 	return ctrl.Result{}, nil

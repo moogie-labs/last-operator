@@ -232,11 +232,11 @@ func approveAs(key types.NamespacedName, stage lastv1alpha1.Stage, decision last
 	createApproval(key, stage, p.Hash, decision)
 }
 
-// setInSync sets a ManagedResource's InSync condition, as a probe run would.
-func setInSync(ns, name string, s metav1.ConditionStatus) {
+// setOutOfSync sets a ManagedResource's InSync condition to False, as a failed probe run would.
+func setOutOfSync(ns, name string) {
 	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		mr := getMR(ns, name)
-		setCondition(&mr.Status.Conditions, mr.Generation, CondInSync, s, ReasonProbesFailed, "set by the test")
+		setCondition(&mr.Status.Conditions, mr.Generation, CondInSync, metav1.ConditionFalse, ReasonProbesFailed, "set by the test")
 		return k8sClient.Status().Update(ctx, mr)
 	})).To(Succeed())
 }

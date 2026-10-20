@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -98,10 +97,17 @@ var _ = Describe("Intent updates", func() {
 			Expect(first).To(ContainSubstring("Plan an Update"))
 		},
 		Entry("from Ready", func() { ready(&script{}) }),
-		Entry("from Drifted", func() {
-			ready(&script{})
-			setInSync(key.Namespace, "web-0", metav1.ConditionFalse)
-			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseDrifted))
+		Entry("from Drifted, while its remediation is planned", func() {
+			// The model is unreachable for the Remediate, so it stays in Planning.
+			ready(&script{llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
+				if strings.Contains(requestText(req), "has drifted") {
+					return "", status.Error(codes.Unavailable, "provider overloaded")
+				}
+				return plans(req)
+			}})
+			gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
+			setOutOfSync(key.Namespace, "web-0")
+			Eventually(func() lastv1alpha1.Stage { return getIntent(key).Status.Stage }).Should(Equal(lastv1alpha1.StageRemediate))
 		}),
 		Entry("from Failed after the plan executed", func() {
 			gw.setScript(key, &script{llm: plans, failing: map[string]bool{"p2": true}})

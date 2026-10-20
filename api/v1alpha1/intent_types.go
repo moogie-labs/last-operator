@@ -127,6 +127,12 @@ type IntentStatus struct {
 	// current teardown was planned; a different value plans it again.
 	// +optional
 	ObservedRetry string `json:"observedRetry,omitempty"`
+	// Remediations counts the consecutive remediations drift started. At 3,
+	// the next drift fails the Intent with RemediationFailed instead of
+	// planning. A scheduled probe run in which every probe passes, after the
+	// Intent last became Ready, resets it to 0.
+	// +optional
+	Remediations int32 `json:"remediations,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional

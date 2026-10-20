@@ -92,16 +92,8 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	case err != nil:
 		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
 		log.Error(err, "Could not run probes")
-	case resp.GetPlanHash() != in.Status.Plan.Hash:
-		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
-		log.Info("Gateway probed a plan other than the Intent's", "probed", resp.GetPlanHash(), "plan", in.Status.Plan.Hash)
 	default:
-		result := "passed"
-		if len(failedProbes(resp.GetOutcomes())) > 0 {
-			result = "failed"
-		}
-		probeRuns.WithLabelValues(in.Namespace, in.Name, result).Inc()
-		if err := applyProbeOutcomes(ctx, r.Client, r.Reader, &in, resp.GetOutcomes(), now); err != nil {
+		if err := r.record(ctx, &in, resp, now); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -109,6 +101,30 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		probeRunsSkipped.WithLabelValues(in.Namespace, in.Name).Add(float64(skipped))
 	}
 	return ctrl.Result{RequeueAfter: next.Sub(finish)}, nil
+}
+
+// record records a probe run on the Intent's ManagedResources, once it is
+// clear the gateway probed the plan they belong to: the Intent's plan, or the
+// executed plan a Remediate plan repaired (probedPlanHash).
+func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, resp *gatewayv1.RunProbesResponse, at time.Time) error {
+	log := logf.FromContext(ctx)
+	want, err := probedPlanHash(ctx, r.Gateway, in)
+	switch {
+	case err != nil:
+		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
+		log.Error(err, "Could not read the executed plan to record probes against")
+	case resp.GetPlanHash() != want:
+		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
+		log.Info("Gateway probed a plan other than the Intent's", "probed", resp.GetPlanHash(), "plan", want)
+	default:
+		result := "passed"
+		if len(failedProbes(resp.GetOutcomes())) > 0 {
+			result = "failed"
+		}
+		probeRuns.WithLabelValues(in.Namespace, in.Name, result).Inc()
+		return applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), at)
+	}
+	return nil
 }
 
 func (r *ManagedResourceReconciler) now() time.Time {
