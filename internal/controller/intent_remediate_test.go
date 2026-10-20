@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,8 +13,12 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -310,6 +315,105 @@ var _ = Describe("Intent remediation", func() {
 		Eventually(func() string { return replanFeedback(getIntent(key)) }).Should(ContainSubstring("step s1 exited 1"))
 		Expect(getIntent(key).Status.Stage).To(Equal(lastv1alpha1.StageUpdate))
 		Expect(remediations()).To(Equal(int32(2)), "a replan is no spec edit")
+	})
+
+	look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{argKubectl, argGet, "deployments"}}}
+	// discovering answers a Remediate session with a discovery command, then,
+	// once its result is in, with the fix steps.
+	discovering := lifecycleOf(func(req *gatewayv1.CallLLMRequest) (string, error) {
+		if strings.Contains(conversationText(req), "The command exited 0.") {
+			return answer(fixSteps), nil
+		}
+		return commandTurn(look), nil
+	})
+
+	It("runs a discovery command in a Remediate session and records a Remediate plan after it", func() {
+		ready(&script{llm: discovering})
+		drift()
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingDiscoveryApproval))
+		in := getIntent(key)
+		Expect(in.Status.Stage).To(Equal(lastv1alpha1.StageRemediate))
+		Expect(readyCondition(key).Message).To(HaveSuffix("for stage Discovery"))
+
+		approveCommand(key, in.Status.PendingCommand.Hash, lastv1alpha1.DecisionApprove, "")
+		p := awaitingRemediate("")
+		Expect(gw.calls(key)).To(ContainElements(beginDiscovery, runDiscoveryStep))
+		Expect(p.Steps).To(Equal(fixSteps))
+		Expect(plan.ValidNonce(p.Nonce)).To(BeTrue())
+		same, err := plan.SameResources(p.Resources, []lastv1alpha1.ManagedResourceSpec{web})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(same).To(BeTrue())
+		Expect(readyCondition(key).Message).To(HaveSuffix("for stage Remediate"))
+	})
+
+	It("an approval of the Remediate plan for another stage runs nothing", func() {
+		ready(&script{})
+		drift()
+		p := awaitingRemediate("")
+		createApproval(key, lastv1alpha1.StageCreate, p.Hash, lastv1alpha1.DecisionApprove)
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(remediateBegins(key)).To(BeZero())
+		Expect(gw.calls(key)).NotTo(ContainElement(runR1))
+	})
+
+	It("returns to Ready when the drift cleared before a reloaded Remediate session started over", func() {
+		ready(&script{llm: discovering})
+		drift()
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingDiscoveryApproval))
+		subject := getIntent(key).Status.PendingCommand.Hash
+		Expect(getIntent(key).Status.PlanningSessionSeq).NotTo(BeZero())
+
+		// The operator restarts, and the audit log no longer gives back the session.
+		Eventually(func() bool {
+			intentReconciler.sessions.mu.Lock()
+			defer intentReconciler.sessions.mu.Unlock()
+			_, ok := intentReconciler.sessions.m[key]
+			return ok
+		}).Should(BeTrue())
+		intentReconciler.sessions.drop(key)
+		repaired()
+		gw.updateScript(key, func(s *script) {
+			s.queryHook = func(kinds []string) error {
+				if slices.Equal(kinds, []string{audit.TypeLLMRequest}) {
+					return status.Error(codes.NotFound, "the index no longer holds the session")
+				}
+				return nil
+			}
+		})
+		approveCommand(key, subject, lastv1alpha1.DecisionApprove, "")
+
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+		Expect(readyReason(key)).To(Equal(ReasonDriftCleared))
+		Expect(eventReasons(key, corev1.EventTypeWarning)).To(ContainElement(ReasonDriftCleared))
+	})
+
+	It("fails at the cap even when a conflict retry finds the count already there", func() {
+		in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: intentName, Namespace: "capped", Generation: 1},
+			Spec: lastv1alpha1.IntentSpec{Request: "provision"}}
+		fc := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(in).WithStatusSubresource(in).Build()
+		stored := func() *lastv1alpha1.Intent {
+			var got lastv1alpha1.Intent
+			Expect(fc.Get(ctx, client.ObjectKeyFromObject(in), &got)).To(Succeed())
+			return &got
+		}
+		drifted := stored()
+		drifted.Status = lastv1alpha1.IntentStatus{Phase: lastv1alpha1.PhaseDrifted, ObservedGeneration: drifted.Generation,
+			Stage: lastv1alpha1.StageCreate, Remediations: 2}
+		Expect(fc.Status().Update(ctx, drifted)).To(Succeed())
+		stale := stored() // seen with 2 remediations
+		// Another remediation was counted meanwhile.
+		current := stored()
+		current.Status.Remediations = 3
+		Expect(fc.Status().Update(ctx, current)).To(Succeed())
+
+		r := &IntentReconciler{Client: fc, Reader: fc, Scheme: scheme.Scheme, Gateway: gw,
+			Recorder: events.NewFakeRecorder(10), RetryDelay: time.Millisecond}
+		_, err := r.startRemediate(ctx, stale)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Remediations).To(Equal(int32(3)))
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, CondReady).Reason).To(Equal(ReasonRemediationFailed))
 	})
 
 	It("resets remediations after a fully passing scheduled probe run", func() {

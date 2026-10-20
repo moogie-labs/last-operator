@@ -42,16 +42,23 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 			fmt.Sprintf("The Intent drifted again after %d consecutive remediations%s", n, specEditHint(in)))
 	}
 	r.sessions.drop(client.ObjectKeyFromObject(in))
-	gen := in.Generation
-	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		// A conflict retry re-reads the Intent: start only from the drift that was seen.
+	gen, capped := in.Generation, false
+	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		// A conflict retry re-reads the Intent: start only from the drift that
+		// was seen, and never past the cap.
 		if in.Status.Phase != lastv1alpha1.PhaseDrifted || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
+			return
+		}
+		if capped = in.Status.Remediations >= maxRemediations; capped {
 			return
 		}
 		in.Status.Remediations++
 		resetSession(in, lastv1alpha1.StageRemediate, "")
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Confirming the drift before asking the LLM for a Remediate plan")
-	})
+	}); err != nil || !capped {
+		return ctrl.Result{}, err
+	}
+	return r.startRemediate(ctx, in) // in holds the Intent as stored: it fails at the cap
 }
 
 // errDriftCleared marks a Remediate session whose confirming probe run passed:
@@ -162,13 +169,17 @@ func probeFailures(executed plan.Body, outcomes []*gatewayv1.ProbeOutcome) []age
 // episode gives back the count startRemediate took, since nothing was
 // remediated; a replan after a failed Remediate step does not, since that
 // Remediate ran.
+//
+// The session may be a fresh one, or one that started over because its
+// conversation could not be reloaded: either way it is the session the
+// Intent's status recorded when it was built, which the write checks.
 func (r *IntentReconciler) driftCleared(ctx context.Context, in *lastv1alpha1.Intent) error {
-	giveBack := replanFeedback(in) == ""
+	giveBack, prev := replanFeedback(in) == "", in.Status.PlanningSessionSeq
 	const why = "The probe run that confirms the drift passed; nothing to remediate"
 	applied := false
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		applied = in.Status.Phase == lastv1alpha1.PhasePlanning && planStage(in) == lastv1alpha1.StageRemediate &&
-			in.Status.PlanningSessionSeq == 0
+			in.Status.PlanningSessionSeq == prev
 		if !applied {
 			return
 		}

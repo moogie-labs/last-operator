@@ -631,7 +631,9 @@ Pending → Clarifying ⇄ (user answers)
     after the operator runs the probes once more (`RunProbes`) and
     records the outcomes on the ManagedResources. If every probe passes,
     the Intent returns to Ready with a Warning `DriftCleared` event: no
-    plan, no approval prompt, and the count is given back. Otherwise the
+    plan and no approval prompt. The count is given back when the session
+    is the drift's first, with no failure to address; after a failed
+    Remediate step it stands, since a Remediate ran. Otherwise the
     first message shows the executed plan, read from the audit log, and
     each failing probe's resource, assert and output, truncated. If the
     audit log no longer holds the executed plan, the Intent fails with
