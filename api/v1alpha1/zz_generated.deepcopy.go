@@ -792,6 +792,11 @@ func (in *IntentStatus) DeepCopyInto(out *IntentStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.EffectiveModes != nil {
+		in, out := &in.EffectiveModes, &out.EffectiveModes
+		*out = new(StageModes)
+		**out = **in
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

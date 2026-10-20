@@ -133,6 +133,18 @@ type IntentStatus struct {
 	// Intent last became Ready, resets it to 0.
 	// +optional
 	Remediations int32 `json:"remediations,omitempty"`
+	// EffectiveModes is the Auto or Manual mode each stage key resolved to across
+	// the policy layers and spec.modes.
+	// +optional
+	EffectiveModes *StageModes `json:"effectiveModes,omitempty"`
+	// Replans counts the consecutive replans a failed step started. At 3, the
+	// next failed step fails the Intent with PlanningFailed instead of planning.
+	// +optional
+	Replans int32 `json:"replans,omitempty"`
+	// Retries counts the automatic retries of a Failed Intent in an Auto stage; it
+	// sets the backoff before the next one.
+	// +optional
+	Retries int32 `json:"retries,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
