@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -429,7 +430,7 @@ func (f *fakeGateway) RunCommand(ctx context.Context, in *gatewayv1.RunCommandRe
 	return &gatewayv1.RunCommandResponse{Result: res}, nil
 }
 
-func (f *fakeGateway) WriteOutputSecret(_ context.Context, in *gatewayv1.WriteOutputSecretRequest, _ ...grpc.CallOption) (*gatewayv1.WriteOutputSecretResponse, error) {
+func (f *fakeGateway) WriteOutputSecret(ctx context.Context, in *gatewayv1.WriteOutputSecretRequest, _ ...grpc.CallOption) (*gatewayv1.WriteOutputSecretResponse, error) {
 	key := keyOf(in.GetIntent())
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -437,11 +438,106 @@ func (f *fakeGateway) WriteOutputSecret(_ context.Context, in *gatewayv1.WriteOu
 	if f.open[key] == "" || f.open[key] != in.GetSubjectHash() {
 		return nil, status.Error(codes.FailedPrecondition, "no open phase for this plan")
 	}
+	name, err := f.writeOutputSecret(ctx, key, in.GetManagedResource(), in.GetValues())
+	if err != nil {
+		return nil, err
+	}
 	if f.outputs[key] == nil {
 		f.outputs[key] = map[string]map[string]string{}
 	}
 	f.outputs[key][in.GetManagedResource()] = in.GetValues()
-	return &gatewayv1.WriteOutputSecretResponse{SecretName: in.GetManagedResource() + "-outputs"}, nil
+	return &gatewayv1.WriteOutputSecretResponse{SecretName: name}, nil
+}
+
+// writeOutputSecret writes the output Secret the ManagedResource names,
+// controlled by it, as the gateway does; its data are the values as sent. An
+// existing Secret anything else holds is refused, unless it moves (moves).
+// f.mu must be held.
+func (f *fakeGateway) writeOutputSecret(ctx context.Context, key types.NamespacedName, mrName string, values map[string]string) (string, error) {
+	var mr lastv1alpha1.ManagedResource
+	if err := f.c.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: mrName}, &mr); err != nil {
+		return "", status.Error(codes.NotFound, err.Error())
+	}
+	if mr.Spec.OutputsSecretRef == nil {
+		return "", status.Errorf(codes.InvalidArgument, "managed resource %s has no outputsSecretRef", mrName)
+	}
+	s := &corev1.Secret{}
+	err := f.c.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: mr.Spec.OutputsSecretRef.Name}, s)
+	switch {
+	case apierrors.IsNotFound(err):
+		s = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: mr.Spec.OutputsSecretRef.Name}}
+	case err != nil:
+		return "", status.Error(codes.Unavailable, err.Error())
+	case !metav1.IsControlledBy(s, &mr) && !f.moves(ctx, key, s, &mr, f.openBody[key]):
+		return "", status.Errorf(codes.PermissionDenied, "secret %s exists and is not %s's output secret", s.Name, mrName)
+	}
+	s.Data = map[string][]byte{}
+	for k, v := range values {
+		s.Data[k] = []byte(v)
+	}
+	s.OwnerReferences = []metav1.OwnerReference{controllerRef(&mr)}
+	if s.ResourceVersion == "" {
+		err = f.c.Create(ctx, s)
+	} else {
+		err = f.c.Update(ctx, s)
+	}
+	if err != nil {
+		return "", status.Error(codes.Unavailable, err.Error())
+	}
+	return s.Name, nil
+}
+
+const kindManagedResource = "ManagedResource"
+
+func controllerRef(mr *lastv1alpha1.ManagedResource) metav1.OwnerReference {
+	return metav1.OwnerReference{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: kindManagedResource, Name: mr.Name, UID: mr.UID,
+		Controller: new(true)}
+}
+
+// moves reports whether the Secret s, which mr does not control, moves to mr,
+// as at the gateway: another ManagedResource mr's Intent controls holds it, and
+// body declares it for mr's position.
+func (f *fakeGateway) moves(ctx context.Context, key types.NamespacedName, s *corev1.Secret, mr *lastv1alpha1.ManagedResource, body plan.Body) bool {
+	owner := metav1.GetControllerOf(s)
+	if owner == nil || owner.Kind != kindManagedResource {
+		return false
+	}
+	var holder lastv1alpha1.ManagedResource
+	if err := f.c.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: owner.Name}, &holder); err != nil || holder.UID != owner.UID {
+		return false
+	}
+	if c, mine := metav1.GetControllerOf(&holder), metav1.GetControllerOf(mr); c == nil || mine == nil || c.UID != mine.UID {
+		return false
+	}
+	for i, r := range body.Resources {
+		if lastv1alpha1.ManagedResourceName(key.Name, i) == mr.Name {
+			return r.OutputsSecretRef != nil && r.OutputsSecretRef.Name == s.Name
+		}
+	}
+	return false
+}
+
+// moveKeptSecrets moves each output Secret body declares to the ManagedResource
+// that now declares it, as the gateway does before deleting stale ones. f.mu
+// must be held.
+func (f *fakeGateway) moveKeptSecrets(ctx context.Context, key types.NamespacedName, body plan.Body) error {
+	for i, r := range body.Resources {
+		if r.OutputsSecretRef == nil {
+			continue
+		}
+		var mr lastv1alpha1.ManagedResource
+		var s corev1.Secret
+		if f.c.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: lastv1alpha1.ManagedResourceName(key.Name, i)}, &mr) != nil ||
+			f.c.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: r.OutputsSecretRef.Name}, &s) != nil ||
+			metav1.IsControlledBy(&s, &mr) || !f.moves(ctx, key, &s, &mr, body) {
+			continue
+		}
+		s.OwnerReferences = []metav1.OwnerReference{controllerRef(&mr)}
+		if err := f.c.Update(ctx, &s); err != nil {
+			return status.Error(codes.Unavailable, err.Error())
+		}
+	}
+	return nil
 }
 
 func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.EndPhaseResponse, error) {
@@ -480,6 +576,9 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 		f.executed[key], f.execBody[key] = in.GetSubjectHash(), body
 	}
 	if in.GetSucceeded() && stage == string(lastv1alpha1.StageUpdate) {
+		if err := f.moveKeptSecrets(ctx, key, body); err != nil {
+			return nil, err
+		}
 		if err := f.deleteStale(ctx, key, uid, kept, in.GetSubjectHash()); err != nil {
 			return nil, err
 		}

@@ -137,6 +137,12 @@ func TestValidate(t *testing.T) {
 	if err := plan.Validate(withOutputs); err != nil {
 		t.Fatalf("Validate(withOutputs) = %v", err)
 	}
+	// An Update keeps a resource's output Secret as it is by leaving its outputs out.
+	keptSecret := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
+		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: outSecret}}}}
+	if err := plan.Validate(keptSecret); err != nil {
+		t.Fatalf("Validate(keptSecret) = %v", err)
+	}
 	dotted := plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 		{OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web.outputs-1"}, Outputs: map[string]string{"tls.crt": s1StdoutRef, "DB_URL": s1StdoutRef}}}}
 	if err := plan.Validate(dotted); err != nil {

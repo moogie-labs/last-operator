@@ -124,7 +124,9 @@ func FirstMessage(r Request) string {
 			fmt.Fprintf(&b, "\nThis Intent already executed this plan:\n%s\n\n"+
 				"Plan an Update: steps that take the cluster from what that plan created to what the request now asks, "+
 				"and resources that list everything the Intent manages afterwards. "+
-				"Your steps must remove the real objects of any resource you drop.\n", raw)
+				"Your steps must remove the real objects of any resource you drop. "+
+				"List the resources you keep in their executed order. "+
+				"A kept resource's outputs must name this plan's steps; leave its \"outputs\" out to keep its output Secret as it is.\n", raw)
 		} else {
 			fmt.Fprintf(&b, "\nThis Intent already executed a plan, but it cannot be shown: %v\n", err)
 		}

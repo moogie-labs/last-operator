@@ -9,8 +9,10 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -134,7 +136,7 @@ var _ = Describe("Intent updates", func() {
 
 	It("runs an approved Update and makes it the executed plan", func() {
 		ready(&script{})
-		stale := getMR(key.Namespace, "web-1")
+		stale := getMR(key.Namespace, web1)
 		Expect(stale.Spec.Description).To(Equal("cache"))
 
 		editToUpdate()
@@ -151,7 +153,7 @@ var _ = Describe("Intent updates", func() {
 		mr := getMR(key.Namespace, "web-0")
 		Expect(mr.Spec.Description).To(Equal("web server v2"))
 		Expect(meta.IsStatusConditionTrue(mr.Status.Conditions, CondInSync)).To(BeTrue())
-		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: "web-1"}, &lastv1alpha1.ManagedResource{})
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: web1}, &lastv1alpha1.ManagedResource{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the gateway deleted the ManagedResource the Update dropped")
 		deleted := gw.auditOf(key, audit.TypeManagedResourceDeleted)
 		Expect(deleted).To(HaveLen(1))
@@ -336,4 +338,46 @@ var _ = Describe("Intent updates", func() {
 		Expect(readyReason(key)).To(Equal(ReasonExecutionFailed))
 		Expect(readyCondition(key).Message).To(ContainSubstring("no executed plan to update"))
 	})
+	DescribeTable("drops the first resource and keeps the second, whose output Secret moves to web-0",
+		func(withOutputs bool) {
+			const secretName = "web-outputs"
+			webOut := web
+			webOut.OutputsSecretRef, webOut.Outputs = &lastv1alpha1.LocalRef{Name: secretName}, map[string]string{"url": s1Stdout}
+			kept := webOut
+			kept.Outputs = nil
+			if withOutputs {
+				kept.Outputs = map[string]string{"url": "${steps.s2.stdout}"}
+			}
+			ready(&script{llm: revisions(answer(createSteps, cache, webOut), answer(updateSteps, kept))})
+			secret := func() *corev1.Secret {
+				var s corev1.Secret
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: secretName}, &s)).To(Succeed())
+				return &s
+			}
+			Expect(metav1.IsControlledBy(secret(), getMR(key.Namespace, web1))).To(BeTrue())
+
+			editRequest(key, "provision v2")
+			Eventually(planHash(key)).Should(Equal(hashOf(updateSteps, kept)))
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			n := len(gw.calls(key))
+			approveAs(key, lastv1alpha1.StageUpdate, lastv1alpha1.DecisionApprove)
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+
+			web0 := getMR(key.Namespace, "web-0")
+			Expect(web0.Spec.OutputsSecretRef).To(Equal(&lastv1alpha1.LocalRef{Name: secretName}))
+			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: web1}, &lastv1alpha1.ManagedResource{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			s := secret()
+			Expect(metav1.IsControlledBy(s, web0)).To(BeTrue(), "the Secret moved to web-0")
+			if withOutputs {
+				Expect(gw.calls(key)[n:]).To(ContainElement("WriteOutputSecret:web-0"))
+				Expect(string(s.Data["url"])).To(Equal("${steps.s2.stdout}"))
+			} else {
+				Expect(gw.calls(key)[n:]).NotTo(ContainElement("WriteOutputSecret:web-0"))
+				Expect(string(s.Data["url"])).To(Equal(s1Stdout), "the Secret is kept as it is")
+			}
+		},
+		Entry("with outputs from the Update's steps", true),
+		Entry("without outputs", false),
+	)
 })

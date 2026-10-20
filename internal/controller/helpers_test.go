@@ -28,6 +28,8 @@ const (
 	roleSystem     = "system"
 	argGet         = "get"
 	argKubectl     = "kubectl"
+	web1           = "web-1"
+	s1Stdout       = "${steps.s1.stdout}"
 )
 
 func newNamespace() string {

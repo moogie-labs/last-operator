@@ -153,7 +153,7 @@ var _ = Describe("Intent deletion", func() {
 		approve(key, lastv1alpha1.DecisionApprove)
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		getMR(key.Namespace, "web-0")
-		getMR(key.Namespace, "web-1")
+		getMR(key.Namespace, web1)
 	}
 
 	// awaitingDelete deletes an executed Intent and waits for its Delete plan.

@@ -244,7 +244,7 @@ var _ = Describe("Intent planning", func() {
 
 	It("fails when the API server changes the plan it stores", func() {
 		resource := lastv1alpha1.ManagedResourceSpec{Description: namespacesArg, OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "web-outputs"},
-			Outputs: map[string]string{"name": "${steps.s1.stdout}"}}
+			Outputs: map[string]string{"name": s1Stdout}}
 		createIntent(key, "list namespaces") // no script yet: the suite's controller fails it and leaves it alone
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		gw.setScript(key, &script{llm: turns(answer(steps, resource))})

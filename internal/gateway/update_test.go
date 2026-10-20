@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -859,4 +860,176 @@ func TestARecreatedIntentFindsItsOwnExecutedPlan(t *testing.T) {
 		t.Fatalf("QueryAudit = %+v, %v; want truncated by the inherited floor", resp, err)
 	}
 	env.operatorSeesExecuted(in.Status.Plan.Hash)
+}
+
+const (
+	keptSecret = "web-outputs"
+	u1Password = "${steps.u1.json.password}"
+)
+
+// dropTheFirstResource seeds what an executed plan [r0, r1 with outputs] left
+// for an Update that keeps only r1: web-0 and web-1 controlled by the Intent,
+// with web-0 already rewritten to the kept resource, as the operator does, and
+// r1's output Secret, controlled by web-1. It records and approves the Update
+// plan, with the given outputs, and returns its subject and steps.
+func (e *testEnv) dropTheFirstResource(outputs map[string]string) (string, []lastv1alpha1.Command) {
+	e.t.Helper()
+	e.createMRs(2)
+	kept := executedResources()[0]
+	kept.OutputsSecretRef, kept.Outputs = &lastv1alpha1.LocalRef{Name: keptSecret}, outputs
+	var mr lastv1alpha1.ManagedResource
+	if err := e.crd.Get(e.ctx, client.ObjectKey{Namespace: envNS, Name: lastv1alpha1.ManagedResourceName(envIntent, 0)}, &mr); err != nil {
+		e.t.Fatal(err)
+	}
+	mr.Spec = *kept.DeepCopy()
+	mr.Spec.IntentRef = &lastv1alpha1.LocalRef{Name: envIntent}
+	if err := e.crd.Update(e.ctx, &mr); err != nil {
+		e.t.Fatal(err)
+	}
+	e.outputSecret(lastv1alpha1.ManagedResourceName(envIntent, 1), envIntentUID)
+	steps := []lastv1alpha1.Command{argvStep("u1", kubectlBin, "delete", "deployment", "web-first", "-n", envNS)}
+	h := e.recordPlan(lastv1alpha1.StageUpdate, plan.Body{Steps: steps, Resources: []lastv1alpha1.ManagedResourceSpec{kept}})
+	e.approve(stageApproval("update", lastv1alpha1.StageUpdate, h))
+	return h, steps
+}
+
+// outputSecret creates keptSecret as an output Secret the gateway wrote for the
+// Intent of intentUID, controlled by the ManagedResource mr (UID "uid-<mr>").
+func (e *testEnv) outputSecret(mr, intentUID string) {
+	e.t.Helper()
+	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: keptSecret, Namespace: envNS,
+		Labels:          map[string]string{sandbox.LabelManagedBy: sandbox.ManagedByValue, labelIntentUID: intentUID},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: kindManagedResource, Name: mr, UID: types.UID("uid-" + mr), Controller: new(true)}}},
+		Data: map[string][]byte{passwordKey: []byte("old")}}
+	if _, err := e.kube.CoreV1().Secrets(envNS).Create(e.ctx, s, metav1.CreateOptions{}); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// wantSecretControlledBy asserts keptSecret's one controller ownerReference.
+func (e *testEnv) wantSecretControlledBy(mr string) *corev1.Secret {
+	e.t.Helper()
+	s := e.secret(keptSecret)
+	if len(s.OwnerReferences) != 1 || s.OwnerReferences[0].Name != mr || s.OwnerReferences[0].UID != types.UID("uid-"+mr) ||
+		s.OwnerReferences[0].Controller == nil || !*s.OwnerReferences[0].Controller {
+		e.t.Fatalf("secret %s owners = %+v, want %s", keptSecret, s.OwnerReferences, mr)
+	}
+	return s
+}
+
+// An Update that drops r0 and keeps r1 rewrites web-0 to r1; r1's output Secret,
+// still controlled by web-1, moves to web-0 when the plan declares it there, so
+// it survives web-1's deletion.
+func TestAnUpdateMovesAKeptOutputSecretToItsNewManagedResource(t *testing.T) {
+	web0, web1 := lastv1alpha1.ManagedResourceName(envIntent, 0), lastv1alpha1.ManagedResourceName(envIntent, 1)
+	t.Run("written by the Update", func(t *testing.T) {
+		env, _ := executedEnv(t)
+		outputs := map[string]string{passwordKey: u1Password}
+		h, steps := env.dropTheFirstResource(outputs)
+		if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.run(h, steps[0]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.writeOutputs(h, web0, outputs); err != nil {
+			t.Fatalf("WriteOutputSecret = %v", err)
+		}
+		if last := env.last(); last.Type != audit.TypeOutputWritten || last.Stage != string(lastv1alpha1.StageUpdate) {
+			t.Fatalf("last entry = %+v, want output.written", last)
+		}
+		if _, err := env.end(h, true); err != nil {
+			t.Fatal(err)
+		}
+		env.wantMRs(0, 8, 9)
+		if s := env.wantSecretControlledBy(web0); string(s.Data[passwordKey]) != outputValue {
+			t.Fatalf("secret data = %q, want the Update's output", s.Data[passwordKey])
+		}
+	})
+	t.Run("left out of the Update", func(t *testing.T) {
+		env, _ := executedEnv(t)
+		h, steps := env.dropTheFirstResource(nil)
+		before := len(env.entries())
+		env.runPhase(lastv1alpha1.StageUpdate, h, steps)
+		env.wantMRs(0, 8, 9)
+		if s := env.wantSecretControlledBy(web0); string(s.Data[passwordKey]) != "old" {
+			t.Fatalf("secret data = %q, want it untouched", s.Data[passwordKey])
+		}
+		var moved []audit.Entry
+		for _, en := range env.entries()[before:] {
+			if en.Type == audit.TypeOutputMoved {
+				moved = append(moved, en)
+			}
+		}
+		if len(moved) != 1 || moved[0].SubjectHash != h || moved[0].AuthorizedBy == nil ||
+			string(moved[0].Payload) != `{"from":"web-1","secret":"web-outputs","to":"web-0"}` {
+			t.Fatalf("output.moved entries = %+v, want one naming the move", moved)
+		}
+	})
+	t.Run("never a Secret the plan does not declare there", func(t *testing.T) {
+		env, _ := executedEnv(t)
+		outputs := map[string]string{passwordKey: u1Password}
+		env.createMRs(2)
+		// The plan declares the Secret for resource 1; the operator points web-0 at it.
+		plain := executedResources()[0]
+		kept := executedResources()[0]
+		kept.Description = "kept"
+		for i := range kept.Probes {
+			kept.Probes[i].ID += "-kept"
+		}
+		kept.OutputsSecretRef, kept.Outputs = &lastv1alpha1.LocalRef{Name: keptSecret}, outputs
+		var mr lastv1alpha1.ManagedResource
+		if err := env.crd.Get(env.ctx, client.ObjectKey{Namespace: envNS, Name: web0}, &mr); err != nil {
+			t.Fatal(err)
+		}
+		mr.Spec.OutputsSecretRef = &lastv1alpha1.LocalRef{Name: keptSecret}
+		if err := env.crd.Update(env.ctx, &mr); err != nil {
+			t.Fatal(err)
+		}
+		env.outputSecret(web1, envIntentUID)
+		steps := []lastv1alpha1.Command{argvStep("u1", kubectlBin, "get", "ns")}
+		h := env.recordPlan(lastv1alpha1.StageUpdate, plan.Body{Steps: steps, Resources: []lastv1alpha1.ManagedResourceSpec{plain, kept}})
+		env.approve(stageApproval("update", lastv1alpha1.StageUpdate, h))
+		if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.run(h, steps[0]); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.writeOutputs(h, web0, outputs)
+		env.wantDenied(err, codes.PermissionDenied)
+		env.wantSecretControlledBy(web1)
+	})
+	t.Run("never a Secret of a ManagedResource the Intent does not control", func(t *testing.T) {
+		env, _ := executedEnv(t)
+		outputs := map[string]string{passwordKey: u1Password}
+		h, steps := env.dropTheFirstResource(outputs)
+		other := lastv1alpha1.ManagedResourceName(envIntent, 9)
+		if err := env.kube.CoreV1().Secrets(envNS).Delete(env.ctx, keptSecret, metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		env.outputSecret(other, envIntentUID)
+		if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.run(h, steps[0]); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.writeOutputs(h, web0, outputs)
+		env.wantDenied(err, codes.PermissionDenied)
+		if _, err := env.end(h, true); err != nil {
+			t.Fatal(err)
+		}
+		env.wantSecretControlledBy(other)
+	})
+	t.Run("never a Secret of another Intent", func(t *testing.T) {
+		env, _ := executedEnv(t)
+		h, steps := env.dropTheFirstResource(nil)
+		if err := env.kube.CoreV1().Secrets(envNS).Delete(env.ctx, keptSecret, metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		env.outputSecret(web1, "another-intent-uid")
+		env.runPhase(lastv1alpha1.StageUpdate, h, steps)
+		env.wantSecretControlledBy(web1)
+	})
 }

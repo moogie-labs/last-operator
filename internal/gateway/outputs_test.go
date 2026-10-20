@@ -75,7 +75,7 @@ func TestWriteOutputSecretWritesHashedAuditAndOwnedSecret(t *testing.T) {
 	}
 	s, err := env.kube.CoreV1().Secrets(envNS).Get(context.Background(), outputSecret, metav1.GetOptions{})
 	if err != nil || string(s.Data[passwordKey]) != outputValue || s.Labels[sandbox.LabelManagedBy] != sandbox.ManagedByValue ||
-		len(s.OwnerReferences) != 1 || s.OwnerReferences[0].UID != "mr-uid" || s.OwnerReferences[0].Kind != "ManagedResource" {
+		len(s.OwnerReferences) != 1 || s.OwnerReferences[0].UID != "mr-uid" || s.OwnerReferences[0].Kind != kindManagedResource {
 		t.Fatalf("secret = %+v, %v", s, err)
 	}
 	last := env.last()
@@ -261,7 +261,7 @@ func (e *testEnv) secret(name string) *corev1.Secret {
 }
 
 func ownerRef(uid types.UID, controller bool) metav1.OwnerReference {
-	return metav1.OwnerReference{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: "ManagedResource", Name: "x", UID: uid, Controller: &controller}
+	return metav1.OwnerReference{APIVersion: lastv1alpha1.GroupVersion.String(), Kind: kindManagedResource, Name: "x", UID: uid, Controller: &controller}
 }
 
 func TestWriteOutputSecretRefusesNameOutsideTheApprovedPlan(t *testing.T) {

@@ -65,7 +65,7 @@ var _ = Describe("Intent remediation", func() {
 	web := lastv1alpha1.ManagedResourceSpec{Description: desc,
 		Probes: []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{
 			Argv: []string{argKubectl, argGet, "deployment", intentName, "-o", "json"}}}, Assert: assert}},
-		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "nginx-out"}, Outputs: map[string]string{"applied": "${steps.s1.stdout}"},
+		OutputsSecretRef: &lastv1alpha1.LocalRef{Name: "nginx-out"}, Outputs: map[string]string{"applied": s1Stdout},
 		Teardown: []lastv1alpha1.Command{argvStep("t1", argKubectl, "delete", "deployment", "web")}}
 	createSteps := []lastv1alpha1.Command{argvStep("s1", argKubectl, "apply", "-f", "web.yaml")}
 	fixSteps := []lastv1alpha1.Command{argvStep("r1", argKubectl, "scale", "deployment/web", "--replicas=2")}

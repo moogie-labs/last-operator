@@ -371,7 +371,7 @@ func (g *Gateway) sweepStaleManagedResources(ctx context.Context, key, ns, name 
 		return errors.New("gateway: no audit writer")
 	}
 	entry := audit.Draft{Actor: sandbox.GatewayActor, Intent: key, Stage: rec.Executed.Stage, SubjectHash: rec.Executed.PlanHash}
-	return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(rec.IntentUID), len(body.Resources),
+	return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(rec.IntentUID), body.Resources,
 		map[types.UID]staleDeletion{})
 }
 

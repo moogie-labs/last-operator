@@ -834,7 +834,7 @@ func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns
 			p.stale = map[types.UID]staleDeletion{}
 		}
 		entry := audit.Draft{Actor: actor, Intent: key, Stage: string(p.stage), SubjectHash: p.subject, AuthorizedBy: p.auth}
-		return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(p.uid), len(p.body.Resources), p.stale)
+		return g.deleteStaleManagedResources(ctx, w, entry, ns, name, types.UID(p.uid), p.body.Resources, p.stale)
 	}
 	return nil
 }
@@ -846,12 +846,15 @@ func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns
 // a cleanup a restart cut short. The operator cannot delete them (spec §4.1):
 // each deletion garbage-collects an output Secret, so each is audited as
 // managedresource.deleted, from the entry template, once the delete succeeds. A
-// ManagedResource already gone counts as deleted and writes no entry. The caller
-// holds the Intent's lock. seen makes a retry repeat only what is left: a
-// deletion whose entry could not be written is audited first, and one already
-// audited is never deleted or audited again, even while it is still terminating.
+// ManagedResource already gone counts as deleted and writes no entry. First,
+// the output Secrets the executed plan's resources declare move to the
+// ManagedResources that now declare them (moveKeptOutputSecrets), so none is
+// lost with a deleted one. The caller holds the Intent's lock. seen makes a
+// retry repeat only what is left: a deletion whose entry could not be written
+// is audited first, and one already audited is never deleted or audited again,
+// even while it is still terminating.
 func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writer, entry audit.Draft, ns, intent string, uid types.UID,
-	kept int, seen map[types.UID]staleDeletion) error {
+	resources []lastv1alpha1.ManagedResourceSpec, seen map[types.UID]staleDeletion) error {
 	record := func(mrUID types.UID) error {
 		del := seen[mrUID]
 		e := entry
@@ -872,8 +875,11 @@ func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writ
 		}
 	}
 
-	keep := make(map[string]bool, kept)
-	for i := range kept {
+	if err := g.moveKeptOutputSecrets(ctx, w, entry, ns, intent, uid, resources); err != nil {
+		return err
+	}
+	keep := make(map[string]bool, len(resources))
+	for i := range resources {
 		keep[lastv1alpha1.ManagedResourceName(intent, i)] = true
 	}
 	var list lastv1alpha1.ManagedResourceList

@@ -75,11 +75,11 @@ var _ = Describe("Intent verification", func() {
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 
 		// As one an Update dropped and the gateway has yet to delete.
-		stale := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: key.Namespace},
+		stale := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: web1, Namespace: key.Namespace},
 			Spec: lastv1alpha1.ManagedResourceSpec{Description: "cache", IntentRef: &lastv1alpha1.LocalRef{Name: key.Name}}}
 		Expect(controllerutil.SetControllerReference(getIntent(key), stale, k8sClient.Scheme())).To(Succeed())
 		Expect(k8sClient.Create(ctx, stale)).To(Succeed())
-		setOutOfSync(key.Namespace, "web-1")
+		setOutOfSync(key.Namespace, web1)
 		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		Expect(readyReason(key)).To(Equal(ReasonReady))
 	})

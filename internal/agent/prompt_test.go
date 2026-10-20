@@ -86,7 +86,9 @@ func TestFirstMessageForAnUpdateShowsTheExecutedPlan(t *testing.T) {
 		`"assert":"result.exitCode == 0"`,
 		"Plan an Update: steps that take the cluster from what that plan created to what the request now asks, " +
 			"and resources that list everything the Intent manages afterwards. " +
-			"Your steps must remove the real objects of any resource you drop.",
+			"Your steps must remove the real objects of any resource you drop. " +
+			"List the resources you keep in their executed order. " +
+			`A kept resource's outputs must name this plan's steps; leave its "outputs" out to keep its output Secret as it is.`,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("update message lacks %q:\n%s", want, msg)

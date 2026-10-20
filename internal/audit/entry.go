@@ -32,6 +32,9 @@ const (
 	// a ManagedResource a succeeded Update dropped, deleted by the gateway; its
 	// output Secret goes with it by garbage collection (spec §15)
 	TypeManagedResourceDeleted = "managedresource.deleted"
+	// an output Secret moved, unchanged, to the ManagedResource that now
+	// declares it, before an Update deletes the one that held it (spec §15)
+	TypeOutputMoved = "output.moved"
 )
 
 // GenesisHash is the prevHash of the entry at seq 0.
