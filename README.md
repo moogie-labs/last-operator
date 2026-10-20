@@ -53,8 +53,9 @@ The plugin creates an Intent and follows it, every two seconds:
   size), Providers and egress, then the plugin asks `Approve? [y/N/d]`, or
   `Approve? [y/N/d/f]` when it carries files:
   - `y` approves;
-  - `d` denies, after asking for a reason, which the model reads. Denying a plan
-    fails the Intent; denying a discovery command lets the model plan on;
+  - `d` denies, after asking for a reason. Denying a discovery command lets the
+    model plan on, and the model reads why. Denying a plan, of any stage, fails
+    the Intent with `ApprovalDenied` and records the reason on the Intent;
   - `f` shows it again with the files' contents, then asks again;
   - `N` or Enter leaves it pending, and prints the `approve` and `deny` commands
     bound to its hash.
@@ -137,6 +138,10 @@ An Intent that has executed is not frozen.
   next drift fails the Intent with `RemediationFailed`; a scheduled probe run
   in which every probe passes resets the count. Editing the spec while a
   remediation is in flight abandons it and plans an Update.
+- **Denying a Remediate.** Like any denied plan, a denied Remediate fails the
+  Intent with `ApprovalDenied`. A Failed Intent runs no probes, so drift is no
+  longer watched. Edit the spec to plan an Update, which you approve as usual;
+  the Intent is not otherwise retried.
 - **Approving.** `approve` and `deny` act only while the Intent is
   `AwaitingApproval`: during planning, `status.plan` is still the previous plan
   and is never approvable. A plan that carries a nonce is shown as

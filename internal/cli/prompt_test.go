@@ -86,9 +86,26 @@ func TestAskDecisionOffersFilesAndSaysDenyingAPlanFailsTheIntent(t *testing.T) {
 		t.Fatalf("askDecision = %q, %q, %v", decision, reason, err)
 	}
 	for _, want := range []string{"Approve? [y/N/d/f]: ", "Answer y to approve, n to leave it pending, d to deny, or f to show the files.",
-		"Reason for denying (the model reads it; denying a plan fails the Intent): "} {
+		denyPlanPrompt} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+const denyPlanPrompt = "Reason for denying (recorded on the Intent; denying a plan fails the Intent): "
+
+// Denying any plan, Create, Update, Remediate or Delete, fails the Intent; no
+// model reads its reason. Only a discovery command's reason goes to the model.
+func TestAskDecisionSaysDenyingAnyPlanFailsTheIntent(t *testing.T) {
+	for _, stage := range []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate,
+		lastv1alpha1.StageRemediate, lastv1alpha1.StageDelete} {
+		p, out := newTestPrompter("d\nno\n")
+		if decision, _, err := p.askDecision(context.Background(), stage, false); err != nil || decision != lastv1alpha1.DecisionDeny {
+			t.Fatalf("%s: askDecision = %q, %v", stage, decision, err)
+		}
+		if !strings.Contains(out.String(), denyPlanPrompt) || strings.Contains(out.String(), "model") {
+			t.Errorf("%s: deny prompt:\n%s", stage, out)
 		}
 	}
 }

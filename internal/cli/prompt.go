@@ -94,9 +94,12 @@ func (p *prompter) askDecision(ctx context.Context, stage lastv1alpha1.Stage, fi
 	if files {
 		prompt, help = "Approve? [y/N/d/f]: ", "Answer y to approve, n to leave it pending, d to deny, or f to show the files."
 	}
+	// The model reads why a discovery command was denied and plans on. A denied
+	// plan of any stage fails the Intent with ApprovalDenied; its reason is
+	// recorded on the Intent, and no model reads it.
 	reasonPrompt := "Reason for denying (the model reads it): "
-	if stage == lastv1alpha1.StageCreate {
-		reasonPrompt = "Reason for denying (the model reads it; denying a plan fails the Intent): "
+	if stage != lastv1alpha1.StageDiscovery {
+		reasonPrompt = "Reason for denying (recorded on the Intent; denying a plan fails the Intent): "
 	}
 	for {
 		line, err := p.ask(ctx, prompt)

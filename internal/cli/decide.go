@@ -185,7 +185,7 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 	if decision == lastv1alpha1.DecisionDeny {
 		cmd.Use = "deny NAME --reason REASON"
 		cmd.Short = "Deny the plan or discovery command that kubectl last plan shows"
-		cmd.Flags().StringVar(&reason, "reason", "", "why (required; the model reads it, and denying a plan fails the Intent)")
+		cmd.Flags().StringVar(&reason, "reason", "", "why (required; the model reads a discovery command's, and denying a plan fails the Intent)")
 	}
 	return cmd
 }
