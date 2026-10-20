@@ -85,7 +85,8 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 }
 
 // abortOpenPhase ends the phase an Intent being deleted may hold open: a
-// running or lost Create phase, or an approved discovery command's phase. The
+// running or lost Create or Update phase, or an approved discovery command's
+// phase. The
 // gateway answers FailedPrecondition when none is open.
 func (r *IntentReconciler) abortOpenPhase(ctx context.Context, in *lastv1alpha1.Intent) error {
 	const why = "Aborted: the Intent is being deleted"

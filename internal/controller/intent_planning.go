@@ -31,10 +31,20 @@ const planTimeout = agent.MaxAttempts*agent.CallTimeout + time.Minute
 // new session for the current spec. feedback, when set, is a failure the new
 // plan must address. The session plans an Update once the Intent has an
 // executed plan, and a Create otherwise (sessionStage).
+func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
+	return r.startSession(ctx, in, "", feedback)
+}
+
+// startSession is startPlanning for a session whose stage may already be
+// known. A failed Create or Update phase leaves the executed plan unchanged,
+// so its replan keeps its stage without reading the audit log: a failed read
+// there would leave the phase's checkpoint open and fail the Intent as
+// interrupted. An empty stage is chosen by sessionStage.
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
-func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
+func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage,
+	feedback string) (ctrl.Result, error) {
 	if !in.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.startDelete(ctx, in, feedback)
 	}
@@ -44,9 +54,11 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 	if !in.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil // deleted meanwhile: the next reconcile tears it down
 	}
-	stage, err := r.sessionStage(ctx, in)
-	if err != nil {
-		return ctrl.Result{}, err // the audit log could not be read: retried, never guessed
+	if stage == "" {
+		var err error
+		if stage, err = r.sessionStage(ctx, in); err != nil {
+			return ctrl.Result{}, err // the audit log could not be read: retried, never guessed
+		}
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		in.Status.Stage = stage

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
@@ -113,12 +115,14 @@ var _ = Describe("Intent execution", func() {
 	})
 
 	It("retries planning while the gateway cannot read the audit log", func() {
-		// The stage choice reads phase.begin, then phase.end: fail every read after those.
-		reads := 0
-		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1})), queryHook: func([]string) error {
-			if reads++; reads > 2 {
+		// The stage choice reads phase.begin, then phase.end; the used-plans read
+		// is a phase.begin read after those, and fails.
+		chosen := false
+		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1})), queryHook: func(kinds []string) error {
+			if chosen && slices.Equal(kinds, []string{audit.TypePhaseBegin}) {
 				return status.Error(codes.Unavailable, "index unreachable")
 			}
+			chosen = chosen || slices.Equal(kinds, []string{audit.TypePhaseEnd})
 			return nil
 		}})
 		createIntent(key, "provision")

@@ -44,7 +44,7 @@ func setExecuted(in *lastv1alpha1.Intent, s metav1.ConditionStatus, reason, msg 
 	setCondition(&in.Status.Conditions, in.Generation, CondExecuted, s, reason, msg)
 }
 
-// execute runs the approved plan (spec §8.3): a Create plan in phase
+// execute runs the approved plan (spec §8.3): a Create or Update plan in phase
 // Executing, or a Delete plan in phase TearingDown. Step results live only in
 // this process, so the Executed checkpoint decides what a reconcile may do:
 // open the phase, abandon one this process lost, or confirm one whose steps all
@@ -237,8 +237,8 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 }
 
 // endFailed closes the phase as failed. A failure of a Create or Update plan
-// itself returns the Intent to Planning with the failure as context (spec
-// §8.3); anything else, and any failed teardown, fails the Intent.
+// itself returns the Intent to Planning in the same stage, with the failure as
+// context (spec §8.3); anything else, and any failed teardown, fails the Intent.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
 	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
@@ -248,14 +248,14 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 	case err != nil && status.Code(err) != codes.FailedPrecondition:
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
-	if replan && replannable(planStage(in)) {
-		return r.startPlanning(ctx, in, reason)
+	if stage := planStage(in); replan && replannable(stage) {
+		return r.startSession(ctx, in, stage, reason) // the failed phase left the executed plan as it was
 	}
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)
 }
 
-// specEditHint tells the user how to plan a Create again; a teardown has the
-// retry annotation instead (failRun).
+// specEditHint tells the user how to plan a Create or Update again; a teardown
+// has the retry annotation instead (failRun).
 func specEditHint(in *lastv1alpha1.Intent) string {
 	if planStage(in) == lastv1alpha1.StageDelete {
 		return ""

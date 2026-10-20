@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,6 +70,7 @@ type script struct {
 	failing  map[string]bool   // probe ID → fails; other probes pass
 	probeErr error             // RunProbes error
 	onProbe  func()            // called during a successful RunProbes
+	onEnd    func(bool)        // called with the outcome of each EndPhase that closes a phase, with f.mu held
 
 	interrupt map[string]bool // step ID → the gateway restarts before it: the phase ends as interrupted, once
 
@@ -426,6 +428,9 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 	}
 	stage, uid, kept := f.openStage[key], f.openUID[key], f.openKept[key]
 	f.closePhase(key, outcome, in.GetReason())
+	if s := f.scriptFor(key); s.onEnd != nil {
+		s.onEnd(in.GetSucceeded())
+	}
 	switch {
 	case in.GetSucceeded() && stage == string(lastv1alpha1.StageDelete):
 		// A succeeded Delete drops the record: no executed plan, and no phase opens again.
@@ -449,8 +454,9 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 
 // deleteStale deletes the ManagedResources a succeeded Update dropped, those the
 // Intent of uid controls named other than its first kept, and audits each as
-// managedresource.deleted, as the gateway does. Unlike the gateway, it does not
-// retry a failed delete. f.mu must be held.
+// managedresource.deleted, as the gateway does: one already gone or terminating
+// is skipped with no entry. Unlike the gateway, it does not retry a failed
+// delete. f.mu must be held.
 func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName, uid types.UID, kept int, subject string) error {
 	var list lastv1alpha1.ManagedResourceList
 	if err := f.c.List(ctx, &list, client.InNamespace(key.Namespace)); err != nil {
@@ -462,10 +468,14 @@ func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName,
 	}
 	for i := range list.Items {
 		mr := &list.Items[i]
-		if owner := metav1.GetControllerOf(mr); owner == nil || owner.UID != uid || keep[mr.Name] {
+		if owner := metav1.GetControllerOf(mr); owner == nil || owner.UID != uid || keep[mr.Name] || mr.DeletionTimestamp != nil {
 			continue
 		}
-		if err := f.c.Delete(ctx, mr, client.Preconditions{UID: &mr.UID}); client.IgnoreNotFound(err) != nil {
+		err := f.c.Delete(ctx, mr, client.Preconditions{UID: &mr.UID})
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
 			return status.Error(codes.Unavailable, err.Error())
 		}
 		f.appendAudit(key, audit.TypeManagedResourceDeleted, string(lastv1alpha1.StageUpdate), subject,

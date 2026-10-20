@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -178,6 +179,56 @@ var _ = Describe("Intent updates", func() {
 		Expect(gw.executedOf(key)).To(Equal(hashOf(fixed, webV2)))
 	})
 
+	DescribeTable("replans a failed step in its own stage when the audit log cannot be read just after",
+		func(stage lastv1alpha1.Stage) {
+			fixed := []lastv1alpha1.Command{argvStep("s3", argKubectl, "delete", "configmap", "cache", "--ignore-not-found")}
+			failing := "s2"
+			replanned := hashOf(fixed, webV2)
+			llm := func(req *gatewayv1.CallLLMRequest) (string, error) {
+				if strings.Contains(requestText(req), "step "+failing+" exited 1") {
+					return answer(fixed, webV2), nil
+				}
+				return plans(req)
+			}
+			if stage == lastv1alpha1.StageUpdate {
+				ready(&script{llm: llm})
+				editToUpdate()
+			} else {
+				failing, llm = "s1", func(req *gatewayv1.CallLLMRequest) (string, error) {
+					if strings.Contains(requestText(req), "step s1 exited 1") {
+						return answer(fixed, webV2), nil
+					}
+					return answer(createSteps, web, cache), nil
+				}
+				gw.setScript(key, &script{llm: llm})
+				createIntent(key, "provision")
+				Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			}
+			// The first audit read after the failed phase ends fails once.
+			armed := false
+			gw.updateScript(key, func(s *script) {
+				s.exit = map[string]int32{failing: 1}
+				s.onEnd = func(succeeded bool) { armed = armed || !succeeded }
+				s.queryHook = func([]string) error {
+					if armed {
+						armed = false
+						return status.Error(codes.Unavailable, "index unreachable")
+					}
+					return nil
+				}
+			})
+			approveAs(key, stage, lastv1alpha1.DecisionApprove)
+
+			Eventually(planHash(key)).Should(Equal(replanned))
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			Expect(getIntent(key).Status.Stage).To(Equal(stage))
+			Expect(requestText(gw.lastRequest(key))).To(ContainSubstring(
+				"The previous plan failed and was not completed:\nstep " + failing + " exited 1: boom"))
+		},
+		Entry("Create", lastv1alpha1.StageCreate),
+		Entry("Update", lastv1alpha1.StageUpdate),
+	)
+
 	It("keeps stage Update across a discovery command", func() {
 		look := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{argKubectl, argGet, "configmaps"}}}
 		ready(&script{stdout: map[string]string{plan.DiscoveryStepID: "cache\n"}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
@@ -252,12 +303,12 @@ var _ = Describe("Intent updates", func() {
 	It("chooses the stage again when the executed plan leaves the audit log before the session starts", func() {
 		ready(&script{})
 		// The stage choice reads phase.begin, then phase.end; the index is
-		// truncated for every read after those.
-		reads := 0
+		// truncated for every read after that phase.end read.
+		chosen := false
 		gw.updateScript(key, func(s *script) {
-			s.queryHook = func([]string) error {
-				reads++
-				s.auditTruncated = reads > 2
+			s.queryHook = func(kinds []string) error {
+				s.auditTruncated = chosen
+				chosen = chosen || slices.Equal(kinds, []string{audit.TypePhaseEnd})
 				return nil
 			}
 		})
