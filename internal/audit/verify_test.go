@@ -26,6 +26,9 @@ const (
 
 	// intentTeamXWeb is the Intent value used across these tests.
 	intentTeamXWeb = "team-x/web"
+
+	// testTS is the timestamp of the entries these tests build.
+	testTS = "2026-09-27T00:00:00.000000000Z"
 )
 
 var bg = context.Background()
@@ -65,7 +68,7 @@ func buildChain(t *testing.T, sink *audittest.MemSink, s *audit.Signer, n int, m
 	for i := range n {
 		e := audit.Entry{
 			V: 1, Seq: uint64(i), ChainID: chainID, PrevHash: prev,
-			TS: "2026-09-27T00:00:00.000000000Z", Type: audit.TypeCommandStart,
+			TS: testTS, Type: audit.TypeCommandStart,
 			Actor: actorOperator, Intent: intentTeamXWeb,
 			Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
 		}
@@ -431,5 +434,44 @@ func TestDecodeEntryAcceptsOnlyCanonicalVersion1Entries(t *testing.T) {
 		if _, err := audit.DecodeEntry(bad); err == nil {
 			t.Errorf("%s: DecodeEntry accepted it", name)
 		}
+	}
+}
+
+// appendAfterFirstList is a sink that, once its first List returns, appends one
+// checkpoint entry and its index, as a live gateway does between two listings.
+type appendAfterFirstList struct {
+	*audittest.MemSink
+	t    *testing.T
+	s    *audit.Signer
+	prev audit.Entry
+	done bool
+}
+
+func (a *appendAfterFirstList) List(ctx context.Context, prefix, startAfter string) ([]audit.ObjectInfo, error) {
+	objs, err := a.MemSink.List(ctx, prefix, startAfter)
+	if !a.done {
+		a.done = true
+		e := audit.Entry{V: 1, Seq: a.prev.Seq + 1, ChainID: chainID, PrevHash: a.prev.Hash, TS: testTS,
+			Type: audit.TypeCheckpoint, Actor: actorGateway,
+			Payload: mustMarshal(a.t, audit.CheckpointPayload{PrevSeq: a.prev.Seq, PrevHash: a.prev.Hash})}
+		if serr := a.s.Seal(&e); serr != nil {
+			a.t.Fatal(serr)
+		}
+		putEntry(a.t, a.MemSink, e)
+		idx := mustMarshal(a.t, audit.CheckpointIndex{Seq: e.Seq, Hash: e.Hash})
+		if perr := a.Put(bg, audit.CheckpointKey(chainID, e.Seq), idx, time.Time{}); perr != nil {
+			a.t.Fatal(perr)
+		}
+	}
+	return objs, err
+}
+
+// A checkpoint the gateway writes while Verify reads a live chain is not a bad checkpoint.
+func TestVerifyAcceptsACheckpointWrittenDuringTheRead(t *testing.T) {
+	s, mem := newSigner(t), audittest.NewMemSink()
+	es := buildChain(t, mem, s, 10, nil)
+	sink := &appendAfterFirstList{MemSink: mem, t: t, s: s, prev: es[9]}
+	if rep := verifyChain(t, sink, s, audit.VerifyOptions{}); !rep.OK() {
+		t.Fatalf("problems: %+v", rep.Problems)
 	}
 }

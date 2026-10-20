@@ -77,6 +77,14 @@ func (r *Report) add(seq uint64, kind ProblemKind, format string, args ...any) {
 //nolint:gocyclo // security-critical: each branch is a distinct chain-integrity check (spec §14.5); splitting it up would risk silently dropping a check during refactor.
 func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID string, opts VerifyOptions) (Report, error) {
 	var rep Report
+	// List the checkpoint index before the chain. The writer puts a checkpoint's
+	// entry before its index, so every index listed here has its entry in the chain
+	// listed after it. Listing them the other way round reports a live chain's
+	// checkpoint, written between the two listings, as a bad one.
+	idx, err := sink.List(ctx, CheckpointPrefix(chainID), "")
+	if err != nil {
+		return rep, fmt.Errorf("audit: list checkpoints: %w", err)
+	}
 	startAfter := ""
 	if opts.FromSeq > 0 {
 		startAfter = EntryKey(chainID, opts.FromSeq-1)
@@ -167,7 +175,7 @@ func Verify(ctx context.Context, sink Sink, pub ed25519.PublicKey, chainID strin
 		}
 	}
 
-	if err := verifyCheckpointIndex(ctx, sink, chainID, opts.FromSeq, hashes, types, &rep); err != nil {
+	if err := verifyCheckpointIndex(ctx, sink, idx, opts.FromSeq, hashes, types, &rep); err != nil {
 		return rep, err
 	}
 
@@ -221,11 +229,7 @@ func decodeEntry(body []byte) (Entry, string) {
 	return e, ""
 }
 
-func verifyCheckpointIndex(ctx context.Context, sink Sink, chainID string, fromSeq uint64, hashes, types map[uint64]string, rep *Report) error {
-	idx, err := sink.List(ctx, CheckpointPrefix(chainID), "")
-	if err != nil {
-		return fmt.Errorf("audit: list checkpoints: %w", err)
-	}
+func verifyCheckpointIndex(ctx context.Context, sink Sink, idx []ObjectInfo, fromSeq uint64, hashes, types map[uint64]string, rep *Report) error {
 	for _, o := range idx {
 		seq, err := SeqFromKey(o.Key)
 		if err != nil {
