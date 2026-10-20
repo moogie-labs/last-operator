@@ -40,6 +40,7 @@
     - `allowed` holds when every policy layer has `allowAutoModes.<key>: true`. The layers are `OperatorConfig.spec.defaults` and every IntentPolicy in the namespace.
     - `policyMode` is Manual if any IntentPolicy sets Manual. Otherwise it is Auto if the defaults or any IntentPolicy set Auto. Otherwise it is Manual.
     - The effective mode is Auto only when `allowed` holds and either the Intent sets Auto, or the Intent sets nothing and `policyMode` is Auto. An Intent that sets Manual always gets Manual.
+    - A Manual set by any IntentPolicy is final: the Intent cannot loosen it, even when every layer allows Auto. The Intent's Auto can loosen only the defaults layer's Manual (main spec §6: each layer only tightens the one above it). *(Amended during Task 1's review.)*
   - **R2. Auto authorization in the gateway.** In BeginPhase, when the stage's effective mode is Auto and the plan is within D9's limits:
     - the phase is authorized with `audit.Authorization{Kind: "auto", Name: "<key>"}`, and no `approval.observed` is written;
     - a Deny for the subject (UID-bound, not stale) still refuses, as today;
