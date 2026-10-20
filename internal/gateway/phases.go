@@ -528,8 +528,9 @@ const (
 )
 
 // checkApprover refuses an Approve that the operator or a gateway-namespace
-// ServiceAccount gave: neither may authorize what the operator runs. The
-// refusal is audited through d.
+// ServiceAccount gave: neither may authorize what the operator runs. BeginPhase
+// and RunCommand's per-step re-check both use it, so the refusals cannot drift
+// apart. The refusal is audited through d.
 func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval) error {
 	switch {
 	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:

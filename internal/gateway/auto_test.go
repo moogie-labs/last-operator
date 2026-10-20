@@ -528,3 +528,37 @@ func TestAnAutoPhaseStopsWhenItsIntentIsRecreated(t *testing.T) {
 	env.wantDenied(err, codes.PermissionDenied)
 	wantNoCommandStart(t, env, before)
 }
+
+func TestAnApprovalPhaseRefusesAStepWhoseOnlyApproverIsTheOperator(t *testing.T) {
+	for _, by := range []string{testOperator, "system:serviceaccount:" + ns + ":anything"} {
+		t.Run(by, func(t *testing.T) {
+			in := intentWithPlan(t, twoSteps())
+			h := in.Status.Plan.Hash
+			original := approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver)
+			env := newProviderEnv(t, in, original)
+			if _, err := env.begin(h); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.run(h, twoSteps()[0]); err != nil {
+				t.Fatal(err)
+			}
+			// The human's Approve goes; only one the gateway never accepts is left.
+			if err := env.crd.Delete(env.ctx, original); err != nil {
+				t.Fatal(err)
+			}
+			env.approve(approvalFor("self", h, lastv1alpha1.DecisionApprove, by))
+			before := len(env.entries())
+			_, err := env.run(h, argvStep("s2", "echo", "Namespace"))
+			env.wantDenied(err, codes.PermissionDenied)
+			if !strings.Contains(err.Error(), "approval self names") {
+				t.Fatalf("RunCommand = %v, want the approver refused", err)
+			}
+			wantNoCommandStart(t, env, before)
+			if p := env.g.phases.get(envKey); p == nil || !p.failed {
+				t.Fatal("the phase is not failed")
+			}
+			_, err = env.end(h, true)
+			env.wantDenied(err, codes.FailedPrecondition)
+		})
+	}
+}

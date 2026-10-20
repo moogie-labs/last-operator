@@ -174,9 +174,10 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 // authorized the phase no longer stands. A Deny for the subject always refuses.
 // An Auto phase passes while its stage is still Auto for the same Intent, from
 // layers, which the caller read for this step; D9's limits held at BeginPhase
-// and do not change within the phase. Once the stage is no longer Auto, an Auto
-// phase needs an Approve, from neither the operator nor a gateway-namespace
-// ServiceAccount, as BeginPhase would. An approval phase needs an Approve.
+// and do not change within the phase. An approval phase, and an Auto phase
+// whose stage is no longer Auto, need an Approve that passes checkApprover, as
+// at BeginPhase: from neither the operator nor a gateway-namespace
+// ServiceAccount.
 func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers policyLayers, p *phase, ns, name string) error {
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
@@ -207,11 +208,10 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 		}
 		return d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
 	}
-	if auto {
-		if err := g.checkApprover(d, approval); err != nil {
-			p.failed = true
-			return err
-		}
+	// The same approver refusals as BeginPhase, for either kind of phase.
+	if err := g.checkApprover(d, approval); err != nil {
+		p.failed = true
+		return err
 	}
 	return nil
 }
