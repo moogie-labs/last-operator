@@ -8,7 +8,7 @@ Design: [`docs/superpowers/specs/2026-09-26-last-operator-design.md`](docs/super
 OpenAI-compatible model, asks clarifying questions, runs approved discovery
 commands, and executes approved plans in sandbox pods. Every action goes
 through the gateway, which records it in a write-once audit log. Image builds,
-day-2 changes, allow rules and rule suggestions arrive in M4–M7.
+allow rules and rule suggestions arrive in M4–M7.
 
 ## What works today
 
@@ -23,6 +23,8 @@ day-2 changes, allow rules and rule suggestions arrive in M4–M7.
 - **Intent identity, approvals and Delete.** Approvals are bound to the Intent's
   UID, and `kubectl delete intent` tears down what the Intent created, behind a
   finalizer and your approval.
+- **Day 2.** Editing an executed Intent plans an Update, and drift plans a
+  Remediate, each behind your approval.
 - `kubectl last audit verify | log | conformance`.
 
 ## Building the CLI
@@ -111,6 +113,36 @@ teardown completes:
 Removing the finalizer by hand lets the Intent go without a teardown. What it
 created stays in the world.
 
+## Editing an Intent and drift
+
+An Intent that has executed is not frozen.
+
+- **Edit it.** Change `spec.request` or `spec.answers` of a Ready, Drifted or
+  Failed Intent (`kubectl edit intent web -n team-x`) and the operator plans an
+  **Update**. The model sees the plan the Intent executed, read from the audit
+  log, and the new request. `kubectl last plan web -n team-x` shows it as
+  `(stage Update)`; approve it as usual. When it succeeds, the gateway deletes
+  the ManagedResources the Update dropped, each audited as
+  `managedresource.deleted`, and the Intent runs its probes and returns to Ready.
+  The Update's own steps must remove the real objects of a dropped resource.
+- **Drift.** A scheduled probe that fails moves the Intent to `Drifted`. The
+  operator runs the probes again to confirm. If they all pass, the Intent goes
+  back to Ready with a Warning `DriftCleared` event and nothing to approve.
+  Otherwise the model plans a **Remediate** that repairs what the executed plan
+  manages, without changing it, and the Intent waits in `AwaitingApproval` for
+  stage Remediate. A Remediate plan carries a nonce, so a repeat of the same
+  repair after the next drift needs a new approval. Once approved it runs as
+  `Remediating`, then `Verifying`, then Ready.
+- **Limits.** `status.remediations` counts consecutive remediations. At 3, the
+  next drift fails the Intent with `RemediationFailed`; a scheduled probe run
+  in which every probe passes resets the count. Editing the spec while a
+  remediation is in flight abandons it and plans an Update.
+- **Approving.** `approve` and `deny` act only while the Intent is
+  `AwaitingApproval`: during planning, `status.plan` is still the previous plan
+  and is never approvable. A plan that carries a nonce is shown as
+  `(stage Remediate)`. After a `DriftCleared` return the plan shown is the
+  executed one, labelled `(executed plan)`.
+
 ## Upgrading to M5a
 
 - **Approvals name the Intent's UID now.** An IntentApproval made before M5a has
@@ -122,6 +154,14 @@ created stays in the world.
 - **Older Intents have no finalizer.** An Intent created before M5a is not
   torn down when you delete it; what it created stays. To have one torn down,
   recreate it under M5a.
+
+## Upgrading to M5b
+
+- **Edits start an Update.** An Intent edited while Ready under an older
+  operator, whose edit that operator ignored, starts an Update on the first
+  reconcile after the upgrade. Review and approve it, or set `spec.request` back.
+- **Use a `kubectl last` as new as the operator.** Older plugins refuse a
+  Remediate plan, which they cannot approve.
 
 ## Demo against Claude (opt-in)
 

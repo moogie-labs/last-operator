@@ -318,6 +318,7 @@ status:
     reason: "Find the cluster's default IngressClass"
   plan:
     hash: "sha256:…"
+    nonce: "…"                   # Remediate plans only: 32 lowercase hex, part of the hash (§8.2)
     summary: "Deployment (2 replicas nginx), Service (ClusterIP)"
     steps: [ … §8.1 … ]
     resources: [ … ManagedResource specs incl. probes … ]
@@ -1054,8 +1055,15 @@ probes:
   same provider set, egress set, and image run in a single sandbox pod:
   one **probe run**. (Grouping by egress as well keeps a probe from
   receiving network access granted only to its neighbours.)
-- If an assertion fails, `InSync=False`, the Intent moves to `Drifted`,
-  and the LLM builds a remediation plan.
+- If an assertion fails, `InSync=False` and the Intent moves to `Drifted`.
+  The operator then runs the probes once more to confirm. If every probe
+  passes, the Intent returns to Ready with a Warning `DriftCleared` event
+  and nothing is planned. Otherwise the LLM builds a remediation plan,
+  which needs its own approval for stage Remediate (§7). A remediation
+  that still leaves a probe failing counts toward the cap of 3 in
+  `status.remediations`, after which the Intent fails with
+  `RemediationFailed`; a scheduled run in which every probe passes resets
+  the count.
 
 ### 10.1 Scheduling
 
