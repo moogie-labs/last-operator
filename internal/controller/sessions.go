@@ -143,17 +143,11 @@ var errBadPolicy = errors.New("the namespace's effective policy is invalid")
 // only tells the model. It reads uncached, so a policy edited just before a
 // session starts is current.
 func (r *IntentReconciler) environment(ctx context.Context, ns string) (agent.Environment, error) {
-	op := &lastv1alpha1.OperatorConfig{}
-	if err := r.Reader.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
-		op = nil
-	} else if err != nil {
+	l, err := r.readLayers(ctx, ns)
+	if err != nil {
 		return agent.Environment{}, err
 	}
-	var policies lastv1alpha1.IntentPolicyList
-	if err := r.Reader.List(ctx, &policies, client.InNamespace(ns)); err != nil {
-		return agent.Environment{}, err
-	}
-	eff, err := policy.Resolve(op, policies.Items)
+	eff, err := policy.Resolve(l.op, l.policies)
 	if err != nil {
 		return agent.Environment{}, fmt.Errorf("%w: %v", errBadPolicy, err)
 	}
@@ -169,6 +163,38 @@ func (r *IntentReconciler) environment(ctx context.Context, ns string) (agent.En
 		}
 	}
 	return env, nil
+}
+
+// layers are the policy layers a namespace's settings resolve across (main
+// spec §6): the OperatorConfig, nil when there is none, and the namespace's
+// IntentPolicies.
+type layers struct {
+	op       *lastv1alpha1.OperatorConfig
+	policies []lastv1alpha1.IntentPolicy
+}
+
+// readLayers reads the namespace's policy layers uncached, so a policy edited
+// just before is current.
+func (r *IntentReconciler) readLayers(ctx context.Context, ns string) (layers, error) {
+	op := &lastv1alpha1.OperatorConfig{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
+		op = nil
+	} else if err != nil {
+		return layers{}, err
+	}
+	var policies lastv1alpha1.IntentPolicyList
+	if err := r.Reader.List(ctx, &policies, client.InNamespace(ns)); err != nil {
+		return layers{}, err
+	}
+	return layers{op: op, policies: policies.Items}, nil
+}
+
+// modes resolves the Intent's effective mode for each stage key across the
+// layers and its spec.modes (main spec §6). The gateway resolves them itself
+// and decides: the operator only shows them in status.effectiveModes and, for
+// an Auto stage, does not wait for an approval before it asks the gateway.
+func (l layers) modes(in *lastv1alpha1.Intent) policy.EffectiveModes {
+	return policy.Modes(l.op, l.policies, in.Spec.Modes)
 }
 
 // pendingTurn returns the user turn the Intent's state owes the model (M3 spec

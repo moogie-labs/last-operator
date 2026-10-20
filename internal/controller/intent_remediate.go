@@ -35,11 +35,16 @@ const msgSpecChanged = "Aborted: the spec changed"
 // (driftCleared). It keeps observedGeneration, so a spec edit made meanwhile
 // still plans an Update, and it keeps status.plan, whose resources are the
 // executed plan's: the confirming probe run is recorded against them, and
-// probes keep following them if the drift has cleared.
+// probes keep following them if the drift has cleared. The write shows the
+// Intent's effective modes in status.effectiveModes.
 func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if n := in.Status.Remediations; n >= maxRemediations {
 		return ctrl.Result{}, r.fail(ctx, in, ReasonRemediationFailed,
 			fmt.Sprintf("The Intent drifted again after %d consecutive remediations%s", n, specEditHint(in)))
+	}
+	l, err := r.readLayers(ctx, in.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	r.sessions.drop(client.ObjectKeyFromObject(in))
 	gen, capped := in.Generation, false
@@ -54,6 +59,7 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 			return
 		}
 		in.Status.Remediations++
+		in.Status.EffectiveModes = l.modes(in).Status()
 		resetSession(in, lastv1alpha1.StageRemediate, "")
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Confirming the drift before asking the LLM for a Remediate plan")
 	}); err != nil || !capped {

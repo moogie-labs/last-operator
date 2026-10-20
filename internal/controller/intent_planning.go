@@ -49,6 +49,7 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
+// The write shows the Intent's effective modes in status.effectiveModes.
 func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage,
 	feedback string) (ctrl.Result, error) {
 	if !in.DeletionTimestamp.IsZero() {
@@ -66,7 +67,12 @@ func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.In
 			return ctrl.Result{}, err // the audit log could not be read: retried, never guessed
 		}
 	}
+	l, err := r.readLayers(ctx, in.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		in.Status.EffectiveModes = l.modes(in).Status()
 		if stage != lastv1alpha1.StageRemediate {
 			if in.Generation != in.Status.ObservedGeneration {
 				in.Status.Remediations = 0
@@ -253,7 +259,18 @@ func (r *IntentReconciler) turnCheck(ctx context.Context, in *lastv1alpha1.Inten
 // session's stage throughout (ruling R4): the phase and status.pendingCommand
 // mark a discovery command, whose approval is for stage Discovery. The
 // conversation stays in memory until a plan ends the session.
+//
+// When the Intent's effective mode for the stage is Auto, record does not wait
+// for an approval: a plan moves straight to the phase that runs it, and a
+// command is marked ReasonRunningDiscovery, which runs it. This is the only
+// place the operator skips the wait; the gateway still decides, and if it needs
+// an approval the Intent waits for one (needsApproval). The write also shows
+// the effective modes in status.effectiveModes.
 func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, turn agent.Turn, conv agent.Conversation, session int64) error {
+	l, err := r.readLayers(ctx, in.Namespace)
+	if err != nil {
+		return err // transient: the model is asked again
+	}
 	subject := ""
 	var pending *lastv1alpha1.PendingCommand
 	switch turn.Kind {
@@ -271,12 +288,14 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 	}
 	gen, prev, stage := in.Generation, in.Status.PlanningSessionSeq, planStage(in)
 	applied := false
-	err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+	err = r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		applied = in.Generation == gen && in.Status.Phase == lastv1alpha1.PhasePlanning && in.Status.PlanningSessionSeq == prev &&
 			planStage(in) == stage
 		if !applied {
 			return // the spec changed while planning; the next reconcile plans again
 		}
+		modes := l.modes(in)
+		in.Status.EffectiveModes = modes.Status()
 		in.Status.PlanningSessionSeq = session
 		if in.Status.ObservedRequestHash == "" {
 			// An Intent an M2 operator left in Planning; clarify would discard
@@ -291,6 +310,10 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			in.Status.Stage = stage
 			in.Status.Plan = turn.Plan
 			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionTrue, ReasonPlanWritten, "Plan "+subject)
+			if modes.For(stage) == lastv1alpha1.ModeAuto {
+				setRunning(in, stage, "Running plan "+subject+" without approval (Auto)")
+				break
+			}
 			setPhase(in, lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval,
 				"Waiting for an IntentApproval of plan "+subject+" for stage "+string(stage))
 		case agent.KindQuestions:
@@ -299,6 +322,11 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 				fmt.Sprintf("Waiting for spec.answers to answer %d questions", len(turn.Questions)))
 		case agent.KindCommand:
 			in.Status.PendingCommand = pending
+			if modes.For(lastv1alpha1.StageDiscovery) == lastv1alpha1.ModeAuto {
+				setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonRunningDiscovery,
+					"Running discovery command "+subject+" without approval (Auto)")
+				break
+			}
 			setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonAwaitingDiscoveryApproval,
 				"Waiting for an IntentApproval of discovery command "+subject+" for stage Discovery")
 		}
@@ -420,14 +448,30 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 		}
 		switch stage {
 		case lastv1alpha1.StageDelete:
-			setPhase(in, lastv1alpha1.PhaseTearingDown, ReasonTearingDown, "Running teardown plan "+subject)
-			return
+			setRunning(in, stage, "Running teardown plan "+subject)
 		case lastv1alpha1.StageRemediate:
-			setPhase(in, lastv1alpha1.PhaseRemediating, ReasonRemediating, "Running Remediate plan "+subject)
-			return
+			setRunning(in, stage, "Running Remediate plan "+subject)
+		default:
+			setRunning(in, stage, "Running plan "+subject)
 		}
-		setPhase(in, lastv1alpha1.PhaseExecuting, ReasonExecuting, "Running plan "+subject)
 	})
+}
+
+// runningPhase returns the phase that runs a plan of stage, and its Ready reason.
+func runningPhase(stage lastv1alpha1.Stage) (lastv1alpha1.Phase, string) {
+	switch stage {
+	case lastv1alpha1.StageDelete:
+		return lastv1alpha1.PhaseTearingDown, ReasonTearingDown
+	case lastv1alpha1.StageRemediate:
+		return lastv1alpha1.PhaseRemediating, ReasonRemediating
+	}
+	return lastv1alpha1.PhaseExecuting, ReasonExecuting
+}
+
+// setRunning moves the Intent to the phase that runs its plan of stage.
+func setRunning(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, msg string) {
+	p, reason := runningPhase(stage)
+	setPhase(in, p, reason, msg)
 }
 
 // decision reads the IntentApprovals of subject for the Intent and stage. The

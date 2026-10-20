@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -17,9 +18,9 @@ import (
 )
 
 // awaitDiscovery waits for an IntentApproval of the pending discovery command
-// and runs it as a one-step Discovery phase (M3 spec §3.4, §4.2). However it
-// ends, with a result, a denial or a refusal, the model hears about it in
-// Planning.
+// and runs it as a one-step Discovery phase (M3 spec §3.4, §4.2). A command
+// record found Auto (autoDiscovery) runs without waiting. However it ends,
+// with a result, a denial or a refusal, the model hears about it in Planning.
 func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	pc := in.Status.PendingCommand
 	if pc != nil && checkpoint(in) == ReasonPhaseOpen {
@@ -38,6 +39,9 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 		}
 		return r.startPlanning(ctx, in, "")
 	}
+	if autoDiscovery(in) {
+		return ctrl.Result{}, r.runDiscovery(ctx, in)
+	}
 	approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
 	switch {
 	case err != nil:
@@ -50,30 +54,41 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 	return ctrl.Result{}, r.runDiscovery(ctx, in)
 }
 
-// endApprovedPhase ends the pending command's phase, if it is approved, before
-// a spec edit or a deletion discards the command; why says which. An earlier
-// attempt may have opened the phase and stopped before recording it; nothing
-// else would ever end it, and the gateway opens no other phase for the Intent
-// while it is open. An unapproved command never opened a phase.
+// endApprovedPhase ends the pending command's phase, if it is approved or runs
+// in Auto, before a spec edit or a deletion discards the command; why says
+// which. An earlier attempt may have opened the phase and stopped before
+// recording it; nothing else would ever end it, and the gateway opens no other
+// phase for the Intent while it is open. Any other command never opened a phase.
 func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
 	pc := in.Status.PendingCommand
 	if pc == nil {
 		return nil
 	}
-	approved, _, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
-	if err != nil || !approved {
-		return err
+	if !autoDiscovery(in) {
+		approved, _, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
+		if err != nil || !approved {
+			return err
+		}
 	}
-	err = r.endPhase(ctx, in, pc.Hash, false, why)
+	err := r.endPhase(ctx, in, pc.Hash, false, why)
 	if status.Code(err) == codes.FailedPrecondition {
 		return nil // no phase was open
 	}
 	return err
 }
 
-// runDiscovery runs the approved command as a one-step Discovery phase. A
-// command that exits non-zero still completes the phase: the model reads its
-// result.
+// autoDiscovery reports whether the pending discovery command runs without
+// waiting for an approval: record found the Discovery stage Auto. A command the
+// gateway then refused without an approval waits for one (needsApproval).
+func autoDiscovery(in *lastv1alpha1.Intent) bool {
+	c := meta.FindStatusCondition(in.Status.Conditions, CondReady)
+	return c != nil && c.Reason == ReasonRunningDiscovery
+}
+
+// runDiscovery runs the approved, or Auto, command as a one-step Discovery
+// phase. A command that exits non-zero still completes the phase: the model
+// reads its result. If the gateway needs an approval to open it, the Intent
+// waits for one (needsApproval).
 func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.Intent) error {
 	subject := in.Status.PendingCommand.Hash
 	raw, err := json.Marshal(in.Status.PendingCommand.Command)
@@ -91,6 +106,8 @@ func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.In
 			return eerr
 		}
 		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn(why+"; ask again if you still need it"))
+	case gatewayv1.NeedsApproval(err):
+		return r.needsApproval(ctx, in, err)
 	case terminal(err):
 		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn("the gateway refused it: "+describe(err)))
 	case err != nil:

@@ -82,6 +82,8 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 	switch {
 	case tornDown(in, err):
 		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
+	case gatewayv1.NeedsApproval(err):
+		return ctrl.Result{}, r.needsApproval(ctx, in, err)
 	case status.Code(err) == codes.AlreadyExists:
 		return r.abandonPhase(ctx, in, "A phase from an earlier attempt was still open")
 	case terminal(err):
@@ -96,6 +98,48 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 		return ctrl.Result{}, err // the next attempt finds the phase open (AlreadyExists) and abandons it
 	}
 	return r.runSteps(ctx, in)
+}
+
+// msgNeedsApproval starts the message of an Intent that waits for the approval
+// the gateway needs; the gateway's refusal follows.
+const msgNeedsApproval = "The gateway needs an approval for this plan: "
+
+// needsApproval makes an Intent wait for an approval the gateway needs: it
+// refused to open the phase of an Auto stage without one, because the plan is
+// outside Auto mode's limits (design D9). Nothing ran. A plan moves to
+// AwaitingApproval, and a discovery command stays in AwaitingDiscoveryApproval
+// without ReasonRunningDiscovery. From there the Intent waits for an
+// IntentApproval as in Manual mode, even though its own modes say Auto: only
+// record skips the wait, so the operator never asks the gateway again unapproved.
+func (r *IntentReconciler) needsApproval(ctx context.Context, in *lastv1alpha1.Intent, err error) error {
+	from, subject := in.Status.Phase, subjectOf(in)
+	to, reason := lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval
+	if from == lastv1alpha1.PhaseAwaitingDiscoveryApproval {
+		to, reason = from, ReasonAwaitingDiscoveryApproval
+	}
+	logf.FromContext(ctx).Info("Waiting for the IntentApproval the gateway needs", "subject", subject, "stage", in.Status.Stage)
+	return r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		// A conflict retry re-reads the Intent: move only the subject the gateway refused.
+		if in.Status.Phase != from || subjectOf(in) != subject {
+			return
+		}
+		setPhase(in, to, reason, msgNeedsApproval+describe(err))
+	})
+}
+
+// subjectOf returns what the Intent's phase is about: the pending discovery
+// command in AwaitingDiscoveryApproval, the plan otherwise, or "" for neither.
+func subjectOf(in *lastv1alpha1.Intent) string {
+	if in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval {
+		if pc := in.Status.PendingCommand; pc != nil {
+			return pc.Hash
+		}
+		return ""
+	}
+	if p := in.Status.Plan; p != nil {
+		return p.Hash
+	}
+	return ""
 }
 
 // runSteps runs every step in order, resolving ${steps…} references from the

@@ -125,10 +125,16 @@ func (r *IntentReconciler) abortPhase(ctx context.Context, in *lastv1alpha1.Inte
 
 // startDelete starts Delete planning: the model orders the teardown commands.
 // It records the retry annotation's value, so that only a later change plans
-// the teardown again.
+// the teardown again, and shows the Intent's effective modes in
+// status.effectiveModes.
 func (r *IntentReconciler) startDelete(ctx context.Context, in *lastv1alpha1.Intent, feedback string) error {
+	l, err := r.readLayers(ctx, in.Namespace)
+	if err != nil {
+		return err
+	}
 	r.sessions.drop(client.ObjectKeyFromObject(in))
 	return r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		in.Status.EffectiveModes = l.modes(in).Status()
 		in.Status.Stage = lastv1alpha1.StageDelete
 		in.Status.ObservedGeneration = in.Generation
 		in.Status.ObservedRetry = in.Annotations[lastv1alpha1.AnnotationRetry]

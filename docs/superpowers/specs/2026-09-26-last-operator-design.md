@@ -553,9 +553,51 @@ Pending → Clarifying ⇄ (user answers)
   deleted      ──► finalizer → Planning (stage=Delete) → AwaitingApproval* → TearingDown → removed
   any failure  ──► Failed (reason in conditions; retried with backoff or on spec edit)
 
-  * skipped when the effective mode for that stage is Auto,
+  * skipped when the effective mode for that stage is Auto (see Auto modes
+    below; the gateway may still need an approval),
     or when every command involved matches an allow rule for that stage (§9.3)
 ```
+
+- **Auto modes.** The operator resolves the Intent's effective mode for
+  each stage key (§6) from fresh reads of the `OperatorConfig`, the
+  namespace's `IntentPolicy`s and `spec.modes`, and shows it in
+  `status.effectiveModes`. It writes them when a planning session starts
+  (Create, Update, Remediate or Delete) and when it records a model turn.
+  They are display data and a hint: the gateway resolves the mode itself
+  and decides (§8.3).
+  - **Skipped waits.** When the operator records a plan whose stage is
+    Auto, the Intent moves straight to the phase that runs it
+    (`Executing`, `Remediating` or `TearingDown`), with the message
+    "Running plan <hash> without approval (Auto)". When it records a
+    discovery command and the Discovery stage is Auto, the command runs at
+    once as its one-step Discovery phase, as an approved one would; the
+    Intent shows `AwaitingDiscoveryApproval` with reason
+    `RunningDiscovery` while it does. A replan after a failed step is
+    recorded the same way, so in Auto it runs without approval too.
+  - **When the gateway needs an approval.** `BeginPhase` refuses an Auto
+    plan outside Auto's limits (a Remediate step the executed plan does
+    not have, or a Delete that is not a permutation of its teardown) with
+    `gatewayv1.MsgNeedsApproval`. The operator then waits for an approval:
+    a plan moves to `AwaitingApproval`, a discovery command stays in
+    `AwaitingDiscoveryApproval` with reason `AwaitingDiscoveryApproval`,
+    and the message reads "The gateway needs an approval for this plan:
+    <the gateway's reason>". Nothing ran, and the Intent does not fail.
+    An `IntentApproval` then runs it as in Manual mode.
+  - **No bouncing.** The operator skips the wait only when it records a
+    turn. An Intent in `AwaitingApproval`, or waiting for a discovery
+    approval, waits for an `IntentApproval` even when its own modes say
+    Auto, so a refusal never turns into a loop of `BeginPhase` calls. A
+    plan that was waiting when a policy turned its stage to Auto still
+    waits; a new session picks the mode up.
+  - **Auto withdrawn mid-phase.** If a policy edit turns the stage to
+    Manual while an Auto phase runs, the gateway refuses the next step
+    ("auto authorization withdrawn: …") unless an `Approve` stands. The
+    operator treats it as any refused step: the phase ends as failed and
+    the Intent fails with `ExecutionFailed`.
+  - **Remediate in Auto.** The Remediate session's first message tells
+    the model to copy a step of the executed plan exactly, `reason`
+    included, to re-run it: any other step needs an approval, even in
+    Auto mode.
 
 - **Clarifying.** The agent may ask 1–5 questions instead of acting.
   They appear in `status.questions`; answers go in `spec.answers`. Once
@@ -573,8 +615,9 @@ Pending → Clarifying ⇄ (user answers)
     single-command approval subject: stage `Discovery`, subject
     `sha256(canonical {command, nonce})`, so each approval is
     single-use. The Intent shows `phase: AwaitingDiscoveryApproval`
-    with `status.pendingCommand`. Once approved, the command runs as a
-    one-step Discovery phase. Its result, a denial, or the gateway's
+    with `status.pendingCommand`. Once approved, or at once when the
+    Discovery stage is Auto, the command runs as a one-step Discovery
+    phase. Its result, a denial, or the gateway's
     refusal goes back to the model.
   - **`status.stage` during discovery.** It keeps the session's stage
     (`Create`, `Update` or `Remediate`) while a command is pending. The phase and
@@ -586,7 +629,8 @@ Pending → Clarifying ⇄ (user answers)
   - **Caps.** A session allows at most 20 model answers and 10
     discovery commands. Reaching either fails the Intent with
     `PlanningFailed` (M3 design D7, §4).
-- **AwaitingApproval.** Waits for a matching `IntentApproval`.
+- **AwaitingApproval.** Waits for a matching `IntentApproval`. An Auto
+  plan skips it, unless the gateway needs an approval (Auto modes, above).
 - **Executing.** Runs the plan's steps deterministically (§8.3).
 - **Verifying.** Runs every probe once; all must pass. A failure here
   marks the Intent `Failed` with the probe details, so bad probes
@@ -652,7 +696,10 @@ Pending → Clarifying ⇄ (user answers)
     gateway refuses a Remediate whose resources differ from the executed
     plan's.
   - **Approval and running.** The plan awaits an `IntentApproval` for
-    stage `Remediate`, and runs in phase `Remediating`. It creates no
+    stage `Remediate`, and runs in phase `Remediating`. With `reconcile:
+    Auto` it runs without one when every step re-runs a step of the
+    executed plan exactly; a plan with any other step waits for an
+    approval (Auto modes, above). It creates no
     ManagedResources and writes no output Secrets, and it never becomes
     the executed plan. A step that exits non-zero plans the Remediate
     again, with the failure as context; that replan is not counted
@@ -694,9 +741,12 @@ Pending → Clarifying ⇄ (user answers)
     checks this before recording it, and sends a correction for a
     reordered-wrongly, added or dropped step. The model orders the
     commands; it cannot change them.
-  - **Approval.** The plan awaits an `IntentApproval` for stage Delete.
-    The gateway authorizes Delete by approval only, never by allow rule
-    or Auto mode. The phase is `TearingDown` while it runs.
+  - **Approval.** The plan awaits an `IntentApproval` for stage Delete,
+    never authorized by an allow rule. With `delete: Auto` it runs without
+    one when its steps are a permutation of the executed plan's teardown
+    commands; with no executed plan in the gateway's record, it waits for
+    an approval (Auto modes, above). The phase is `TearingDown` while it
+    runs.
   - **End.** On success the operator releases the finalizer. The
     ManagedResources go by owner-reference garbage collection, and so do
     their output Secrets. The gateway drops the Intent's record.
@@ -724,7 +774,8 @@ Pending → Clarifying ⇄ (user answers)
 
   A spec edit retries a failed Intent, planning a Create or an Update
   as above. Automatic retry with backoff arrives with Auto modes (M5).
-  Until then every replan needs a fresh approval.
+  In Manual mode every replan needs a fresh approval; in Auto mode a
+  replan runs as any Auto plan does.
 - **Operator restarts during Executing.** Step results live only in the
   operator's memory and the gateway's record, so the operator never
   resumes a phase. An `Executed` condition checkpoints the phase:

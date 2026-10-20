@@ -344,7 +344,9 @@ func RemediateMessage(r Remediation) (string, error) {
 	}
 	b.WriteString("\nPlan a Remediate: steps that bring what the executed plan manages back to its desired state. " +
 		"Answer with \"resources\": []; what is managed does not change. " +
-		"You may run discovery commands; you may not ask questions.\n")
+		"You may run discovery commands; you may not ask questions. " +
+		"To re-run a step of the executed plan, copy it exactly, \"reason\" included; " +
+		"any other step needs an approval, even in Auto mode.\n")
 	return b.String(), nil
 }
 

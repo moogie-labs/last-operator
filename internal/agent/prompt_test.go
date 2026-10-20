@@ -140,7 +140,9 @@ func TestRemediateMessageNeverAsksForResources(t *testing.T) {
 	for _, want := range []string{
 		"Plan a Remediate: steps that bring what the executed plan manages back to its desired state. " +
 			`Answer with "resources": []; what is managed does not change. ` +
-			"You may run discovery commands; you may not ask questions.",
+			"You may run discovery commands; you may not ask questions. " +
+			`To re-run a step of the executed plan, copy it exactly, "reason" included; ` +
+			"any other step needs an approval, even in Auto mode.",
 		"resource 1", timedOut, "step s1 exited 1",
 	} {
 		if !strings.Contains(msg, want) {

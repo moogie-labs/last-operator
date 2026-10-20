@@ -51,6 +51,11 @@ const (
 	ReasonDriftCleared = "DriftCleared"
 )
 
+// ReasonRunningDiscovery is the Ready reason of a discovery command, in phase
+// AwaitingDiscoveryApproval, that runs without waiting for an approval because
+// record found the Discovery stage Auto.
+const ReasonRunningDiscovery = "RunningDiscovery"
+
 // Event reasons of a teardown.
 const (
 	// ReasonExecutedPlanNotFound warns that the audit log no longer holds the
