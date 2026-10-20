@@ -7,6 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
@@ -70,34 +71,17 @@ var _ = Describe("Intent verification", func() {
 	})
 
 	It("ignores a ManagedResource that an earlier plan left out of sync", func() {
-		single := lastv1alpha1.ManagedResourceSpec{Description: "web server", Probes: []lastv1alpha1.Probe{probe("p1")}}
-		extra := lastv1alpha1.ManagedResourceSpec{Description: "cache", Probes: []lastv1alpha1.Probe{probe("p2")}}
-		gw.setScript(key, &script{failing: map[string]bool{"p2": true}, llm: func(req *gatewayv1.CallLLMRequest) (string, error) {
-			if revised(req) {
-				return answer(steps, single), nil
-			}
-			return answer(steps, single, extra), nil
-		}})
-		createIntent(key, "provision")
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
-		approve(key, lastv1alpha1.DecisionApprove)
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
-		Expect(readyReason(key)).To(Equal(ReasonVerificationFailed))
-		Expect(meta.IsStatusConditionFalse(getMR(key.Namespace, "web-1").Status.Conditions, CondInSync)).To(BeTrue())
-
-		editRequest(key, "provision v2")
-		Eventually(planHash(key)).Should(Equal(hashOf(steps, single)))
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
-		approve(key, lastv1alpha1.DecisionApprove)
+		run(&script{})
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+
+		// As one an Update dropped and the gateway has yet to delete.
+		stale := &lastv1alpha1.ManagedResource{ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: key.Namespace},
+			Spec: lastv1alpha1.ManagedResourceSpec{Description: "cache", IntentRef: &lastv1alpha1.LocalRef{Name: key.Name}}}
+		Expect(controllerutil.SetControllerReference(getIntent(key), stale, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, stale)).To(Succeed())
+		setInSync(key.Namespace, "web-1", metav1.ConditionFalse)
 		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		Expect(readyReason(key)).To(Equal(ReasonReady))
-
-		// The stale web-1 stays until the Delete stage, untouched by the new plan.
-		Expect(meta.IsStatusConditionFalse(getMR(key.Namespace, "web-1").Status.Conditions, CondInSync)).To(BeTrue())
-		mr := getMR(key.Namespace, "web-0")
-		Expect(meta.IsStatusConditionTrue(mr.Status.Conditions, CondInSync)).To(BeTrue())
-		Expect(mr.Status.Observed.Raw).To(MatchJSON(`{"probes":{"p1":{"passed":true,"exitCode":0}}}`))
 	})
 
 	It("clears an earlier plan's probe outcomes when a new plan rewrites a ManagedResource", func() {
@@ -118,7 +102,7 @@ var _ = Describe("Intent verification", func() {
 		editRequest(key, "provision v2")
 		Eventually(planHash(key)).Should(Equal(hashOf(steps, unprobed)))
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
-		approve(key, lastv1alpha1.DecisionApprove)
+		approveAs(key, lastv1alpha1.StageUpdate, lastv1alpha1.DecisionApprove) // the failed Create executed
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 
@@ -127,15 +111,5 @@ var _ = Describe("Intent verification", func() {
 		Expect(meta.FindStatusCondition(mr.Status.Conditions, CondInSync)).To(BeNil())
 		Expect(mr.Status.Observed).To(BeNil())
 		Expect(mr.Status.LastProbeTime).To(BeNil())
-	})
-
-	It("ignores a spec edit at Ready until the Update stage exists", func() {
-		run(&script{})
-		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
-		n := len(gw.calls(key))
-
-		editRequest(key, "something else")
-		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
-		Expect(gw.calls(key)).To(HaveLen(n))
 	})
 })

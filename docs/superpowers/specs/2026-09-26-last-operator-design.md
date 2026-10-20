@@ -567,6 +567,13 @@ Pending → Clarifying ⇄ (user answers)
     with `status.pendingCommand`. Once approved, the command runs as a
     one-step Discovery phase. Its result, a denial, or the gateway's
     refusal goes back to the model.
+  - **`status.stage` during discovery.** It keeps the session's stage
+    (`Create` or `Update`) while a command is pending. The phase and
+    `status.pendingCommand` mark the discovery, and the operator sends
+    stage `Discovery` to the gateway, and looks for approvals of it,
+    from them, never from `status.stage`. Operators before M5b set
+    `status.stage` to `Discovery` here; that value, like an empty one,
+    means `Create`.
   - **Caps.** A session allows at most 20 model answers and 10
     discovery commands. Reaching either fails the Intent with
     `PlanningFailed` (M3 design D7, §4).
@@ -575,6 +582,31 @@ Pending → Clarifying ⇄ (user answers)
 - **Verifying.** Runs every probe once; all must pass. A failure here
   marks the Intent `Failed` with the probe details, so bad probes
   surface at creation time instead of as false drift later.
+- **Update.** A spec edit (a new `generation`) starts a new planning
+  session from Ready, Drifted or Failed, and from AwaitingApproval of a
+  Create or Update plan.
+  - **Stage.** The operator chooses the session's stage before it
+    records the new session, from the audit log, never from status.
+    The executed plan, read as Delete reads it (below), means `Update`.
+    No executed plan (never executed, or a truncated index) means
+    `Create`, and so does a gateway without `QueryAudit`, which cannot
+    say. Any other error reading the audit log is retried, never
+    guessed.
+  - **First message.** It shows the executed plan's steps and
+    resources. The model plans steps that take the cluster from what
+    that plan created to what the request now asks. Its resources list
+    everything the Intent manages afterwards, and its steps remove the
+    real objects of any resource it drops. If the executed plan has
+    left the audit log by the time the session starts, the stage is
+    chosen again.
+  - **Approval** is for stage `Update`. An approval of the same plan
+    for stage `Create` authorizes nothing.
+  - **Executing** runs the plan as for a Create. A step that exits
+    non-zero plans the Update again, with the failure as context; the
+    executed plan is unchanged. At `EndPhase(Update, succeeded)` the
+    gateway makes the Update the executed plan and deletes the
+    ManagedResources it dropped, auditing each (§15). Verifying then
+    probes the new executed plan.
 - **Delete.** A finalizer, `last.moogie-labs.com/teardown`, is added
   before the first Create and holds the Intent until its teardown
   completes. A deletion overrides everything else: any open phase is
@@ -621,9 +653,9 @@ Pending → Clarifying ⇄ (user answers)
   - `VerificationFailed`
   - `TeardownFailed` (a Delete; retried with the annotation above)
 
-  A spec edit retries a failed Intent. Automatic retry with backoff
-  arrives with Auto modes (M5). Until then every replan needs a fresh
-  approval.
+  A spec edit retries a failed Intent, planning a Create or an Update
+  as above. Automatic retry with backoff arrives with Auto modes (M5).
+  Until then every replan needs a fresh approval.
 - **Operator restarts during Executing.** Step results live only in the
   operator's memory and the gateway's record, so the operator never
   resumes a phase. An `Executed` condition checkpoints the phase:

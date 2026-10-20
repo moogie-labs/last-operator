@@ -48,6 +48,31 @@ func TestPlanShowsThePendingCommandOrThePlan(t *testing.T) {
 	}
 }
 
+func TestPlanShowsThePlansStage(t *testing.T) {
+	for _, stage := range []lastv1alpha1.Stage{lastv1alpha1.StageUpdate, lastv1alpha1.StageDelete} {
+		d, out := depsFor(fakeClient(inStage(plannedIntent(), stage)), "")
+		if err := execute(d, "plan", webName); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"Plan " + h2 + " (stage " + string(stage) + ")\n",
+			"Approve: kubectl last approve web -n team-x --hash " + h2 + "\n"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("plan of stage %s lacks %q:\n%s", stage, want, out)
+			}
+		}
+	}
+}
+
+func TestPlanOffersNoDecisionOnAStageItCannotApprove(t *testing.T) {
+	d, out := depsFor(fakeClient(inStage(plannedIntent(), "Rename")), "")
+	if err := execute(d, "plan", webName); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "(stage Rename)") || strings.Contains(out.String(), "Approve:") {
+		t.Errorf("plan of an unknown stage:\n%s", out)
+	}
+}
+
 func TestPlanRefusesToShowAForgedSubject(t *testing.T) {
 	for _, in := range forgedIntents() {
 		stage, stated, _ := subjectOf(in)

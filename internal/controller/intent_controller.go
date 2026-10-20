@@ -94,6 +94,9 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	case lastv1alpha1.PhaseVerifying:
 		return r.verify(ctx, &in)
 	case lastv1alpha1.PhaseReady, lastv1alpha1.PhaseDrifted:
+		if in.Generation != in.Status.ObservedGeneration {
+			return r.startPlanning(ctx, &in, "") // a spec edit plans an Update
+		}
 		return r.followProbes(ctx, &in)
 	case lastv1alpha1.PhaseFailed:
 		if in.Generation != in.Status.ObservedGeneration {

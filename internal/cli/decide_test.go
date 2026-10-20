@@ -34,6 +34,12 @@ func plannedIntent() *lastv1alpha1.Intent {
 	})
 }
 
+// inStage sets the Intent's status.stage.
+func inStage(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) *lastv1alpha1.Intent {
+	in.Status.Stage = stage
+	return in
+}
+
 // hostile is the command a hostile operator runs under an approval of
 // something benign: it shows benign content under the hash of this.
 const hostile = "rm -rf /"
@@ -68,6 +74,9 @@ func TestApproveRecordsTheDisplayedSubjectAsTheUser(t *testing.T) {
 	}{
 		{pendingIntent(), lastv1alpha1.StageDiscovery, h1, "Discovery command " + h1},
 		{plannedIntent(), lastv1alpha1.StageCreate, h2, "Plan " + h2},
+		// status.stage keeps the session's stage while a command is pending (R4).
+		{inStage(pendingIntent(), lastv1alpha1.StageUpdate), lastv1alpha1.StageDiscovery, h1, "Discovery command " + h1},
+		{inStage(plannedIntent(), lastv1alpha1.StageUpdate), lastv1alpha1.StageUpdate, h2, "Plan " + h2 + " (stage Update)"},
 	} {
 		c := fakeClient(tc.in)
 		d, out := depsFor(c, "")

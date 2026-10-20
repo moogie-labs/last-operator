@@ -402,8 +402,9 @@ var _ = Describe("Intent planning", func() {
 		hash, _, err := plan.DiscoveryHash(pc.Command, pc.Nonce)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pc.Hash).To(Equal(hash))
-		Expect(in.Status.Stage).To(Equal(lastv1alpha1.StageDiscovery))
+		Expect(in.Status.Stage).To(Equal(lastv1alpha1.StageCreate), "status.stage keeps the session's stage (R4)")
 		Expect(readyReason(key)).To(Equal(ReasonAwaitingDiscoveryApproval))
+		Expect(readyCondition(key).Message).To(HaveSuffix("for stage Discovery"))
 	})
 })
 

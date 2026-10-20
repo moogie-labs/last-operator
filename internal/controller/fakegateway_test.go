@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 )
@@ -24,6 +27,7 @@ const (
 	endSucceeded = "EndPhase:succeeded"
 	endFailed    = "EndPhase:failed"
 	runS1        = "RunCommand:s1"
+	runS2        = "RunCommand:s2"
 	runProbes    = "RunProbes"
 	trueCmd      = "true"
 
@@ -78,9 +82,11 @@ type script struct {
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
 // phase rules the operator depends on (approval before BeginPhase, one open
 // phase, calls only within it, probes only of an executed plan, Delete only for
-// an Intent being deleted, nothing after a succeeded Delete) and records every
-// call per Intent. Its phase.begin and phase.end entries carry the gateway's
-// payloads, so agent.ExecutedPlan reads them.
+// an Intent being deleted, Update only of an executed plan, nothing after a
+// succeeded Delete) and records every call per Intent. Its phase.begin and
+// phase.end entries carry the gateway's payloads, so agent.ExecutedPlan reads
+// them. A succeeded Update becomes the executed plan and deletes the
+// ManagedResources it dropped, as the gateway does (ruling R1).
 type fakeGateway struct {
 	gatewayv1.GatewayServiceClient // unimplemented RPCs panic
 
@@ -97,6 +103,7 @@ type fakeGateway struct {
 	openBegin map[types.NamespacedName]uint64                       // phase.begin sequence number of the open phase
 	openUID   map[types.NamespacedName]types.UID                    // Intent UID the open phase belongs to
 	openSteps map[types.NamespacedName]int                          // steps of the open phase that succeeded
+	openKept  map[types.NamespacedName]int                          // resources of the open phase's plan
 	tornDown  map[types.NamespacedName]types.UID                    // Intent UID whose Delete succeeded
 	used      map[string]bool                                       // Discovery subjects already opened: they are single-use
 	executed  map[types.NamespacedName]string                       // hash of the last executed plan
@@ -109,7 +116,8 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		llmReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{}, argv: map[types.NamespacedName]map[string][]string{},
 		outputs: map[types.NamespacedName]map[string]map[string]string{}, open: map[types.NamespacedName]string{},
 		openStage: map[types.NamespacedName]string{}, openBegin: map[types.NamespacedName]uint64{},
-		openUID: map[types.NamespacedName]types.UID{}, openSteps: map[types.NamespacedName]int{}, tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
+		openUID: map[types.NamespacedName]types.UID{}, openSteps: map[types.NamespacedName]int{}, openKept: map[types.NamespacedName]int{},
+		tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{}}
 }
 
@@ -240,19 +248,24 @@ func (f *fakeGateway) pendingSubject(ctx context.Context, key types.NamespacedNa
 	return nil
 }
 
-// stageRule applies the gateway's Delete rules (Task 4): a Delete phase opens
-// only for an Intent being deleted and only for a plan without resources, such
-// an Intent opens no Create phase, and once its Delete succeeded it opens none.
+// stageRule applies the gateway's stage rules: a Delete phase opens only for
+// an Intent being deleted and only for a plan without resources, such an
+// Intent opens no other phase but Discovery, and once its Delete succeeded it
+// opens none. An Update or Remediate phase opens only for an Intent with an
+// executed plan. f.mu must be held.
 func (f *fakeGateway) stageRule(intent *lastv1alpha1.Intent, stage string) error {
-	deleting := intent.DeletionTimestamp != nil
+	key, deleting := client.ObjectKeyFromObject(intent), intent.DeletionTimestamp != nil
+	changes := stage == string(lastv1alpha1.StageUpdate) || stage == string(lastv1alpha1.StageRemediate)
 	switch {
-	case f.tornDown[client.ObjectKeyFromObject(intent)] == intent.UID:
+	case f.tornDown[key] == intent.UID:
 		return status.Error(codes.FailedPrecondition, gatewayv1.MsgTornDown)
 	case stage == string(lastv1alpha1.StageDelete) && !deleting:
 		return status.Error(codes.FailedPrecondition, "intent is not being deleted")
 	case stage == string(lastv1alpha1.StageDelete) && intent.Status.Plan != nil && len(intent.Status.Plan.Resources) > 0:
 		return status.Error(codes.FailedPrecondition, "a Delete plan has no resources")
-	case stage == string(lastv1alpha1.StageCreate) && deleting:
+	case changes && f.executed[key] == "":
+		return status.Error(codes.FailedPrecondition, "intent has no executed plan to "+strings.ToLower(stage))
+	case stage != string(lastv1alpha1.StageDelete) && stage != string(lastv1alpha1.StageDiscovery) && deleting:
 		return status.Error(codes.FailedPrecondition, "intent is being deleted; only a Delete or Discovery phase can open")
 	}
 	return nil
@@ -273,8 +286,9 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	if err := f.c.Get(ctx, key, &intent); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	payload := map[string]any{}
+	payload, kept := map[string]any{}, 0
 	if p := intent.Status.Plan; !discovery && p != nil {
+		kept = len(p.Resources)
 		canonical, err := plan.Canonical(plan.FromStatus(p))
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -305,7 +319,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	case !approved:
 		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
 	}
-	f.open[key], f.openStage[key], f.openUID[key] = subject, stage, intent.UID
+	f.open[key], f.openStage[key], f.openUID[key], f.openKept[key] = subject, stage, intent.UID, kept
 	f.openBegin[key] = f.appendAudit(key, "phase.begin", stage, subject, payload)
 	if discovery {
 		f.used[subject] = true
@@ -410,7 +424,7 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 		defer f.mu.Lock()
 		return nil, f.noOpenPhase(ctx, key)
 	}
-	stage, uid := f.openStage[key], f.openUID[key]
+	stage, uid, kept := f.openStage[key], f.openUID[key], f.openKept[key]
 	f.closePhase(key, outcome, in.GetReason())
 	switch {
 	case in.GetSucceeded() && stage == string(lastv1alpha1.StageDelete):
@@ -421,11 +435,43 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 		// A Discovery phase ran one inspection command; it never becomes the executed plan.
 		f.executed[key] = in.GetSubjectHash()
 	}
+	if in.GetSucceeded() && stage == string(lastv1alpha1.StageUpdate) {
+		if err := f.deleteStale(ctx, key, uid, kept, in.GetSubjectHash()); err != nil {
+			return nil, err
+		}
+	}
 	if s := f.scriptFor(key); s.loseEnd {
 		s.loseEnd = false
 		return nil, status.Error(codes.Unavailable, "the answer was lost")
 	}
 	return &gatewayv1.EndPhaseResponse{}, nil
+}
+
+// deleteStale deletes the ManagedResources a succeeded Update dropped, those the
+// Intent of uid controls named other than its first kept, and audits each as
+// managedresource.deleted, as the gateway does. Unlike the gateway, it does not
+// retry a failed delete. f.mu must be held.
+func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName, uid types.UID, kept int, subject string) error {
+	var list lastv1alpha1.ManagedResourceList
+	if err := f.c.List(ctx, &list, client.InNamespace(key.Namespace)); err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+	keep := map[string]bool{}
+	for i := range kept {
+		keep[lastv1alpha1.ManagedResourceName(key.Name, i)] = true
+	}
+	for i := range list.Items {
+		mr := &list.Items[i]
+		if owner := metav1.GetControllerOf(mr); owner == nil || owner.UID != uid || keep[mr.Name] {
+			continue
+		}
+		if err := f.c.Delete(ctx, mr, client.Preconditions{UID: &mr.UID}); client.IgnoreNotFound(err) != nil {
+			return status.Error(codes.Unavailable, err.Error())
+		}
+		f.appendAudit(key, audit.TypeManagedResourceDeleted, string(lastv1alpha1.StageUpdate), subject,
+			map[string]any{"managedResource": mr.Name, "uid": string(mr.UID)})
+	}
+	return nil
 }
 
 // closePhase ends the Intent's open phase with its phase.end entry. f.mu must be held.
@@ -437,6 +483,7 @@ func (f *fakeGateway) closePhase(key types.NamespacedName, outcome, reason strin
 	delete(f.openStage, key)
 	delete(f.openBegin, key)
 	delete(f.openUID, key)
+	delete(f.openKept, key)
 }
 
 func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequest, _ ...grpc.CallOption) (*gatewayv1.RunProbesResponse, error) {

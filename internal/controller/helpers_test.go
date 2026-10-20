@@ -218,13 +218,18 @@ func getMR(ns, name string) *lastv1alpha1.ManagedResource {
 	return &mr
 }
 
-// approve files a decision on the Intent's current plan.
+// approve files a decision on the Intent's current plan for stage Create.
 //
 //nolint:unparam // later tests deny
 func approve(key types.NamespacedName, decision lastv1alpha1.Decision) {
+	approveAs(key, lastv1alpha1.StageCreate, decision)
+}
+
+// approveAs files a decision on the Intent's current plan for stage.
+func approveAs(key types.NamespacedName, stage lastv1alpha1.Stage, decision lastv1alpha1.Decision) {
 	p := getIntent(key).Status.Plan
 	Expect(p).NotTo(BeNil())
-	createApproval(key, lastv1alpha1.StageCreate, p.Hash, decision)
+	createApproval(key, stage, p.Hash, decision)
 }
 
 // setInSync sets a ManagedResource's InSync condition, as a probe run would.

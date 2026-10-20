@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
@@ -28,7 +29,8 @@ const planTimeout = agent.MaxAttempts*agent.CallTimeout + time.Minute
 
 // startPlanning discards the current plan and planning session and starts a
 // new session for the current spec. feedback, when set, is a failure the new
-// plan must address.
+// plan must address. The session plans an Update once the Intent has an
+// executed plan, and a Create otherwise (sessionStage).
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
@@ -42,8 +44,12 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 	if !in.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil // deleted meanwhile: the next reconcile tears it down
 	}
+	stage, err := r.sessionStage(ctx, in)
+	if err != nil {
+		return ctrl.Result{}, err // the audit log could not be read: retried, never guessed
+	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		in.Status.Stage = lastv1alpha1.StageCreate
+		in.Status.Stage = stage
 		in.Status.ObservedGeneration = in.Generation
 		in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
 		in.Status.PlanningSessionSeq = 0
@@ -58,6 +64,27 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 		}
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM for a plan")
 	})
+}
+
+// sessionStage is the stage a new planning session plans for: Update when the
+// audit log holds the Intent's executed plan, Create when it does not (never
+// executed, or the index was truncated). The executed plan is never read from
+// status. A gateway without QueryAudit cannot say, so the session plans a
+// Create, as before Update existed. Any other error is returned for a retry.
+func (r *IntentReconciler) sessionStage(ctx context.Context, in *lastv1alpha1.Intent) (lastv1alpha1.Stage, error) {
+	actx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
+	defer cancel()
+	_, _, found, err := agent.ExecutedPlan(actx, r.Gateway, intentRef(in))
+	switch {
+	case status.Code(err) == codes.Unimplemented:
+		logf.FromContext(ctx).Info("Could not read the executed plan; planning a Create", "reason", err.Error())
+		return lastv1alpha1.StageCreate, nil
+	case err != nil:
+		return "", err
+	case found:
+		return lastv1alpha1.StageUpdate, nil
+	}
+	return lastv1alpha1.StageCreate, nil
 }
 
 // requestHash identifies a spec.request. Answers to clarifying questions do not
@@ -91,6 +118,11 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 	switch {
 	case errors.Is(err, errBadPolicy):
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error())
+	case errors.Is(err, errNoExecutedPlan):
+		// The executed plan went missing from the audit log since the stage was
+		// chosen: choose it again.
+		logf.FromContext(ctx).Info("Could not find the executed plan to update; planning again")
+		return r.startPlanning(ctx, in, replanFeedback(in))
 	case err != nil:
 		return ctrl.Result{}, err // transient: retried with backoff
 	}
@@ -141,8 +173,10 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 
 // record writes the model's turn to the Intent's status and moves the Intent
 // to the phase that waits on it: AwaitingApproval for a plan, Clarifying for
-// questions, AwaitingDiscoveryApproval for a command. The conversation stays
-// in memory until a plan ends the session.
+// questions, AwaitingDiscoveryApproval for a command. status.stage keeps the
+// session's stage throughout (ruling R4): the phase and status.pendingCommand
+// mark a discovery command, whose approval is for stage Discovery. The
+// conversation stays in memory until a plan ends the session.
 func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, turn agent.Turn, conv agent.Conversation, session int64) error {
 	subject := ""
 	var pending *lastv1alpha1.PendingCommand
@@ -188,7 +222,6 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			setPhase(in, lastv1alpha1.PhaseClarifying, ReasonClarifying,
 				fmt.Sprintf("Waiting for spec.answers to answer %d questions", len(turn.Questions)))
 		case agent.KindCommand:
-			in.Status.Stage = lastv1alpha1.StageDiscovery
 			in.Status.PendingCommand = pending
 			setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonAwaitingDiscoveryApproval,
 				"Waiting for an IntentApproval of discovery command "+subject+" for stage Discovery")
@@ -256,24 +289,36 @@ func storedTurnChanged(stored *lastv1alpha1.Intent, kind agent.Kind, hash string
 	return false
 }
 
-// planStage is the stage a plan in Planning or AwaitingApproval is for: Delete
-// once the teardown is planned, Create otherwise.
+// planStage is the stage of the Intent's planning session and its plan:
+// Update, Remediate or Delete as status.stage records it, and Create for
+// anything else, including the Discovery or empty stage an older operator
+// left (ruling R4).
 func planStage(in *lastv1alpha1.Intent) lastv1alpha1.Stage {
-	if in.Status.Stage == lastv1alpha1.StageDelete {
-		return lastv1alpha1.StageDelete
+	switch s := in.Status.Stage; s {
+	case lastv1alpha1.StageUpdate, lastv1alpha1.StageRemediate, lastv1alpha1.StageDelete:
+		return s
 	}
 	return lastv1alpha1.StageCreate
 }
 
+// replannable reports whether a plan of stage is planned again for a spec edit
+// or after one of its own steps failed: a Create or Update plan is. A Delete
+// plan is not: a deletion raises the generation too, and a failed teardown
+// waits for the retry annotation.
+func replannable(stage lastv1alpha1.Stage) bool {
+	return stage == lastv1alpha1.StageCreate || stage == lastv1alpha1.StageUpdate
+}
+
 // awaitApproval waits for an IntentApproval of the current plan for its stage.
-// A deletion raises the generation, and spec edits no longer matter, so a
-// Delete plan never goes back to planning for one.
+// A spec edit plans a Create or Update again. A deletion raises the generation,
+// and spec edits no longer matter, so a Delete plan never goes back to
+// planning for one.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	stage := planStage(in)
 	switch {
 	case stage == lastv1alpha1.StageDelete && in.Status.Plan == nil:
 		return ctrl.Result{}, r.startDelete(ctx, in, "")
-	case in.Generation != in.Status.ObservedGeneration && stage == lastv1alpha1.StageCreate, in.Status.Plan == nil:
+	case in.Generation != in.Status.ObservedGeneration && replannable(stage), in.Status.Plan == nil:
 		return r.startPlanning(ctx, in, "")
 	}
 	approved, denial, err := r.decision(ctx, in, stage, in.Status.Plan.Hash)
@@ -292,7 +337,7 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 	gen, subject := in.Generation, in.Status.Plan.Hash
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		// A conflict retry re-reads the Intent: run only the plan that was approved.
-		if (stage == lastv1alpha1.StageCreate && in.Generation != gen) || planStage(in) != stage ||
+		if (replannable(stage) && in.Generation != gen) || planStage(in) != stage ||
 			in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval || in.Status.Plan == nil || in.Status.Plan.Hash != subject {
 			return
 		}

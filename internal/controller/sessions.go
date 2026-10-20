@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
@@ -90,15 +92,32 @@ func (r *IntentReconciler) conversation(ctx context.Context, in *lastv1alpha1.In
 }
 
 // newConversation starts a session for the Intent's current spec, telling the
-// model what the namespace's policy lets commands use.
+// model what the namespace's policy lets commands use. An Update session also
+// shows the executed plan, read from the audit log; errNoExecutedPlan means it
+// is no longer there.
 func (r *IntentReconciler) newConversation(ctx context.Context, in *lastv1alpha1.Intent, note string) (agent.Conversation, error) {
 	env, err := r.environment(ctx, in.Namespace)
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewConversation(agent.FirstMessage(agent.Request{Namespace: in.Namespace, Name: in.Name,
-		Text: in.Spec.Request, Answers: in.Spec.Answers, Feedback: replanFeedback(in), Note: note, Env: env})), nil
+	req := agent.Request{Namespace: in.Namespace, Name: in.Name, Text: in.Spec.Request, Answers: in.Spec.Answers,
+		Feedback: replanFeedback(in), Note: note, Env: env}
+	if planStage(in) == lastv1alpha1.StageUpdate {
+		executed, _, found, err := agent.ExecutedPlan(ctx, r.Gateway, intentRef(in))
+		switch {
+		case err != nil && status.Code(err) != codes.Unimplemented:
+			return nil, err
+		case err != nil || !found:
+			return nil, errNoExecutedPlan
+		}
+		req.Executed = &executed
+	}
+	return agent.NewConversation(agent.FirstMessage(req)), nil
 }
+
+// errNoExecutedPlan marks an Update session whose executed plan the audit log
+// no longer holds: the stage must be chosen again.
+var errNoExecutedPlan = errors.New("the executed plan to update was not found")
 
 // errBadPolicy marks a namespace whose effective policy cannot be resolved:
 // the gateway would refuse every command, so planning fails.

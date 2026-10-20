@@ -236,9 +236,9 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 	}
 }
 
-// endFailed closes the phase as failed. A failure of a Create plan itself
-// returns the Intent to Planning with the failure as context (spec §8.3);
-// anything else, and any failed teardown, fails the Intent.
+// endFailed closes the phase as failed. A failure of a Create or Update plan
+// itself returns the Intent to Planning with the failure as context (spec
+// §8.3); anything else, and any failed teardown, fails the Intent.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
 	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
@@ -248,7 +248,7 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 	case err != nil && status.Code(err) != codes.FailedPrecondition:
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
-	if replan && planStage(in) == lastv1alpha1.StageCreate {
+	if replan && replannable(planStage(in)) {
 		return r.startPlanning(ctx, in, reason)
 	}
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)

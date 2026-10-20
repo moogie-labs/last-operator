@@ -52,7 +52,7 @@ var _ = Describe("Intent execution", func() {
 		approve(key, lastv1alpha1.DecisionApprove)
 
 		Eventually(executedReason(key)).Should(Equal(ReasonPhaseEnded))
-		Expect(gw.calls(key)[:6]).To(Equal([]string{callLLM, beginPhase, runS1, "RunCommand:s2",
+		Expect(gw.calls(key)[:6]).To(Equal([]string{callLLM, beginPhase, runS1, runS2,
 			"WriteOutputSecret:web-0", endSucceeded}))
 		Expect(gw.argvOf(key, "s2")).To(Equal([]string{"echo", "x"}))
 		Expect(gw.outputsOf(key)).To(Equal(map[string]map[string]string{"web-0": resource.Outputs}))
@@ -113,13 +113,19 @@ var _ = Describe("Intent execution", func() {
 	})
 
 	It("retries planning while the gateway cannot read the audit log", func() {
-		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1})),
-			queryErr: status.Error(codes.Unavailable, "index unreachable")})
+		// The stage choice reads phase.begin, then phase.end: fail every read after those.
+		reads := 0
+		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1})), queryHook: func([]string) error {
+			if reads++; reads > 2 {
+				return status.Error(codes.Unavailable, "index unreachable")
+			}
+			return nil
+		}})
 		createIntent(key, "provision")
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhasePlanning))
 		Consistently(phase(key), "2s").Should(Equal(lastv1alpha1.PhasePlanning))
 		Expect(gw.calls(key)).NotTo(ContainElement(callLLM))
-		gw.updateScript(key, func(s *script) { s.queryErr = nil })
+		gw.updateScript(key, func(s *script) { s.queryHook = nil })
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 	})
 
@@ -172,7 +178,7 @@ var _ = Describe("Intent execution", func() {
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonExecutionFailed))
 		Expect(readyCondition(key).Message).To(ContainSubstring("approval withdrawn"))
-		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, "RunCommand:s2", endFailed}))
+		Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, runS2, endFailed}))
 	})
 
 	It("retries EndPhase when the gateway is briefly unavailable", func() {

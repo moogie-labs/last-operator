@@ -29,12 +29,20 @@ func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
 		return lastv1alpha1.StageDiscovery, in.Status.PendingCommand.Hash, true
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingApproval && in.Status.Plan != nil:
-		if in.Status.Stage == "" {
-			return lastv1alpha1.StageCreate, in.Status.Plan.Hash, true // an Intent from before stages were recorded
-		}
-		return in.Status.Stage, in.Status.Plan.Hash, true
+		return planStageOf(in), in.Status.Plan.Hash, true
 	}
 	return "", "", false
+}
+
+// planStageOf returns the stage the Intent's plan is for: status.stage, which
+// holds the planning session's stage even while a discovery command is pending
+// (main spec §7). An empty stage, from before stages were recorded, or the
+// Discovery stage an older operator recorded during a session, means Create.
+func planStageOf(in *lastv1alpha1.Intent) lastv1alpha1.Stage {
+	if s := in.Status.Stage; s != "" && s != lastv1alpha1.StageDiscovery {
+		return s
+	}
+	return lastv1alpha1.StageCreate
 }
 
 // verifiedSubject returns what the Intent asks its user to decide, like

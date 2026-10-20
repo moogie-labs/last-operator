@@ -35,7 +35,7 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 			case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
 				stage = lastv1alpha1.StageDiscovery
 			case in.Status.Plan != nil:
-				stage = lastv1alpha1.StageCreate
+				stage = planStageOf(in)
 			default:
 				writeln(d.Out, "No plan or pending command yet.")
 				return nil
@@ -46,7 +46,7 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 				return nil
 			}
 			renderSubject(d.Out, in, stage, hash, files)
-			if decidable, _, ok := subjectOf(in); ok && decidable == stage {
+			if decidable, _, ok, err := verifiedSubject(in); ok && err == nil && decidable == stage {
 				printDecisionCommands(d.Out, in, hash)
 			}
 			return nil
