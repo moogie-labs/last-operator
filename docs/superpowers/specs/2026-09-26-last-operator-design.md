@@ -332,7 +332,8 @@ status:
 `status.remediations` counts the consecutive remediations that drift
 started. At 3, the next drift fails the Intent with `RemediationFailed`
 instead of planning. A scheduled probe run in which every probe passes,
-after the Intent last became Ready, resets it to 0 (§7).
+after the Intent last became Ready, resets it to 0, and so does a spec
+edit that starts a new planning session (§7).
 
 Changing `spec.request` or `spec.answers` increments `generation` and
 starts an **Update** planning cycle.
@@ -623,7 +624,9 @@ Pending → Clarifying ⇄ (user answers)
     At 3, the next drift fails the Intent with `RemediationFailed`, naming
     the count, and plans nothing. A scheduled probe run that passes on
     every probed ManagedResource, finishing after the Intent last became
-    Ready, resets the count to 0; the Verifying run never does.
+    Ready, resets the count to 0; the Verifying run never does. A spec
+    edit that starts a Create or Update session resets it too; a replan
+    after a failed step does not.
   - **Confirming the drift.** The session's first message is built only
     after the operator runs the probes once more (`RunProbes`) and
     records the outcomes on the ManagedResources. If every probe passes,
@@ -650,7 +653,11 @@ Pending → Clarifying ⇄ (user answers)
     phase succeeded; otherwise it fails with `ExecutionInterrupted`.
   - **Verifying** compares the probed plan with the executed plan read
     from the audit log, not with the Remediate plan in status, then
-    returns the Intent to Ready.
+    returns the Intent to Ready. If a probe still fails, the drift
+    persists: the Intent goes back to `Drifted`, naming the failing
+    probes, and the next remediation is counted, or the cap fails it with
+    `RemediationFailed`. Verifying after a Create or Update still fails
+    with `VerificationFailed`.
   - **Edits during a remediation.** A spec edit while the stage is
     Remediate, in Planning, AwaitingDiscoveryApproval, AwaitingApproval or
     Remediating, abandons the remediation: any open phase is ended as

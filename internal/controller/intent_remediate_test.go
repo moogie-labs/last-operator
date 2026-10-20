@@ -230,6 +230,88 @@ var _ = Describe("Intent remediation", func() {
 		Expect(countOf(gw.calls(key), callLLM)).To(Equal(calls), "nothing is planned")
 	})
 
+	// unrepaired approves the Remediate plan other than previous without
+	// repairing the drift, so its Verifying run fails, and returns its subject.
+	unrepaired := func(previous string) string {
+		p := awaitingRemediate(previous)
+		approveAs(key, lastv1alpha1.StageRemediate, lastv1alpha1.DecisionApprove)
+		return p.Hash
+	}
+
+	It("counts drift that persists after a Remediate as drift, and remediates again", func() {
+		ready(&script{})
+		drift()
+		first := unrepaired("")
+
+		Eventually(func() []string { return eventNotes(key, string(lastv1alpha1.PhaseDrifted)) }).Should(
+			ContainElement("Probes failed after the remediation: p1"))
+		second := awaitingRemediate(first)
+		Expect(remediations()).To(Equal(int32(2)))
+		Expect(eventReasons(key, corev1.EventTypeWarning)).NotTo(ContainElement(string(lastv1alpha1.PhaseFailed)),
+			"not VerificationFailed")
+
+		repaired()
+		approveAs(key, lastv1alpha1.StageRemediate, lastv1alpha1.DecisionApprove)
+		Eventually(func() bool {
+			in := getIntent(key)
+			return in.Status.Phase == lastv1alpha1.PhaseReady && in.Status.Plan.Hash == second.Hash
+		}).Should(BeTrue())
+		Expect(remediations()).To(Equal(int32(2)))
+	})
+
+	It("fails with RemediationFailed when drift persists after the third Remediate", func() {
+		ready(&script{})
+		drift()
+		subject := ""
+		for range 3 {
+			subject = unrepaired(subject)
+		}
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("3 consecutive remediations"))
+		Expect(remediateBegins(key)).To(Equal(3))
+	})
+
+	It("resets remediations when a spec edit plans an Update, so the next drift is remediated", func() {
+		ready(&script{})
+		subject := ""
+		for range 3 {
+			subject = remediate(subject)
+		}
+		drift()
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
+
+		editRequest(key, "provision v2")
+		Eventually(planHash(key)).Should(Equal(updateHash))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(getIntent(key).Status.Stage).To(Equal(lastv1alpha1.StageUpdate))
+		Expect(remediations()).To(BeZero(), "the spec edit started a new session")
+		repaired()
+		approveAs(key, lastv1alpha1.StageUpdate, lastv1alpha1.DecisionApprove)
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+
+		drift()
+		awaitingRemediate(subject)
+		Expect(remediations()).To(Equal(int32(1)))
+	})
+
+	It("keeps remediations when a failed step replans in its own stage", func() {
+		ready(&script{})
+		remediate("")
+		editRequest(key, "provision v2")
+		Eventually(planHash(key)).Should(Equal(updateHash))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		// As if a drift episode counted while the Update awaited approval.
+		setStatus(key, func(in *lastv1alpha1.Intent) { in.Status.Remediations = 2 })
+		gw.updateScript(key, func(s *script) { s.exit = map[string]int32{"s1": 1} })
+		approveAs(key, lastv1alpha1.StageUpdate, lastv1alpha1.DecisionApprove)
+
+		Eventually(func() string { return replanFeedback(getIntent(key)) }).Should(ContainSubstring("step s1 exited 1"))
+		Expect(getIntent(key).Status.Stage).To(Equal(lastv1alpha1.StageUpdate))
+		Expect(remediations()).To(Equal(int32(2)), "a replan is no spec edit")
+	})
+
 	It("resets remediations after a fully passing scheduled probe run", func() {
 		ready(&script{})
 		remediate("")

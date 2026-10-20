@@ -42,7 +42,10 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 // Intent as interrupted. An empty stage is chosen by sessionStage.
 //
 // A Remediate session keeps observedGeneration, so a spec edit made meanwhile
-// still plans an Update, and keeps status.plan (see startRemediate).
+// still plans an Update, and keeps status.plan (see startRemediate). A session
+// a spec edit starts (a new generation) resets status.remediations: drift of
+// the edited Intent starts counting afresh. A replan after a failed step is
+// no edit and keeps the count.
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
@@ -65,6 +68,9 @@ func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.In
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		if stage != lastv1alpha1.StageRemediate {
+			if in.Generation != in.Status.ObservedGeneration {
+				in.Status.Remediations = 0
+			}
 			in.Status.ObservedGeneration = in.Generation
 			in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
 			in.Status.Plan = nil

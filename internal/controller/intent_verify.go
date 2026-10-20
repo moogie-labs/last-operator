@@ -18,7 +18,9 @@ import (
 
 // verify runs every probe of the executed plan once; all must pass (spec §7).
 // A failure here surfaces a bad probe at creation time instead of as drift.
-// After a Remediate, the probed plan is the executed plan it repaired.
+// After a Remediate, the probed plan is the executed plan it repaired, and a
+// failure is drift that persists (D11): the Intent goes Drifted, so the next
+// remediation is counted, or the cap fails it with RemediationFailed.
 func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Status.Plan == nil {
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "The Intent has no plan to verify")
@@ -49,6 +51,13 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, err
 	}
 	if failed := failedProbes(resp.GetOutcomes()); len(failed) > 0 {
+		if planStage(in) == lastv1alpha1.StageRemediate {
+			return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+				if in.Status.Phase == lastv1alpha1.PhaseVerifying {
+					setPhase(in, lastv1alpha1.PhaseDrifted, ReasonDrifted, "Probes failed after the remediation: "+strings.Join(failed, ", "))
+				}
+			})
+		}
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "Probes failed: "+strings.Join(failed, ", "))
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
