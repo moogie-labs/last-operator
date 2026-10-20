@@ -57,6 +57,16 @@ func Hash(b Body) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// CommandKey identifies a command as written, before ${steps…} resolution: its
+// canonical JSON without the step id. Two commands with the same key run the
+// same thing. The operator checks a Delete plan against the teardown with it,
+// and the gateway checks Auto's limits (design D9).
+func CommandKey(c lastv1alpha1.Command) (string, error) {
+	c.ID = ""
+	b, err := audit.Canonical(c)
+	return string(b), err
+}
+
 // Validate checks what the gateway relies on: step IDs name the steps that
 // ${steps…} references and RunCommand use, probe IDs name probe outcomes, each
 // output Secret name is a DNS-1123 subdomain, and each declared output has a

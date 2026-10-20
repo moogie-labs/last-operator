@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -103,9 +104,9 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	if !sameCommand(given, expected) {
 		return nil, d.deny(codes.PermissionDenied, "command does not match approved step %s", planned.ID)
 	}
-	// Approval and policy are re-checked before every step (spec §8.3): a Deny or a
-	// narrowed policy after BeginPhase stops the phase.
-	eff, err := g.effectivePolicy(ctx, ns)
+	// Authorization and policy are re-checked before every step (spec §8.3): a
+	// Deny, a narrowed policy or Auto turned off after BeginPhase stops the phase.
+	eff, layers, err := g.readPolicy(ctx, ns)
 	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
 		p.failed = true
 		return nil, d.deny(codes.FailedPrecondition, "%v", invalid)
@@ -117,7 +118,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 		return nil, d.deny(codes.PermissionDenied, "policy: %v", err)
 	}
-	if err := g.recheckApproval(ctx, d, p, ns, name); err != nil {
+	if err := g.recheckAuthorization(ctx, d, layers, p, ns, name); err != nil {
 		return nil, err
 	}
 	var install []lastv1alpha1.ArgvCommand
@@ -169,21 +170,48 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 	return &gatewayv1.RunCommandResponse{Result: toProtoResult(res.RunID, res.Result)}, nil
 }
 
-// recheckApproval refuses the step, failing the phase, when the phase's approval no longer stands.
-func (g *Gateway) recheckApproval(ctx context.Context, d denial, p *phase, ns, name string) error {
-	approval, err := g.findApprovalFor(ctx, ns, name, p.stage, p.subject)
-	switch {
-	case status.Code(err) == codes.NotFound:
+// recheckAuthorization refuses the step, failing the phase, when what
+// authorized the phase no longer stands. A Deny for the subject always refuses.
+// An Auto phase passes while its stage is still Auto for the same Intent, from
+// layers, which the caller read for this step; D9's limits held at BeginPhase
+// and do not change within the phase. Once the stage is no longer Auto, an Auto
+// phase needs an Approve, from neither the operator nor a gateway-namespace
+// ServiceAccount, as BeginPhase would. An approval phase needs an Approve.
+func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers policyLayers, p *phase, ns, name string) error {
+	var intent lastv1alpha1.Intent
+	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
+		err = notFoundOr(err, "intent")
+		if status.Code(err) != codes.NotFound {
+			return err
+		}
 		p.failed = true
 		return d.deny(codes.NotFound, "approval withdrawn: %v", err)
+	}
+	approval, err := g.findApproval(ctx, &intent, p.stage, p.subject)
+	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
 		return d.deny(codes.PermissionDenied, "approval withdrawn: %s denies this %s", approval.Name, subjectNoun(p.stage))
 	case err != nil:
 		return err
-	case approval == nil:
+	}
+	auto := p.auth != nil && p.auth.Kind == authAuto
+	if auto && string(intent.UID) == p.uid && layers.mode(&intent, p.stage) == lastv1alpha1.ModeAuto {
+		return nil
+	}
+	if approval == nil {
 		p.failed = true
+		if auto {
+			return d.deny(codes.PermissionDenied, "auto authorization withdrawn: the %s stage is no longer Auto for this Intent, "+
+				"and no IntentApproval approves this %s", p.stage, subjectNoun(p.stage))
+		}
 		return d.deny(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this %s", subjectNoun(p.stage))
+	}
+	if auto {
+		if err := g.checkApprover(d, approval); err != nil {
+			p.failed = true
+			return err
+		}
 	}
 	return nil
 }

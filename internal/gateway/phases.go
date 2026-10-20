@@ -211,19 +211,38 @@ func (e errInvalidPolicy) GRPCStatus() *status.Status {
 }
 
 func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effective, error) {
+	eff, _, err := g.readPolicy(ctx, ns)
+	return eff, err
+}
+
+// policyLayers are the policy objects one read returned: the OperatorConfig, or
+// nil, and the namespace's IntentPolicies.
+type policyLayers struct {
+	op       *lastv1alpha1.OperatorConfig
+	policies []lastv1alpha1.IntentPolicy
+}
+
+// mode is the stage's effective Auto/Manual mode for the Intent (design D8).
+func (l policyLayers) mode(intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage) lastv1alpha1.Mode {
+	return policy.Modes(l.op, l.policies, intent.Spec.Modes).For(stage)
+}
+
+// readPolicy reads the policy layers once and resolves them, so the command
+// policy and the modes always come from the same objects.
+func (g *Gateway) readPolicy(ctx context.Context, ns string) (policy.Effective, policyLayers, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
-		return policy.Effective{}, err
+		return policy.Effective{}, policyLayers{}, err
 	}
 	var list lastv1alpha1.IntentPolicyList
 	if err := g.crd.List(ctx, &list, client.InNamespace(ns)); err != nil {
-		return policy.Effective{}, status.Errorf(codes.Unavailable, "list IntentPolicies: %v", err)
+		return policy.Effective{}, policyLayers{}, status.Errorf(codes.Unavailable, "list IntentPolicies: %v", err)
 	}
 	eff, err := policy.Resolve(op, list.Items)
 	if err != nil {
-		return policy.Effective{}, errInvalidPolicy{err}
+		return policy.Effective{}, policyLayers{}, errInvalidPolicy{err}
 	}
-	return eff, nil
+	return eff, policyLayers{op: op, policies: list.Items}, nil
 }
 
 // checkPlanPolicy checks every command the plan can ever run: steps, probes, teardown.
@@ -289,15 +308,6 @@ func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent,
 		}
 	}
 	return found, nil
-}
-
-// findApprovalFor is findApproval for a caller that holds only the Intent's key.
-func (g *Gateway) findApprovalFor(ctx context.Context, ns, name string, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
-	var intent lastv1alpha1.Intent
-	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
-		return nil, notFoundOr(err, "intent")
-	}
-	return g.findApproval(ctx, &intent, stage, subject)
 }
 
 // verifyPlan checks that the Intent's plan is encodable, bounded, the one the
@@ -511,24 +521,125 @@ func (g *Gateway) noOpenPhase(ctx context.Context, d denial, ns, name, key strin
 	return d.deny(codes.FailedPrecondition, "no open phase for this plan")
 }
 
-// requireApproval returns the IntentApproval that authorizes opening a phase for
-// the subject: an Approve, with no Deny, from neither the operator nor a
-// gateway-namespace ServiceAccount. Every refusal is audited through d.
-func (g *Gateway) requireApproval(ctx context.Context, d denial, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+// The kinds of audit.Authorization a phase carries.
+const (
+	authApproval = "approval"
+	authAuto     = "auto"
+)
+
+// checkApprover refuses an Approve that the operator or a gateway-namespace
+// ServiceAccount gave: neither may authorize what the operator runs. The
+// refusal is audited through d.
+func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval) error {
+	switch {
+	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
+		return d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
+	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
+		return d.deny(codes.PermissionDenied, "approval %s names a gateway-namespace ServiceAccount as approver", approval.Name)
+	}
+	return nil
+}
+
+// authorizePhase decides what authorizes opening a phase for the subject, in
+// this order (main spec §8.3):
+//  1. a Deny for the subject refuses, whatever the mode;
+//  2. an Auto stage whose plan is within design D9's limits is authorized as
+//     {auto, <stage key>}, whatever Approve exists;
+//  3. an Approve, from neither the operator nor a gateway-namespace
+//     ServiceAccount, authorizes it as {approval, <namespace>/<name>};
+//  4. with no Approve, an Auto stage refuses with gatewayv1.MsgNeedsApproval,
+//     and a Manual stage with FailedPrecondition.
+//
+// It also returns the approval that authorized the phase, nil for Auto. The
+// caller has read layers once, for the command policy too. Every refusal is
+// audited through d.
+func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLayers, rec *LoadedRecord, intent *lastv1alpha1.Intent,
+	stage lastv1alpha1.Stage, subject string, body plan.Body) (*audit.Authorization, *lastv1alpha1.IntentApproval, error) {
 	approval, err := g.findApproval(ctx, intent, stage, subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
-		return nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
+		return nil, nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
 	case err != nil:
-		return nil, err
-	case approval == nil:
-		return nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
-	case approval.Spec.ApprovedBy == g.cfg.OperatorIdentity:
-		return nil, d.deny(codes.PermissionDenied, "approval %s names the operator as approver", approval.Name)
-	case strings.HasPrefix(approval.Spec.ApprovedBy, "system:serviceaccount:"+g.cfg.Namespace+":"):
-		return nil, d.deny(codes.PermissionDenied, "approval %s names a gateway-namespace ServiceAccount as approver", approval.Name)
+		return nil, nil, err
 	}
-	return approval, nil
+	auto := layers.mode(intent, stage) == lastv1alpha1.ModeAuto
+	if auto {
+		within, err := withinAutoLimits(d, rec, stage, body)
+		if err != nil {
+			return nil, nil, err
+		}
+		if within {
+			return &audit.Authorization{Kind: authAuto, Name: string(policy.KeyFor(stage))}, nil, nil
+		}
+	}
+	if approval == nil {
+		if auto {
+			return nil, nil, d.deny(codes.PermissionDenied, "%s", gatewayv1.MsgNeedsApproval)
+		}
+		return nil, nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
+	}
+	if err := g.checkApprover(d, approval); err != nil {
+		return nil, nil, err
+	}
+	return &audit.Authorization{Kind: authApproval, Name: intent.Namespace + "/" + approval.Name}, approval, nil
+}
+
+// withinAutoLimits reports whether Auto may authorize the stage's plan without
+// an approval (design D9). Commands compare by plan.CommandKey, as written:
+//   - Create, Update and Discovery: any plan or command that passed the checks;
+//   - Remediate: every step equals some step of the executed plan, however
+//     often;
+//   - Delete: the steps are a permutation of the executed plan's teardown
+//     commands, in resource order; with no executed plan, never.
+//
+// An executed plan that fails its integrity check, or a command that cannot be
+// encoded, is refused as Internal through d.
+func withinAutoLimits(d denial, rec *LoadedRecord, stage lastv1alpha1.Stage, body plan.Body) (bool, error) {
+	switch stage {
+	case lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageDiscovery:
+		return true, nil
+	case lastv1alpha1.StageRemediate, lastv1alpha1.StageDelete:
+	default:
+		return false, nil
+	}
+	if rec.Executed == nil {
+		return false, nil
+	}
+	eb, err := executedBody(d, rec.Executed)
+	if err != nil {
+		return false, err
+	}
+	executed := eb.Steps
+	if stage == lastv1alpha1.StageDelete {
+		executed = nil
+		for _, r := range eb.Resources {
+			executed = append(executed, r.Teardown...)
+		}
+		if len(body.Steps) != len(executed) {
+			return false, nil
+		}
+	}
+	want := make(map[string]int, len(executed))
+	for i, c := range executed {
+		k, err := plan.CommandKey(c)
+		if err != nil {
+			return false, d.deny(codes.Internal, "executed plan command %d cannot be encoded: %v", i+1, err)
+		}
+		want[k]++
+	}
+	for _, s := range body.Steps {
+		k, err := plan.CommandKey(s)
+		if err != nil {
+			return false, d.deny(codes.Internal, "step %s cannot be encoded: %v", s.ID, err)
+		}
+		if want[k] == 0 {
+			return false, nil
+		}
+		if stage == lastv1alpha1.StageDelete {
+			want[k]-- // a permutation uses each teardown command once
+		}
+	}
+	return true, nil
 }
 
 func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseRequest) (*gatewayv1.BeginPhaseResponse, error) {
@@ -604,7 +715,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, d.deny(codes.InvalidArgument, "plan too large to record: %v", err)
 		}
 	}
-	eff, err := g.effectivePolicy(ctx, ns)
+	eff, layers, err := g.readPolicy(ctx, ns)
 	if invalid, ok := errors.AsType[errInvalidPolicy](err); ok {
 		return nil, d.deny(codes.FailedPrecondition, "%v", invalid)
 	}
@@ -614,16 +725,17 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := checkPlanPolicy(eff, body); err != nil {
 		return nil, d.deny(codes.PermissionDenied, "%v", err)
 	}
-	approval, err := g.requireApproval(ctx, d, &intent, stage, subject)
+	auth, approval, err := g.authorizePhase(ctx, d, layers, rec, &intent, stage, subject, body)
 	if err != nil {
 		return nil, err
 	}
 
-	auth := &audit.Authorization{Kind: "approval", Name: ns + "/" + approval.Name}
-	if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeApprovalObserved, Actor: actor, Intent: key, Stage: string(stage), SubjectHash: subject,
-		Payload: approvalObserved{Name: approval.Name, UID: string(approval.UID), ApprovedBy: approval.Spec.ApprovedBy,
-			Decision: string(approval.Spec.Decision), Created: approval.CreationTimestamp.UTC().Format(time.RFC3339)}}); err != nil {
-		return nil, status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
+	if approval != nil { // an Auto phase observed no approval
+		if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeApprovalObserved, Actor: actor, Intent: key, Stage: string(stage), SubjectHash: subject,
+			Payload: approvalObserved{Name: approval.Name, UID: string(approval.UID), ApprovedBy: approval.Spec.ApprovedBy,
+				Decision: string(approval.Spec.Decision), Created: approval.CreationTimestamp.UTC().Format(time.RFC3339)}}); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
+		}
 	}
 	begin, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseBegin, Actor: actor, Intent: key, Stage: string(stage),
 		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps), Nonce: nonce}})

@@ -23,8 +23,8 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
-	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 )
 
 // retryTeardownHint tells the user how to plan a failed teardown again (D7).
@@ -257,7 +257,7 @@ func teardownCheck(teardown []lastv1alpha1.Command) func(agent.Turn) error {
 		}
 		want := map[string][]int{} // command key → indices of the teardown commands with it, in order
 		for i, c := range teardown {
-			k, err := commandKey(c)
+			k, err := plan.CommandKey(c)
 			if err != nil {
 				return fmt.Errorf("teardown command %d cannot be encoded: %w", i+1, err)
 			}
@@ -265,7 +265,7 @@ func teardownCheck(teardown []lastv1alpha1.Command) func(agent.Turn) error {
 		}
 		var added []string
 		for i, s := range t.Plan.Steps {
-			k, err := commandKey(s)
+			k, err := plan.CommandKey(s)
 			if err != nil {
 				return fmt.Errorf("step %d cannot be encoded: %w", i+1, err)
 			}
@@ -277,7 +277,7 @@ func teardownCheck(teardown []lastv1alpha1.Command) func(agent.Turn) error {
 		}
 		var missing []string
 		for i, c := range teardown {
-			k, _ := commandKey(c) // encoded above
+			k, _ := plan.CommandKey(c) // encoded above
 			if slices.Contains(want[k], i) {
 				missing = append(missing, fmt.Sprintf("teardown command %d (id %q)", i+1, c.ID))
 			}
@@ -300,13 +300,6 @@ func teardownCheck(teardown []lastv1alpha1.Command) func(agent.Turn) error {
 			"commands, each exactly once and unchanged but for its id, in the order that tears things down safely",
 			strings.Join(problems, "; "))
 	}
-}
-
-// commandKey identifies a teardown command: its canonical JSON without the step id.
-func commandKey(c lastv1alpha1.Command) (string, error) {
-	c.ID = ""
-	b, err := audit.Canonical(c)
-	return string(b), err
 }
 
 // tornDown reports a gateway refusal of a Delete phase call saying the Intent

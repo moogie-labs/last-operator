@@ -353,3 +353,29 @@ func TestValidateRemediateRequiresEqualResourcesAndANonce(t *testing.T) {
 		t.Fatalf("an output naming no executed step = %v", err)
 	}
 }
+
+func TestCommandKeyIgnoresOnlyTheID(t *testing.T) {
+	a := lastv1alpha1.Command{ID: "a", Run: lastv1alpha1.CommandRun{Argv: []string{kubectl, "delete", "ns", "x"}}}
+	b := a
+	b.ID = "b"
+	ka, err := plan.CommandKey(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kb, err := plan.CommandKey(b); err != nil || kb != ka {
+		t.Fatalf("CommandKey(%q) = %q, %v; want %q", b.ID, kb, err, ka)
+	}
+	c := a
+	c.Run.Argv = []string{kubectl, "delete", "ns", "y"}
+	if kc, err := plan.CommandKey(c); err != nil || kc == ka {
+		t.Fatalf("CommandKey of a changed command = %q, %v; want it to differ", kc, err)
+	}
+	d := a
+	d.Providers = []string{"cluster"}
+	if kd, err := plan.CommandKey(d); err != nil || kd == ka {
+		t.Fatalf("CommandKey with a provider = %q, %v; want it to differ", kd, err)
+	}
+	if a.ID != "a" {
+		t.Fatal("CommandKey changed its argument")
+	}
+}

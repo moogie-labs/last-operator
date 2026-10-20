@@ -16,3 +16,15 @@ func TornDown(err error) bool {
 	s, ok := status.FromError(err)
 	return ok && err != nil && s.Code() == codes.FailedPrecondition && s.Message() == MsgTornDown
 }
+
+// MsgNeedsApproval is BeginPhase's refusal of a phase whose stage is Auto but
+// whose plan is outside Auto's limits (design D9): a Remediate step the executed
+// plan does not have, or a Delete that is not a permutation of the executed
+// plan's teardown. The operator reads it as a cue to wait for an IntentApproval.
+const MsgNeedsApproval = "needs approval: the plan is outside Auto mode's limits, so only an IntentApproval can authorize it"
+
+// NeedsApproval reports whether err is the gateway's MsgNeedsApproval refusal.
+func NeedsApproval(err error) bool {
+	s, ok := status.FromError(err)
+	return ok && err != nil && s.Code() == codes.PermissionDenied && s.Message() == MsgNeedsApproval
+}

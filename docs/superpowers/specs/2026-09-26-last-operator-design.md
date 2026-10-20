@@ -803,7 +803,8 @@ each call, the gateway:
 
 1. Confirms that a phase is open for `(intent, stage, subjectHash)`.
 2. **Confirms authorization.** Any one of these is enough:
-   - the effective mode for the stage is Auto;
+   - the effective mode for the stage is Auto, and the plan is within
+     Auto's limits (below);
    - a valid `IntentApproval` exists for this `subjectHash`;
    - every command in the subject (the discovery command, or every
      plan step, including its `image.install` commands) matches an
@@ -838,8 +839,8 @@ executed Create or Update plan.
 **Delete phases** (stage `Delete`) open only for an Intent being deleted.
 The subject is the plan in `status.plan`, as for Create, and its `resources`
 must be empty: a Delete plan only orders the executed plan's teardown
-commands. In M5a a Delete is authorized by approval only; Auto arrives in
-M5c. A Delete is exempt from run-once. A failed or interrupted teardown is
+commands. An Auto Delete within Auto's limits needs no approval (below);
+any other Delete needs one. A Delete is exempt from run-once. A failed or interrupted teardown is
 retried by replanning, and the only valid Delete plans are permutations of
 the same commands, so a one-command teardown could otherwise never run
 again; the approval of that Delete subject, bound to the Intent's UID and
@@ -927,11 +928,51 @@ phase opened, so it is ignored; a record without `began` counts every
 Deny. The output Secrets are not the gateway's to delete: they belong to
 their ManagedResources and go with them.
 
-- **Auto-mode remediation** is limited to re-running commands from that
-  plan. If the remediation plan contains any other command, it needs
-  approval (or matching rules) regardless of mode.
-- **Teardown commands** must be those recorded in that plan. Changed
-  teardown commands need approval or matching rules.
+**Auto authorization.** `BeginPhase` resolves the stage's effective mode
+(§6; stage keys `discovery`, `create` for Create and Update, `reconcile`
+for Remediate, `delete` for Delete) from the same `OperatorConfig` and
+`IntentPolicy` reads that give the command policy, and the Intent's
+`spec.modes`. It then authorizes in this order:
+
+1. A `Deny` for the subject (bound to the Intent's UID and within
+   `approvals.maxAge`) refuses with `PermissionDenied`, whatever the mode.
+2. An Auto stage whose plan is within **Auto's limits** opens without an
+   approval, even when an `Approve` exists. Commands compare as written,
+   before `${steps…}` resolution: canonical JSON with the step `id`
+   cleared (`plan.CommandKey`, which the operator's Delete check also uses).
+   - **Create, Update and Discovery:** any plan or command that passes
+     the other checks.
+   - **Remediate:** every step equals some step of the executed plan, as
+     often as the plan likes. Auto remediation only re-runs commands the
+     approver of the executed plan saw.
+   - **Delete:** the steps are a permutation of the executed plan's
+     teardown commands, gathered in resource order: each exactly once.
+     With no executed plan in the record, a Delete is outside the limits.
+   - An executed plan that fails its integrity check refuses the phase
+     with `Internal`.
+3. Otherwise a valid `Approve` authorizes it, unless it names the
+   operator or a gateway-namespace ServiceAccount as approver.
+4. With no `Approve`, an Auto stage (a Remediate or Delete outside the
+   limits) is refused with `PermissionDenied` and exactly the message
+   `gatewayv1.MsgNeedsApproval`, which the operator reads as a cue to wait
+   for approval; a Manual stage is refused with `FailedPrecondition`.
+
+An Auto phase writes no `approval.observed`. Its `phase.begin`, the
+entries of every step it runs (`command.start`, `command.result`, and the
+credential and egress grants), and its `phase.end` carry
+`authorizedBy: {kind: auto, name: <stage key>}`, and the record's open
+phase keeps the same authorization; an approved phase carries
+`{kind: approval, name: <namespace>/<IntentApproval>}`.
+
+**`RunCommand` re-checks authorization before every step**, with fresh
+reads of the policy layers, the Intent and its `IntentApproval`s. A `Deny`
+for the subject stops any phase. An Auto phase passes while the stage is
+still Auto for the same Intent UID; its plan was checked against Auto's
+limits at `BeginPhase` and cannot change within the phase, so the limits
+are not checked again. Once a policy edit turns the stage to Manual, the
+step needs a valid `Approve` from an approver other than the operator or a
+gateway-namespace ServiceAccount. An approved phase needs its `Approve` to
+still stand. Every refusal fails the phase: only `EndPhase(failed)` remains.
 
 ## 9. Allow rules and suggestions
 
