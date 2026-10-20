@@ -80,7 +80,7 @@ func TestFirstMessageForAnUpdateShowsTheExecutedPlan(t *testing.T) {
 	body := updateBody()
 	msg := FirstMessage(Request{Namespace: teamNamespace, Name: webName, Text: "run web with 3 replicas", Executed: &body})
 	for _, want := range []string{
-		"This Intent already executed this plan:\n",
+		"This Intent already executed this plan (do not repeat it as your answer):\n",
 		`"argv":["kubectl","apply","-f","/work/a.yaml"]`,
 		`"description":"nginx Deployment team-x/web"`,
 		`"assert":"result.exitCode == 0"`,
@@ -119,7 +119,8 @@ func TestRemediateMessageTruncatesProbeOutput(t *testing.T) {
 	if !strings.Contains(msg, strings.Repeat("x", 2<<10)+"\n") || strings.Contains(msg, strings.Repeat("x", 2<<10+1)) {
 		t.Errorf("stdout is not cut to 2 KiB:\n%s", msg)
 	}
-	for _, want := range []string{"stdout (truncated):", "stderr:\nboom\n", "web-ready", exitZero,
+	for _, want := range []string{"Executed plan (do not repeat it as your answer; its resources stay as they are):\n",
+		"stdout (truncated):", "stderr:\nboom\n", "web-ready", exitZero,
 		webResource, "exited 1", "Providers commands may use:"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("remediate message lacks %q:\n%s", want, msg)
@@ -155,5 +156,16 @@ func TestRemediateMessageNeverAsksForResources(t *testing.T) {
 	prompt := strings.Join(strings.Fields(systemPrompt), " ")
 	if !strings.Contains(prompt, `a Remediate answer always has "resources": []`) {
 		t.Error("system prompt lacks the Remediate rule")
+	}
+}
+
+func TestRemediateMessageSaysWhenAProbeGaveNoResult(t *testing.T) {
+	msg, err := RemediateMessage(Remediation{Namespace: teamNamespace, Name: webName, Text: runWeb, Executed: updateBody(),
+		Failures: []ProbeFailure{{Resource: webResource, ProbeID: webReady, Assert: exitZero}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "The probe gave no result.\n") || strings.Contains(msg, "exited 0") {
+		t.Errorf("remediate message for a probe with no result:\n%s", msg)
 	}
 }

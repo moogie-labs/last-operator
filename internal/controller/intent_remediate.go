@@ -45,7 +45,8 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 	gen, capped := in.Generation, false
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		// A conflict retry re-reads the Intent: start only from the drift that
-		// was seen, and never past the cap.
+		// was seen, and never past the cap. Each attempt decides afresh.
+		capped = false
 		if in.Status.Phase != lastv1alpha1.PhaseDrifted || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
 			return
 		}

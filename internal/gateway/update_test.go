@@ -704,9 +704,9 @@ func (e *testEnv) failMRDeletes(fail *atomic.Bool) *atomic.Int32 {
 	return &calls
 }
 
-// An Update whose cleanup is still pending never blocks the next phase, the
-// Intent's Delete included: once the operator has moved on (its EndPhase(failed)
-// was refused as already succeeded), BeginPhase finishes the cleanup itself.
+// An Update whose cleanup is still pending never blocks the next phase: once
+// the operator has moved on (its EndPhase(failed) was refused as already
+// succeeded), BeginPhase finishes the cleanup itself.
 func TestABeginPhaseFinishesAnEndingUpdatesCleanup(t *testing.T) {
 	env, _ := executedEnv(t)
 	env.createMRs(2)
@@ -724,25 +724,24 @@ func TestABeginPhaseFinishesAnEndingUpdatesCleanup(t *testing.T) {
 	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
 		t.Fatalf("EndPhase with a failing delete = %v, want Unavailable", err)
 	}
-	_, err := env.end(h, false) // the operator aborts the phase for the Intent's deletion
+	_, err := env.end(h, false) // the operator aborts the phase
 	env.wantDenied(err, codes.FailedPrecondition)
 
-	del := env.startDelete(teardownCommands())
-	env.approve(deleteApproval("teardown", del))
-	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); status.Code(err) != codes.Unavailable {
-		t.Fatalf("BeginPhase(Delete) while the cleanup fails = %v, want Unavailable", err)
+	fix := env.remediation("fix", nonce1)
+	if _, err := env.beginStage(lastv1alpha1.StageRemediate, fix); status.Code(err) != codes.Unavailable {
+		t.Fatalf("BeginPhase(Remediate) while the cleanup fails = %v, want Unavailable", err)
 	}
 	env.wantMRs(0, 1, 8, 9)
 	p := env.g.phases.get(envKey)
 	p.mu.Lock()
-	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); status.Code(err) != codes.Aborted {
-		t.Fatalf("BeginPhase(Delete) while the Update is held = %v, want Aborted", err)
+	if _, err := env.beginStage(lastv1alpha1.StageRemediate, fix); status.Code(err) != codes.Aborted {
+		t.Fatalf("BeginPhase(Remediate) while the Update is held = %v, want Aborted", err)
 	}
 	p.mu.Unlock()
 
 	failing.Store(false)
-	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); err != nil {
-		t.Fatalf("BeginPhase(Delete) once the delete works = %v", err)
+	if _, err := env.beginStage(lastv1alpha1.StageRemediate, fix); err != nil {
+		t.Fatalf("BeginPhase(Remediate) once the delete works = %v", err)
 	}
 	env.wantMRs(0, 8, 9)
 	if got, want := env.deletedMRs(before, h), []map[string]string{deletedPayload(1)}; !reflect.DeepEqual(got, want) {
@@ -1032,4 +1031,58 @@ func TestAnUpdateMovesAKeptOutputSecretToItsNewManagedResource(t *testing.T) {
 		env.runPhase(lastv1alpha1.StageUpdate, h, steps)
 		env.wantSecretControlledBy(web1)
 	})
+}
+
+// The Intent's Delete never waits for an ending Update's cleanup: deleting the
+// Intent garbage-collects its ManagedResources, and the sweep is the backstop.
+func TestABeginPhaseForDeleteSkipsAnEndingUpdatesCleanup(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	h, steps := env.oneResourceUpdate()
+	var failing atomic.Bool
+	failing.Store(true)
+	env.failMRDeletes(&failing)
+	if _, err := env.beginStage(lastv1alpha1.StageUpdate, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("EndPhase with a failing delete = %v, want Unavailable", err)
+	}
+	del := env.startDelete(teardownCommands())
+	env.approve(deleteApproval("teardown", del))
+	if _, err := env.beginStage(lastv1alpha1.StageDelete, del); err != nil {
+		t.Fatalf("BeginPhase(Delete) while the cleanup fails = %v", err)
+	}
+	if p := env.g.phases.get(envKey); p == nil || p.stage != lastv1alpha1.StageDelete {
+		t.Fatalf("open phase = %+v, want the Delete", p)
+	}
+	if ex := env.executed(); ex.PlanHash != h {
+		t.Fatalf("executed = %s, want the Update %s", ex.PlanHash, h)
+	}
+}
+
+// A Create that replaces an executed plan (the operator could not read the
+// audit log, so it planned a Create) deletes the ManagedResources it dropped,
+// as an Update does.
+func TestASucceededCreateDeletesStaleManagedResources(t *testing.T) {
+	env, _ := executedEnv(t)
+	env.createMRs(2)
+	steps := []lastv1alpha1.Command{argvStep("c1", kubectlBin, "apply", "-f", "/work/web2.yaml")}
+	h := env.recordPlan(lastv1alpha1.StageCreate, plan.Body{Steps: steps, Resources: executedResources()})
+	env.approve(approvalFor("create-again", h, lastv1alpha1.DecisionApprove, approver))
+	before := len(env.entries())
+	env.runPhase(lastv1alpha1.StageCreate, h, steps)
+	env.wantMRs(0, 8, 9)
+	var deleted []audit.Entry
+	for _, en := range env.entries()[before:] {
+		if en.Type == audit.TypeManagedResourceDeleted {
+			deleted = append(deleted, en)
+		}
+	}
+	if len(deleted) != 1 || deleted[0].Stage != string(lastv1alpha1.StageCreate) || deleted[0].SubjectHash != h {
+		t.Fatalf("managedresource.deleted entries = %+v, want one for the Create", deleted)
+	}
 }

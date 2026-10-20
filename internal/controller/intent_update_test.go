@@ -94,7 +94,7 @@ var _ = Describe("Intent updates", func() {
 			Expect(in.Status.ObservedGeneration).To(Equal(in.Generation))
 			Expect(readyCondition(key).Message).To(HaveSuffix("for stage Update"))
 			first := requestText(gw.lastRequest(key))
-			Expect(first).To(ContainSubstring("This Intent already executed this plan:\n"))
+			Expect(first).To(ContainSubstring("This Intent already executed this plan (do not repeat it as your answer):\n"))
 			Expect(first).To(ContainSubstring(`"description":"cache"`))
 			Expect(first).To(ContainSubstring("Plan an Update"))
 		},
@@ -178,7 +178,7 @@ var _ = Describe("Intent updates", func() {
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 		Expect(getIntent(key).Status.Stage).To(Equal(lastv1alpha1.StageUpdate))
 		first := requestText(gw.lastRequest(key))
-		Expect(first).To(ContainSubstring("This Intent already executed this plan:\n"))
+		Expect(first).To(ContainSubstring("This Intent already executed this plan (do not repeat it as your answer):\n"))
 		Expect(first).To(ContainSubstring("The previous plan failed and was not completed:\nstep s2 exited 1: boom"))
 		Expect(gw.executedOf(key)).To(Equal(createHash), "a failed Update leaves the executed plan as it was")
 

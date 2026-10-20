@@ -121,7 +121,7 @@ func FirstMessage(r Request) string {
 	if r.Executed != nil {
 		raw, err := executedJSON(*r.Executed)
 		if err == nil {
-			fmt.Fprintf(&b, "\nThis Intent already executed this plan:\n%s\n\n"+
+			fmt.Fprintf(&b, "\nThis Intent already executed this plan (do not repeat it as your answer):\n%s\n\n"+
 				"Plan an Update: steps that take the cluster from what that plan created to what the request now asks, "+
 				"and resources that list everything the Intent manages afterwards. "+
 				"Your steps must remove the real objects of any resource you drop. "+
@@ -317,7 +317,7 @@ func RemediateMessage(r Remediation) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Intent %s/%s, in namespace %s, has drifted from its executed plan.\n\nRequest:\n%s\n\n", r.Namespace, r.Name, r.Namespace, r.Text)
-	fmt.Fprintf(&b, "Executed plan:\n%s\n\nProbes that fail:\n", raw)
+	fmt.Fprintf(&b, "Executed plan (do not repeat it as your answer; its resources stay as they are):\n%s\n\nProbes that fail:\n", raw)
 	for _, f := range r.Failures {
 		fmt.Fprintf(&b, "- %s, probe %s, assert: %s\n", f.Resource, f.ProbeID, f.Assert)
 		res := f.Result
@@ -326,6 +326,8 @@ func RemediateMessage(r Remediation) (string, error) {
 			fmt.Fprintf(&b, "The probe could not finish: %s\n", f.Error)
 		case res.GetError() != "":
 			fmt.Fprintf(&b, "The probe could not finish: %s\n", res.GetError())
+		case res == nil:
+			b.WriteString("The probe gave no result.\n")
 		default:
 			fmt.Fprintf(&b, "The probe exited %d.\n", res.GetExitCode())
 		}

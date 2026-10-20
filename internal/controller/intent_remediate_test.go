@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -414,6 +416,47 @@ var _ = Describe("Intent remediation", func() {
 		Expect(got.Status.Remediations).To(Equal(int32(3)))
 		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseFailed))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, CondReady).Reason).To(Equal(ReasonRemediationFailed))
+	})
+
+	It("leaves an Intent that is no longer Drifted alone when an earlier conflict retry saw the cap", func() {
+		in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: intentName, Namespace: "uncapped", Generation: 1},
+			Spec: lastv1alpha1.IntentSpec{Request: "provision"}}
+		base := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(in).WithStatusSubresource(in).Build()
+		stored := func() *lastv1alpha1.Intent {
+			var got lastv1alpha1.Intent
+			Expect(base.Get(ctx, client.ObjectKeyFromObject(in), &got)).To(Succeed())
+			return &got
+		}
+		drifted := stored()
+		drifted.Status = lastv1alpha1.IntentStatus{Phase: lastv1alpha1.PhaseDrifted, ObservedGeneration: drifted.Generation,
+			Stage: lastv1alpha1.StageCreate, Remediations: 2}
+		Expect(base.Status().Update(ctx, drifted)).To(Succeed())
+		stale := stored() // seen Drifted with 2 remediations
+		// Each status write first finds the Intent changed: the first attempt
+		// finds a third remediation counted (the cap), the second finds the drift
+		// cleared, and the third goes through.
+		changes := []func(*lastv1alpha1.Intent){
+			func(in *lastv1alpha1.Intent) { in.Status.Remediations = 3 },
+			func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhaseReady },
+		}
+		fc := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if len(changes) > 0 {
+					cur := stored()
+					changes[0](cur)
+					changes = changes[1:]
+					Expect(c.Status().Update(ctx, cur)).To(Succeed())
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		})
+		r := &IntentReconciler{Client: fc, Reader: fc, Scheme: scheme.Scheme, Gateway: gw,
+			Recorder: events.NewFakeRecorder(10), RetryDelay: time.Millisecond}
+		_, err := r.startRemediate(ctx, stale)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseReady), "a Ready Intent is never failed at the cap")
+		Expect(got.Status.Remediations).To(Equal(int32(3)))
 	})
 
 	It("resets remediations after a fully passing scheduled probe run", func() {

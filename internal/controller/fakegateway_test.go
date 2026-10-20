@@ -575,11 +575,11 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 		// repaired the executed plan: neither becomes the executed plan.
 		f.executed[key], f.execBody[key] = in.GetSubjectHash(), body
 	}
-	if in.GetSucceeded() && stage == string(lastv1alpha1.StageUpdate) {
+	if in.GetSucceeded() && (stage == string(lastv1alpha1.StageCreate) || stage == string(lastv1alpha1.StageUpdate)) {
 		if err := f.moveKeptSecrets(ctx, key, body); err != nil {
 			return nil, err
 		}
-		if err := f.deleteStale(ctx, key, uid, kept, in.GetSubjectHash()); err != nil {
+		if err := f.deleteStale(ctx, key, uid, kept, stage, in.GetSubjectHash()); err != nil {
 			return nil, err
 		}
 	}
@@ -590,12 +590,12 @@ func (f *fakeGateway) EndPhase(ctx context.Context, in *gatewayv1.EndPhaseReques
 	return &gatewayv1.EndPhaseResponse{}, nil
 }
 
-// deleteStale deletes the ManagedResources a succeeded Update dropped, those the
+// deleteStale deletes the ManagedResources a succeeded Create or Update dropped, those the
 // Intent of uid controls named other than its first kept, and audits each as
 // managedresource.deleted, as the gateway does: one already gone or terminating
 // is skipped with no entry. Unlike the gateway, it does not retry a failed
 // delete. f.mu must be held.
-func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName, uid types.UID, kept int, subject string) error {
+func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName, uid types.UID, kept int, stage, subject string) error {
 	var list lastv1alpha1.ManagedResourceList
 	if err := f.c.List(ctx, &list, client.InNamespace(key.Namespace)); err != nil {
 		return status.Error(codes.Unavailable, err.Error())
@@ -616,7 +616,7 @@ func (f *fakeGateway) deleteStale(ctx context.Context, key types.NamespacedName,
 		case err != nil:
 			return status.Error(codes.Unavailable, err.Error())
 		}
-		f.appendAudit(key, audit.TypeManagedResourceDeleted, string(lastv1alpha1.StageUpdate), subject,
+		f.appendAudit(key, audit.TypeManagedResourceDeleted, stage, subject,
 			map[string]any{"managedResource": mr.Name, "uid": string(mr.UID)})
 	}
 	return nil

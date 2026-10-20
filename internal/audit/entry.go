@@ -29,7 +29,7 @@ const (
 	TypePolicyDenied      = "policy.denied"
 	// output Secret written; values recorded as SHA-256 (spec §15)
 	TypeOutputWritten = "output.written"
-	// a ManagedResource a succeeded Update dropped, deleted by the gateway; its
+	// a ManagedResource a succeeded Create or Update dropped, deleted by the gateway; its
 	// output Secret goes with it by garbage collection (spec §15)
 	TypeManagedResourceDeleted = "managedresource.deleted"
 	// an output Secret moved, unchanged, to the ManagedResource that now

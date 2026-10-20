@@ -577,7 +577,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if err := g.finishEnded(ctx, w, actor, key, ns, name, string(intent.UID), rec); err != nil {
+	if err := g.finishEnded(ctx, w, actor, key, ns, name, string(intent.UID), stage, rec); err != nil {
 		return nil, err
 	}
 	if rec.Open != nil {
@@ -588,7 +588,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 			return nil, err
 		}
 	}
-	if err := g.finishEnding(ctx, w, actor, key, ns, name, string(intent.UID)); err != nil {
+	if err := g.finishEnding(ctx, w, actor, key, ns, name, string(intent.UID), stage); err != nil {
 		return nil, err
 	}
 	// After the previous phase is finished: it may have become the executed plan.
@@ -644,19 +644,26 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
 }
 
-// finishEnding finishes the cleanup of the Intent's succeeded Update before a
-// new phase opens. Such an Update is saved as the executed plan without its open
-// phase, but stays in memory while stale ManagedResources are left to delete; a
-// new phase would replace it and leave them behind. Its operator may have moved
-// on (an EndPhase(failed) for the Intent's deletion is refused as already
-// succeeded), so BeginPhase does the work rather than wait for an EndPhase retry
-// that may never come. A step-holder of the phase answers Aborted and a failed
-// deletion Unavailable; the operator retries both. The caller holds the
-// Intent's lock, under which endSeq and outcome are written, and has checked
-// that the record has no open phase.
-func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string) error {
+// finishEnding finishes the cleanup of the Intent's succeeded Create or Update
+// before a new phase opens. Such a phase is saved as the executed plan without
+// its open phase, but stays in memory while stale ManagedResources are left to
+// delete; a new phase would replace it and leave them behind. Its operator may
+// have moved on (an EndPhase(failed) is refused as already succeeded), so
+// BeginPhase does the work rather than wait for an EndPhase retry that may
+// never come. A step-holder of the phase answers Aborted and a failed deletion
+// Unavailable; the operator retries both. A Delete phase (stage) does not wait
+// for the cleanup: the Intent's deletion garbage-collects its ManagedResources,
+// and the record sweep is the backstop. The caller holds the Intent's lock,
+// under which endSeq and outcome are written, and has checked that the record
+// has no open phase.
+func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string, stage lastv1alpha1.Stage) error {
 	p := g.phases.get(key)
-	if p == nil || p.endSeq == 0 || p.outcome != outcomeSucceeded || p.stage != lastv1alpha1.StageUpdate || p.uid != uid {
+	if p == nil || p.endSeq == 0 || p.outcome != outcomeSucceeded || !replacesExecuted(p.stage) || p.uid != uid {
+		return nil
+	}
+	if stage == lastv1alpha1.StageDelete {
+		slog.Info("Left an ended phase's ManagedResource cleanup to the Intent's deletion", "intent", key, "subject", p.subject)
+		g.phases.remove(key)
 		return nil
 	}
 	if !p.mu.TryLock() {
@@ -664,7 +671,7 @@ func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key,
 	}
 	defer p.mu.Unlock()
 	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
-		return status.Errorf(codes.Unavailable, "finish the cleanup of the previous Update (subject %s): %v", p.subject, err)
+		return status.Errorf(codes.Unavailable, "finish the cleanup of the previous %s (subject %s): %v", p.stage, p.subject, err)
 	}
 	g.phases.remove(key)
 	return nil
@@ -675,10 +682,12 @@ func (g *Gateway) finishEnding(ctx context.Context, w *audit.Writer, actor, key,
 // have abandoned it (an EndPhase(failed) is refused as already succeeded), and
 // a restart would otherwise interrupt a phase the audit log says ended. So
 // BeginPhase saves the record as EndPhase would have, and finishes what follows
-// the save (finishEnding). A step-holder of the phase answers Aborted and a
-// failed save Unavailable; the operator retries both. The caller holds the
-// Intent's lock, under which endSeq and outcome are written.
-func (g *Gateway) finishEnded(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string, rec *LoadedRecord) error {
+// the save (finishEnding), which a Delete phase (stage) leaves out. A
+// step-holder of the phase answers Aborted and a failed save Unavailable; the
+// operator retries both. The caller holds the Intent's lock, under which endSeq
+// and outcome are written.
+func (g *Gateway) finishEnded(ctx context.Context, w *audit.Writer, actor, key, ns, name, uid string, stage lastv1alpha1.Stage,
+	rec *LoadedRecord) error {
 	p := g.phases.get(key)
 	if rec.Open == nil || rec.Open.Epoch != g.epoch || p == nil || p.endSeq == 0 || p.uid != uid || p.beginSeq != rec.Open.BeginSeq {
 		return nil
@@ -690,8 +699,10 @@ func (g *Gateway) finishEnded(ctx context.Context, w *audit.Writer, actor, key, 
 	if err := g.saveEnded(ctx, rec, p); err != nil {
 		return err
 	}
-	if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
-		return status.Errorf(codes.Unavailable, "finish the previous phase (subject %s): %v", p.subject, err)
+	if stage != lastv1alpha1.StageDelete {
+		if err := g.afterSave(ctx, w, actor, key, ns, name, p); err != nil {
+			return status.Errorf(codes.Unavailable, "finish the previous phase (subject %s): %v", p.subject, err)
+		}
 	}
 	g.phases.remove(key)
 	return nil
@@ -985,8 +996,9 @@ func (g *Gateway) endPhase(ctx context.Context, req *gatewayv1.EndPhaseRequest) 
 }
 
 // afterSave finishes a succeeded phase once its record is saved without the open
-// phase: a Delete drops the record, and an Update, now the executed plan,
-// deletes the ManagedResources it dropped. On an error EndPhase keeps the phase,
+// phase: a Delete drops the record, and a Create or Update, now the executed
+// plan, deletes the ManagedResources it dropped; a Create replaces an executed
+// plan when its operator could not read the audit log. On an error EndPhase keeps the phase,
 // and the operator's retry saves again and repeats what is left.
 func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns, name string, p *phase) error {
 	if p.outcome != outcomeSucceeded {
@@ -995,7 +1007,7 @@ func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns
 	switch p.stage {
 	case lastv1alpha1.StageDelete:
 		return g.dropRecord(ctx, key)
-	case lastv1alpha1.StageUpdate:
+	case lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate:
 		if p.stale == nil {
 			p.stale = map[types.UID]staleDeletion{}
 		}
@@ -1005,8 +1017,8 @@ func (g *Gateway) afterSave(ctx context.Context, w *audit.Writer, actor, key, ns
 	return nil
 }
 
-// deleteStaleManagedResources deletes the ManagedResources an Update dropped
-// (ruling R1): those in namespace ns whose controller is the Intent of UID uid,
+// deleteStaleManagedResources deletes the ManagedResources a Create or Update
+// dropped (ruling R1): those in namespace ns whose controller is the Intent of UID uid,
 // named other than ManagedResourceName(intent, i) for the executed plan's kept
 // resources. EndPhase(Update, succeeded) calls it, and the record sweep finishes
 // a cleanup a restart cut short. The operator cannot delete them (spec §4.1):
@@ -1074,7 +1086,7 @@ func (g *Gateway) deleteStaleManagedResources(ctx context.Context, w *audit.Writ
 		if err != nil {
 			return fmt.Errorf("delete ManagedResource %s: %w", mr.Name, err)
 		}
-		slog.Info("Deleted ManagedResource the Update dropped", "intent", entry.Intent, "name", mr.Name)
+		slog.Info("Deleted ManagedResource the executed plan dropped", "intent", entry.Intent, "name", mr.Name)
 		seen[mr.UID] = staleDeletion{name: mr.Name}
 		if err := record(mr.UID); err != nil {
 			return err
