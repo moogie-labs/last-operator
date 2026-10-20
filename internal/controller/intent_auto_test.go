@@ -162,7 +162,7 @@ var _ = Describe("Auto modes", func() {
 	Describe("Remediate", func() {
 		web := lastv1alpha1.ManagedResourceSpec{Description: "nginx Deployment",
 			Probes: []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{
-				Argv: []string{argKubectl, argGet, "deploy/web", "-o", "json"}}}, Assert: "result.json.replicas == 2"}}}
+				Argv: []string{argKubectl, argGet, "deploy/web", "-o", formatJSON}}}, Assert: "result.json.replicas == 2"}}}
 		applied := argvStep("s1", argKubectl, "apply", "-f", "web.yaml")
 		applied.Reason = "create the Deployment"
 

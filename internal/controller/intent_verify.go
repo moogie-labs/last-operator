@@ -18,6 +18,7 @@ import (
 
 // verify runs every probe of the executed plan once; all must pass (spec §7).
 // A failure here surfaces a bad probe at creation time instead of as drift.
+// Reaching Ready resets status.replans and status.retries (D10).
 // After a Remediate, the probed plan is the executed plan it repaired, and a
 // failure is drift that persists (D11): the Intent goes Drifted, so the next
 // remediation is counted, or the cap fails it with RemediationFailed.
@@ -61,6 +62,7 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "Probes failed: "+strings.Join(failed, ", "))
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		in.Status.Replans, in.Status.Retries = 0, 0 // the execution succeeded (D10)
 		setPhase(in, lastv1alpha1.PhaseReady, ReasonReady, "Every probe passed")
 	})
 }

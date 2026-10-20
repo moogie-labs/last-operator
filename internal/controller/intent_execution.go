@@ -290,9 +290,10 @@ func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent
 
 // endFailed closes the phase as failed. A failure of a Create, Update or
 // Remediate plan itself returns the Intent to Planning in the same stage, with
-// the failure as context (spec §8.3); anything else, and any failed teardown,
-// fails the Intent. A Remediate replan is the same drift episode: it is not
-// counted again.
+// the failure as context (spec §8.3), counted in status.replans; after
+// maxReplans replans in a row it fails the Intent with PlanningFailed instead
+// (D10). Anything else, and any failed teardown, fails the Intent. A Remediate
+// replan is the same drift episode: it is not counted as a remediation again.
 func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Intent, reason string, replan bool) (ctrl.Result, error) {
 	logf.FromContext(ctx).Info("Ending phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
 	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
@@ -303,7 +304,11 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
 	}
 	if stage := planStage(in); replan && replannable(stage) {
-		return r.startSession(ctx, in, stage, reason) // the failed phase left the executed plan as it was
+		if in.Status.Replans >= maxReplans {
+			return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed,
+				fmt.Sprintf("The plan failed %d times; last failure: %s%s", maxReplans, reason, specEditHint(in)))
+		}
+		return r.startSession(ctx, in, stage, reason, causeReplan) // the failed phase left the executed plan as it was
 	}
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)
 }

@@ -20,7 +20,7 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 ## For you to decide
 
-- **A denied Remediate fails the Intent with `ApprovalDenied`,** and its probes stop. Only a spec edit restarts it. Should the Intent instead keep probing, or offer the retry annotation (M5c, D10)?
+- **A denied Remediate fails the Intent with `ApprovalDenied`,** and its probes stop. *Answered in M5c:* the retry annotation now retries a Failed Intent in any stage. For a denied Remediate it starts a new Remediate session, with the denial as context and `status.remediations` restarted at 0. A denied plan is never retried automatically, even in Auto mode.
 - **A partially applied Create (from M5a) is released without teardown.** This now also covers an aborted Update that ran steps.
 
 ## Gateway

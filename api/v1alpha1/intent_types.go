@@ -28,8 +28,8 @@ const (
 	// FinalizerTeardown holds an Intent until its teardown succeeds, or until it
 	// is clear that nothing ever executed.
 	FinalizerTeardown = "last.moogie-labs.com/teardown"
-	// AnnotationRetry plans a failed teardown again whenever its value changes;
-	// status.observedRetry records the value the operator acted on.
+	// AnnotationRetry retries a Failed Intent, in any stage, whenever its value
+	// changes; status.observedRetry records the value the operator acted on.
 	AnnotationRetry = "last.moogie-labs.com/retry"
 )
 
@@ -124,7 +124,7 @@ type IntentStatus struct {
 	// +optional
 	SuggestedRules []string `json:"suggestedRules,omitempty"`
 	// ObservedRetry is the last.moogie-labs.com/retry annotation's value when the
-	// current teardown was planned; a different value plans it again.
+	// current planning session started; a different value retries a Failed Intent.
 	// +optional
 	ObservedRetry string `json:"observedRetry,omitempty"`
 	// Remediations counts the consecutive remediations drift started. At 3,
@@ -139,10 +139,13 @@ type IntentStatus struct {
 	EffectiveModes *StageModes `json:"effectiveModes,omitempty"`
 	// Replans counts the consecutive replans a failed step started. At 3, the
 	// next failed step fails the Intent with PlanningFailed instead of planning.
+	// A spec edit, a retry and reaching Ready reset it to 0.
 	// +optional
 	Replans int32 `json:"replans,omitempty"`
-	// Retries counts the automatic retries of a Failed Intent in an Auto stage; it
-	// sets the backoff before the next one.
+	// Retries counts the retries of a Failed Intent, by the retry annotation or
+	// automatically in an Auto stage; it sets the backoff before the next
+	// automatic one (1m, doubled per retry, at most 1h). Reaching Ready and a
+	// spec edit reset it to 0.
 	// +optional
 	Retries int32 `json:"retries,omitempty"`
 	// +listType=map

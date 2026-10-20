@@ -32,7 +32,7 @@ const planTimeout = agent.MaxAttempts*agent.CallTimeout + time.Minute
 // plan must address. The session plans an Update once the Intent has an
 // executed plan, and a Create otherwise (sessionStage).
 func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
-	return r.startSession(ctx, in, "", feedback)
+	return r.startSession(ctx, in, "", feedback, causePlan)
 }
 
 // startSession is startPlanning for a session whose stage may already be
@@ -43,17 +43,18 @@ func (r *IntentReconciler) startPlanning(ctx context.Context, in *lastv1alpha1.I
 //
 // A Remediate session keeps observedGeneration, so a spec edit made meanwhile
 // still plans an Update, and keeps status.plan (see startRemediate). A session
-// a spec edit starts (a new generation) resets status.remediations: drift of
-// the edited Intent starts counting afresh. A replan after a failed step is
-// no edit and keeps the count.
+// a spec edit starts (a new generation) resets status.remediations,
+// status.replans and status.retries: the edited Intent starts counting afresh.
+// A replan after a failed step is no edit and keeps the counts. The write
+// counts the session's cause (sessionCause.count).
 //
 // It adds the teardown finalizer first (D7). A deletion overrides everything
 // (design §4.3): for an Intent being deleted, Delete planning starts instead.
 // The write shows the Intent's effective modes in status.effectiveModes.
 func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage,
-	feedback string) (ctrl.Result, error) {
+	feedback string, cause sessionCause) (ctrl.Result, error) {
 	if !in.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.startDelete(ctx, in, feedback)
+		return ctrl.Result{}, r.startDelete(ctx, in, feedback, cause)
 	}
 	if err := r.ensureFinalizer(ctx, in); err != nil {
 		return ctrl.Result{}, err
@@ -75,12 +76,13 @@ func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.In
 		in.Status.EffectiveModes = l.modes(in).Status()
 		if stage != lastv1alpha1.StageRemediate {
 			if in.Generation != in.Status.ObservedGeneration {
-				in.Status.Remediations = 0
+				in.Status.Remediations, in.Status.Replans, in.Status.Retries = 0, 0, 0
 			}
 			in.Status.ObservedGeneration = in.Generation
 			in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
 			in.Status.Plan = nil
 		}
+		cause.count(in)
 		resetSession(in, stage, feedback)
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM for a plan")
 	})
@@ -164,7 +166,7 @@ func (r *IntentReconciler) plan(ctx context.Context, in *lastv1alpha1.Intent) (c
 			// Nothing in the Intent's state continues the session, which ends
 			// with the model's own answer: start a new one.
 			if planStage(in) == lastv1alpha1.StageRemediate {
-				return r.startSession(ctx, in, lastv1alpha1.StageRemediate, replanFeedback(in))
+				return r.startSession(ctx, in, lastv1alpha1.StageRemediate, replanFeedback(in), causePlan)
 			}
 			return r.startPlanning(ctx, in, replanFeedback(in))
 		}
@@ -422,7 +424,7 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 	stage := planStage(in)
 	switch {
 	case stage == lastv1alpha1.StageDelete && in.Status.Plan == nil:
-		return ctrl.Result{}, r.startDelete(ctx, in, "")
+		return ctrl.Result{}, r.startDelete(ctx, in, "", causePlan)
 	case in.Generation != in.Status.ObservedGeneration && replannable(stage), in.Status.Plan == nil:
 		return r.startPlanning(ctx, in, "")
 	}

@@ -409,3 +409,47 @@ func TestFollowShowsRemediating(t *testing.T) {
 		}
 	}
 }
+
+func TestFailedNamesTheRetryAnnotationForEveryStage(t *testing.T) {
+	const auto = "retries it automatically"
+	modes := func(m lastv1alpha1.Mode) *lastv1alpha1.StageModes {
+		return &lastv1alpha1.StageModes{Discovery: m, Create: m, Reconcile: m, Delete: m}
+	}
+	cases := []struct {
+		name   string
+		stage  lastv1alpha1.Stage
+		reason string
+		modes  *lastv1alpha1.StageModes
+		auto   bool
+	}{
+		{"Create, Manual", lastv1alpha1.StageCreate, "ExecutionFailed", modes(lastv1alpha1.ModeManual), false},
+		{"no stage, no modes", "", "PlanningFailed", nil, false},
+		{"Update, Auto", lastv1alpha1.StageUpdate, "ExecutionFailed", modes(lastv1alpha1.ModeAuto), true},
+		{"Remediate, Auto", lastv1alpha1.StageRemediate, reasonRemediationFailed, modes(lastv1alpha1.ModeAuto), true},
+		{"Remediate, only create Auto", lastv1alpha1.StageRemediate, reasonRemediationFailed,
+			&lastv1alpha1.StageModes{Create: lastv1alpha1.ModeAuto, Reconcile: lastv1alpha1.ModeManual}, false},
+		{"RemediationFailed before the Remediate stage, reconcile Auto", lastv1alpha1.StageCreate, reasonRemediationFailed,
+			&lastv1alpha1.StageModes{Create: lastv1alpha1.ModeManual, Reconcile: lastv1alpha1.ModeAuto}, true},
+		{"Create, Auto, denied", lastv1alpha1.StageCreate, reasonApprovalDenied, modes(lastv1alpha1.ModeAuto), false},
+		{"Delete, Manual", lastv1alpha1.StageDelete, "TeardownFailed", modes(lastv1alpha1.ModeManual), false},
+		{"Delete, Auto", lastv1alpha1.StageDelete, "TeardownFailed", modes(lastv1alpha1.ModeAuto), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: webName}}
+			in.Status.Phase, in.Status.Stage, in.Status.EffectiveModes = lastv1alpha1.PhaseFailed, tc.stage, tc.modes
+			setReady(in, tc.reason, "it broke")
+			var out strings.Builder
+			if err := failed(&out, in); !errors.Is(err, ErrIntentFailed) {
+				t.Fatalf("failed = %v, want ErrIntentFailed", err)
+			}
+			if !strings.Contains(out.String(), "change its "+lastv1alpha1.AnnotationRetry+" annotation") &&
+				!strings.Contains(out.String(), "Change its "+lastv1alpha1.AnnotationRetry+" annotation") {
+				t.Errorf("the hint does not name the retry annotation:\n%s", out.String())
+			}
+			if got := strings.Contains(out.String(), auto); got != tc.auto {
+				t.Errorf("says it %q: %v, want %v:\n%s", auto, got, tc.auto, out.String())
+			}
+		})
+	}
+}

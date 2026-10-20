@@ -44,7 +44,8 @@ type IntentReconciler struct {
 	Reader client.Reader
 	// RetryDelay is the pause between retries of a gateway call within one reconcile.
 	RetryDelay time.Duration
-	// Now is the clock approvals age by; nil means time.Now. Tests inject one.
+	// Now is the clock approvals age by and Auto retries wait by; nil means
+	// time.Now. Tests inject one.
 	Now func() time.Time
 
 	// sessions holds planning conversations in memory (M3 spec §4.3).
@@ -100,8 +101,9 @@ func (r *IntentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.followProbes(ctx, &in)
 	case lastv1alpha1.PhaseFailed:
 		if in.Generation != in.Status.ObservedGeneration {
-			return r.startPlanning(ctx, &in, "") // a spec edit retries a failed Intent
+			return r.startPlanning(ctx, &in, "") // a spec edit plans the failed Intent afresh
 		}
+		return r.retryFailed(ctx, &in)
 	}
 	return ctrl.Result{}, nil
 }

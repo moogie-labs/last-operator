@@ -327,6 +327,9 @@ status:
       s2: { argv: ["kubectl", "apply", "-n", "team-x", "-f", "..."], lint: ["file argument"] }
   suggestedRules: [ … names of CommandRuleSuggestions created for this plan … ]
   remediations: 1                # consecutive remediations drift started (§7)
+  replans: 0                     # consecutive replans after failed steps (§7)
+  retries: 1                     # retries of the Failed Intent; sets the Auto backoff (§7)
+  observedRetry: "2"             # the retry annotation's value the operator last acted on (§7)
   conditions: [ … ]
 ```
 
@@ -335,6 +338,16 @@ started. At 3, the next drift fails the Intent with `RemediationFailed`
 instead of planning. A scheduled probe run in which every probe passes,
 after the Intent last became Ready, resets it to 0, and so does a spec
 edit that starts a new planning session (§7).
+
+`status.replans` counts the consecutive replans that failed steps
+started. At 3, the next failed step fails the Intent with
+`PlanningFailed` instead of planning again. `status.retries` counts the
+retries of a Failed Intent, by the retry annotation or automatically in
+an Auto stage, and sets the Auto backoff. Reaching Ready and a spec edit
+reset both to 0, and a retry resets `replans` (§7).
+`status.observedRetry` is the `last.moogie-labs.com/retry` annotation's
+value when the current planning session started; a different value
+retries a Failed Intent.
 
 Changing `spec.request` or `spec.answers` increments `generation` and
 starts a new planning cycle: an **Update** once a plan has executed, a
@@ -551,7 +564,8 @@ Pending → Clarifying ⇄ (user answers)
   spec edited  ──► Planning (stage=Update)              ▼
   probe fails  ──► Drifted → Remediating (stage=Remediate; approval* if reconcile=Manual) → Ready
   deleted      ──► finalizer → Planning (stage=Delete) → AwaitingApproval* → TearingDown → removed
-  any failure  ──► Failed (reason in conditions; retried with backoff or on spec edit)
+  any failure  ──► Failed (reason in conditions; retried by the retry annotation,
+                   by itself with backoff in Auto, or planned again on a spec edit)
 
   * skipped when the effective mode for that stage is Auto (see Auto modes
     below; the gateway may still need an approval),
@@ -676,7 +690,9 @@ Pending → Clarifying ⇄ (user answers)
     every probed ManagedResource, finishing after the Intent last became
     Ready, resets the count to 0; the Verifying run never does. A spec
     edit that starts a Create or Update session resets it too; a replan
-    after a failed step does not.
+    after a failed step does not. A retry of a failed Remediate, or of a
+    `RemediationFailed`, restarts the count at 0, and the retried
+    remediation counts as the first (Failures, below).
   - **Confirming the drift.** The session's first message is built only
     after the operator runs the probes once more (`RunProbes`) and
     records the outcomes on the ManagedResources. If every probe passes,
@@ -751,10 +767,10 @@ Pending → Clarifying ⇄ (user answers)
     ManagedResources go by owner-reference garbage collection, and so do
     their output Secrets. The gateway drops the Intent's record.
   - **Failure.** The Intent moves to `Failed` with reason
-    `TeardownFailed` and keeps its finalizer. Changing the
-    `last.moogie-labs.com/retry` annotation plans the teardown again,
-    with the failure as context; the operator records the value it acted
-    on in `status.observedRetry`. A spec edit does not.
+    `TeardownFailed` and keeps its finalizer. The retry annotation plans
+    the teardown again, with the failure as context, and with `delete:
+    Auto` the backoff does too, as for any failed stage (Failures,
+    below). A spec edit does not.
   - **Restarts.** A gateway restart mid-teardown closes the Delete phase
     as interrupted, and the operator plans the Delete again.
   - **Approvals are bound to the Intent's UID** (`spec.intentUID`). An
@@ -770,12 +786,44 @@ Pending → Clarifying ⇄ (user answers)
   - `ExecutionInterrupted`
   - `VerificationFailed`
   - `RemediationFailed` (drift returned after 3 consecutive remediations)
-  - `TeardownFailed` (a Delete; retried with the annotation above)
+  - `TeardownFailed` (a Delete)
 
-  A spec edit retries a failed Intent, planning a Create or an Update
-  as above. Automatic retry with backoff arrives with Auto modes (M5).
-  In Manual mode every replan needs a fresh approval; in Auto mode a
-  replan runs as any Auto plan does.
+  - **Replans (D10).** A step that exits non-zero replans at most 3
+    times in a row, counted in `status.replans`. The next failed step
+    fails the Intent with `PlanningFailed` and the message "The plan
+    failed 3 times; last failure: <reason>". In Manual mode every replan
+    needs a fresh approval; in Auto mode a replan runs as any Auto plan
+    does.
+  - **Spec edit.** A spec edit plans a failed Intent again, a Create or
+    an Update as above. A Delete is not planned again by an edit.
+  - **Retry annotation.** Changing the `last.moogie-labs.com/retry`
+    annotation retries a Failed Intent at once, in any stage and in
+    Manual or Auto mode. The retry restarts the failed stage's trigger,
+    with the failure as context:
+    - Create or Update: a planning session. A Create's stage is chosen
+      from the audit log as for an edit, so a Create that ran and then
+      failed verification plans an Update. An Update keeps its stage.
+    - Remediate, including `RemediationFailed`: a Remediate session, with
+      `status.remediations` restarted at 0.
+    - Delete: the teardown is planned again.
+
+    Every session start records the annotation's value in
+    `status.observedRetry`, so one change retries once.
+  - **Auto backoff.** When the failed stage's mode is Auto, the operator
+    retries by itself, as the annotation does, after
+    `min(1m · 2^retries, 1h)`: 1m, 2m, 4m, and so on up to 1h. The delay
+    counts from when the Intent failed, the `Ready` condition's
+    `lastTransitionTime`, which the operator sets when the Intent moves
+    to `Failed`. Until then the Intent is requeued for the time left.
+    `ApprovalDenied` is never retried automatically: a person refused
+    the plan, so only the annotation or a spec edit retries it. The mode
+    is read when the Intent is reconciled; the operator does not watch
+    policies for a Failed Intent.
+  - **Counts and resets.** Every retry, by the annotation or the
+    backoff, increments `status.retries` in the write that starts it,
+    and resets `status.replans`. Reaching Ready (Verifying passed, or a
+    confirming probe run found no drift) resets both to 0, and so does a
+    spec edit; a deletion's first Delete session does too.
 - **Operator restarts during Executing.** Step results live only in the
   operator's memory and the gateway's record, so the operator never
   resumes a phase. An `Executed` condition checkpoints the phase:

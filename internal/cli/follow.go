@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/policy"
 )
 
 // ErrIntentFailed is returned when a followed Intent fails, after its reason is printed.
@@ -150,14 +151,34 @@ func printReady(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Inte
 	return nil
 }
 
+// Ready reasons of a failed Intent the hint depends on: the operator never
+// retries a denied plan by itself, and the remediation cap fails the Intent
+// before a Remediate session records its stage.
+const (
+	reasonApprovalDenied    = "ApprovalDenied"
+	reasonRemediationFailed = "RemediationFailed"
+)
+
+// failed prints why the Intent failed and how to try again: the retry
+// annotation retries any stage, and a spec edit plans again unless the Intent
+// is being torn down. In an Auto stage the operator also retries by itself,
+// with backoff, unless the plan was denied (main spec §7).
 func failed(w io.Writer, in *lastv1alpha1.Intent) error {
 	reason, msg := "", ""
 	if c := meta.FindStatusCondition(in.Status.Conditions, condReady); c != nil {
 		reason, msg = c.Reason, c.Message
 	}
-	again := "Edit its spec.request to try again."
-	if in.Status.Stage == lastv1alpha1.StageDelete {
+	stage := planStageOf(in)
+	if reason == reasonRemediationFailed {
+		stage = lastv1alpha1.StageRemediate
+	}
+	again := "Edit its spec.request, or change its " + lastv1alpha1.AnnotationRetry + " annotation, to try again."
+	if stage == lastv1alpha1.StageDelete {
 		again = "Change its " + lastv1alpha1.AnnotationRetry + " annotation to plan the teardown again."
+	}
+	if m := in.Status.EffectiveModes; m != nil && reason != reasonApprovalDenied &&
+		(policy.EffectiveModes{Discovery: m.Discovery, Create: m.Create, Reconcile: m.Reconcile, Delete: m.Delete}).For(stage) == lastv1alpha1.ModeAuto {
+		again += " Its " + string(stage) + " stage is Auto, so the operator also retries it automatically, with backoff."
 	}
 	writef(w, "Intent %s/%s failed: %s: %s\n%s\n", in.Namespace, in.Name, clean(reason), clean(msg), again)
 	return ErrIntentFailed

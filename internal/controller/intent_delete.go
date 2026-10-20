@@ -32,10 +32,11 @@ const retryTeardownHint = "change the " + lastv1alpha1.AnnotationRetry + " annot
 
 // tearDown drives an Intent being deleted (design §3.4). A deletion overrides
 // everything (§4.3): until the Intent is in stage Delete, whatever it was doing
-// is abandoned and the teardown starts over.
+// is abandoned and the teardown starts over. A failed teardown retries as any
+// failed stage does (retryFailed).
 func (r *IntentReconciler) tearDown(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	if in.Status.Stage != lastv1alpha1.StageDelete {
-		return r.beginDelete(ctx, in, "")
+		return r.beginDelete(ctx, in, "", causePlan)
 	}
 	switch in.Status.Phase {
 	case lastv1alpha1.PhasePlanning:
@@ -45,23 +46,17 @@ func (r *IntentReconciler) tearDown(ctx context.Context, in *lastv1alpha1.Intent
 	case lastv1alpha1.PhaseTearingDown:
 		return r.execute(ctx, in)
 	case lastv1alpha1.PhaseFailed:
-		if in.Annotations[lastv1alpha1.AnnotationRetry] == in.Status.ObservedRetry {
-			return ctrl.Result{}, nil // the Intent watch wakes us when the annotation changes
-		}
-		feedback := ""
-		if c := meta.FindStatusCondition(in.Status.Conditions, CondReady); c != nil {
-			feedback = c.Message
-		}
-		return r.beginDelete(ctx, in, feedback)
+		return r.retryFailed(ctx, in)
 	}
-	return r.beginDelete(ctx, in, "")
+	return r.beginDelete(ctx, in, "", causePlan)
 }
 
 // beginDelete ends any phase the Intent left open, then decides from what it
 // executed: an Intent with teardown commands plans its Delete; one with nothing
 // to tear down is released at once. feedback, when set, is the failure the new
-// Delete plan must address.
-func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Intent, feedback string) (ctrl.Result, error) {
+// Delete plan must address; cause is why Delete planning starts.
+func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Intent, feedback string,
+	cause sessionCause) (ctrl.Result, error) {
 	if err := r.abortOpenPhase(ctx, in); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -81,7 +76,7 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonExecutedPlanNotFound, "Teardown", "%s",
 			"The executed plan was not found in the audit log; the teardown comes from the ManagedResources' teardown commands")
 	}
-	return ctrl.Result{}, r.startDelete(ctx, in, feedback)
+	return ctrl.Result{}, r.startDelete(ctx, in, feedback, cause)
 }
 
 // abortOpenPhase ends the phase an Intent being deleted may hold open (abortPhase).
@@ -124,10 +119,12 @@ func (r *IntentReconciler) abortPhase(ctx context.Context, in *lastv1alpha1.Inte
 }
 
 // startDelete starts Delete planning: the model orders the teardown commands.
-// It records the retry annotation's value, so that only a later change plans
-// the teardown again, and shows the Intent's effective modes in
-// status.effectiveModes.
-func (r *IntentReconciler) startDelete(ctx context.Context, in *lastv1alpha1.Intent, feedback string) error {
+// The write counts the cause and records the retry annotation's value, so that
+// only a later change plans the teardown again (sessionCause.count). The
+// deletion raised the generation: its first Delete session resets
+// status.replans and status.retries, as a spec edit does. The write shows the
+// Intent's effective modes in status.effectiveModes.
+func (r *IntentReconciler) startDelete(ctx context.Context, in *lastv1alpha1.Intent, feedback string, cause sessionCause) error {
 	l, err := r.readLayers(ctx, in.Namespace)
 	if err != nil {
 		return err
@@ -136,8 +133,11 @@ func (r *IntentReconciler) startDelete(ctx context.Context, in *lastv1alpha1.Int
 	return r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		in.Status.EffectiveModes = l.modes(in).Status()
 		in.Status.Stage = lastv1alpha1.StageDelete
+		if in.Generation != in.Status.ObservedGeneration {
+			in.Status.Replans, in.Status.Retries = 0, 0
+		}
 		in.Status.ObservedGeneration = in.Generation
-		in.Status.ObservedRetry = in.Annotations[lastv1alpha1.AnnotationRetry]
+		cause.count(in)
 		in.Status.PlanningSessionSeq = 0
 		in.Status.Questions = nil
 		in.Status.PendingCommand = nil

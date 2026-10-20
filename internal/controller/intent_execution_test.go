@@ -29,7 +29,7 @@ func conversationText(req *gatewayv1.CallLLMRequest) string {
 
 var _ = Describe("Intent execution", func() {
 	var key types.NamespacedName
-	s1 := argvStep("s1", argKubectl, argGet, "namespace", "x", "-o", "json")
+	s1 := argvStep("s1", argKubectl, argGet, "namespace", "x", "-o", formatJSON)
 	s2 := argvStep("s2", "echo", "${steps.s1.json.metadata.name}")
 	resource := lastv1alpha1.ManagedResourceSpec{Description: "the namespace",
 		Probes:           []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{trueCmd}}}, Assert: trueCmd}},

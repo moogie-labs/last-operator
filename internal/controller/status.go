@@ -179,10 +179,22 @@ func (r *IntentReconciler) update(ctx context.Context, in *lastv1alpha1.Intent, 
 	return nil
 }
 
-// fail moves the Intent to Failed; a spec edit retries it (spec §7). A failure
+// fail moves the Intent to Failed; a spec edit plans it again, and the retry
+// annotation or, in an Auto stage, the backoff retries it (spec §7). A failure
 // ends the planning session.
+//
+// The Ready condition was False before, in every phase but Ready, so
+// SetStatusCondition would keep its lastTransitionTime. fail sets it to the
+// time the Intent failed instead, which the backoff counts from (D10).
 func (r *IntentReconciler) fail(ctx context.Context, in *lastv1alpha1.Intent, reason, msg string) error {
 	logf.FromContext(ctx).Info("Intent failed", "reason", reason, "message", clip(msg))
 	r.sessions.drop(client.ObjectKeyFromObject(in))
-	return r.update(ctx, in, func(in *lastv1alpha1.Intent) { setPhase(in, lastv1alpha1.PhaseFailed, reason, msg) })
+	now := metav1.NewTime(r.now())
+	return r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+		from := in.Status.Phase
+		setPhase(in, lastv1alpha1.PhaseFailed, reason, msg)
+		if c := meta.FindStatusCondition(in.Status.Conditions, CondReady); c != nil && from != lastv1alpha1.PhaseFailed {
+			c.LastTransitionTime = now
+		}
+	})
 }

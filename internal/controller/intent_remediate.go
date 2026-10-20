@@ -38,7 +38,19 @@ const msgSpecChanged = "Aborted: the spec changed"
 // probes keep following them if the drift has cleared. The write shows the
 // Intent's effective modes in status.effectiveModes.
 func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
-	if n := in.Status.Remediations; n >= maxRemediations {
+	return r.beginRemediate(ctx, in, "", causePlan)
+}
+
+// beginRemediate is startRemediate for a cause. A retry (causeRetry) starts
+// from a Failed Remediate rather than from Drifted: the count of consecutive
+// remediations starts over at 0, the retried remediation is counted as the
+// first, and feedback is the failure the plan must address (D10, D11).
+func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.Intent, feedback string,
+	cause sessionCause) (ctrl.Result, error) {
+	from := lastv1alpha1.PhaseDrifted
+	if cause == causeRetry {
+		from = lastv1alpha1.PhaseFailed
+	} else if n := in.Status.Remediations; n >= maxRemediations {
 		return ctrl.Result{}, r.fail(ctx, in, ReasonRemediationFailed,
 			fmt.Sprintf("The Intent drifted again after %d consecutive remediations%s", n, specEditHint(in)))
 	}
@@ -49,23 +61,27 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 	r.sessions.drop(client.ObjectKeyFromObject(in))
 	gen, capped := in.Generation, false
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		// A conflict retry re-reads the Intent: start only from the drift that
-		// was seen, and never past the cap. Each attempt decides afresh.
+		// A conflict retry re-reads the Intent: start only from the drift or
+		// failure that was seen, and never past the cap. Each attempt decides afresh.
 		capped = false
-		if in.Status.Phase != lastv1alpha1.PhaseDrifted || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
+		if in.Status.Phase != from || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
 			return
+		}
+		if cause == causeRetry {
+			in.Status.Remediations = 0
 		}
 		if capped = in.Status.Remediations >= maxRemediations; capped {
 			return
 		}
 		in.Status.Remediations++
 		in.Status.EffectiveModes = l.modes(in).Status()
-		resetSession(in, lastv1alpha1.StageRemediate, "")
+		cause.count(in)
+		resetSession(in, lastv1alpha1.StageRemediate, feedback)
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Confirming the drift before asking the LLM for a Remediate plan")
 	}); err != nil || !capped {
 		return ctrl.Result{}, err
 	}
-	return r.startRemediate(ctx, in) // in holds the Intent as stored: it fails at the cap
+	return r.beginRemediate(ctx, in, feedback, cause) // in holds the Intent as stored: it fails at the cap
 }
 
 // errDriftCleared marks a Remediate session whose confirming probe run passed:
@@ -194,6 +210,7 @@ func (r *IntentReconciler) driftCleared(ctx context.Context, in *lastv1alpha1.In
 		if giveBack && in.Status.Remediations > 0 {
 			in.Status.Remediations--
 		}
+		in.Status.Replans, in.Status.Retries = 0, 0 // back at Ready (D10)
 		setPhase(in, lastv1alpha1.PhaseReady, ReasonDriftCleared, why)
 	}); err != nil || !applied {
 		return err

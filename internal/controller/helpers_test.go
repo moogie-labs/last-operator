@@ -30,6 +30,7 @@ const (
 	argKubectl     = "kubectl"
 	web1           = "web-1"
 	s1Stdout       = "${steps.s1.stdout}"
+	formatJSON     = "json"
 )
 
 func newNamespace() string {
