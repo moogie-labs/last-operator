@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -242,8 +243,20 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 }
 
+// chainCache holds the audit entries this test process has read, per chain.
+// Entries are write-once, so each is read once: on a long-lived cluster the
+// chain keeps growing, and reading all of it on every call (some in a poll
+// loop) made every run slower than the last.
+var chainCache struct {
+	sync.Mutex
+	chain   string
+	lastKey string
+	entries []audit.Entry
+}
+
 // auditEntries reads the bundled audit store and returns every entry, in chain order,
-// that belongs to intent ("" returns all of them).
+// that belongs to intent ("" returns all of them). Only entries written since
+// the last call are fetched.
 func auditEntries(t *testing.T, intent string) []audit.Entry {
 	t.Helper()
 	ctx := context.Background()
@@ -257,11 +270,15 @@ func auditEntries(t *testing.T, intent string) []audit.Entry {
 		t.Fatal(err)
 	}
 	sink := audit.NewS3Sink(s3c, "last-audit")
-	objs, err := sink.List(ctx, audit.EntryPrefix(chain), "")
+	chainCache.Lock()
+	defer chainCache.Unlock()
+	if chainCache.chain != chain {
+		chainCache.chain, chainCache.lastKey, chainCache.entries = chain, "", nil
+	}
+	objs, err := sink.List(ctx, audit.EntryPrefix(chain), chainCache.lastKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var entries []audit.Entry
 	for _, o := range objs {
 		body, err := sink.Get(ctx, o.Key, "")
 		if err != nil {
@@ -271,6 +288,11 @@ func auditEntries(t *testing.T, intent string) []audit.Entry {
 		if err := json.Unmarshal(body, &e); err != nil {
 			t.Fatal(err)
 		}
+		chainCache.entries = append(chainCache.entries, e)
+		chainCache.lastKey = o.Key
+	}
+	var entries []audit.Entry
+	for _, e := range chainCache.entries {
 		if intent == "" || e.Intent == intent {
 			entries = append(entries, e)
 		}

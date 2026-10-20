@@ -58,6 +58,7 @@ func newDay2(t *testing.T, prefix string) *day2 {
 	var prevLLM *lastv1alpha1.LocalRef
 	t.Cleanup(func() {
 		bg := context.Background()
+		releaseIntents(t, crc, d.ns)
 		for _, o := range []client.Object{
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: d.ns}},
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: d.provider, Namespace: "last-gateway"}},

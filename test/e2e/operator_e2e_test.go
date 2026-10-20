@@ -54,6 +54,52 @@ func e2eClients(t *testing.T) (client.Client, kubernetes.Interface) {
 	return crc, kubernetes.NewForConfigOrDie(cfg)
 }
 
+// intentReleaseWait is how long a cleanup lets the operator release the
+// namespace's deleted Intents before it removes their teardown finalizer.
+const intentReleaseWait = 30 * time.Second
+
+// releaseIntents deletes the namespace's Intents before a cleanup deletes the
+// namespace, so none is left terminating there. An Intent the operator does not
+// release within intentReleaseWait (its teardown waits for an approval no one
+// gives) has its teardown finalizer removed: what it created goes with the
+// namespace.
+func releaseIntents(t *testing.T, crc client.Client, ns string) {
+	t.Helper()
+	bg := context.Background()
+	if err := crc.DeleteAllOf(bg, &lastv1alpha1.Intent{}, client.InNamespace(ns)); err != nil && !apierrors.IsNotFound(err) {
+		t.Errorf("cleanup: delete Intents in %s: %v", ns, err)
+		return
+	}
+	deadline := time.Now().Add(intentReleaseWait)
+	for {
+		var list lastv1alpha1.IntentList
+		if err := crc.List(bg, &list, client.InNamespace(ns)); err != nil {
+			t.Errorf("cleanup: list Intents in %s: %v", ns, err)
+			return
+		}
+		if len(list.Items) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			for i := range list.Items {
+				in := &list.Items[i]
+				if !slices.Contains(in.Finalizers, lastv1alpha1.FinalizerTeardown) {
+					continue
+				}
+				patch := client.MergeFrom(in.DeepCopy())
+				in.Finalizers = slices.DeleteFunc(in.Finalizers, func(f string) bool { return f == lastv1alpha1.FinalizerTeardown })
+				if err := crc.Patch(bg, in, patch); err != nil && !apierrors.IsNotFound(err) {
+					t.Errorf("cleanup: release Intent %s/%s: %v", ns, in.Name, err)
+					continue
+				}
+				t.Logf("cleanup: removed the teardown finalizer from Intent %s/%s (phase %s)", ns, in.Name, in.Status.Phase)
+			}
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 // waitFor polls cond every two seconds until it returns true or timeout passes.
 // cond's string describes the current state for the failure message.
 func waitFor(t *testing.T, timeout time.Duration, what string, cond func() (bool, string)) {
@@ -141,6 +187,7 @@ func TestOperatorWebServer(t *testing.T) {
 	var prevLLM *lastv1alpha1.LocalRef
 	t.Cleanup(func() {
 		bg := context.Background()
+		releaseIntents(t, crc, ns)
 		for _, o := range []client.Object{
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: provider, Namespace: "last-gateway"}},

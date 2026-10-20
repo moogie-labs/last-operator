@@ -54,6 +54,7 @@ func TestDeleteIntentTearsDownWhatItCreated(t *testing.T) {
 	var prevLLM *lastv1alpha1.LocalRef
 	t.Cleanup(func() {
 		bg := context.Background()
+		releaseIntents(t, crc, ns)
 		for _, o := range []client.Object{
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: provider, Namespace: "last-gateway"}},
