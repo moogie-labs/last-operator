@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -178,7 +179,12 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 // and do not change within the phase. An approval phase, and an Auto phase
 // whose stage is no longer Auto, need an Approve that passes checkApprover, as
 // at BeginPhase: from neither the operator nor a gateway-namespace
-// ServiceAccount.
+// ServiceAccount. The Approve that authorized the previous step is preferred
+// while it stands. When the step is authorized by another Approve than the
+// phase's entries name so far, or by an Approve in an Auto phase, it writes
+// approval.observed for it and the step, and every later entry of the phase,
+// carries {approval, <namespace>/<name>}, until the stage is Auto again. The
+// caller holds p.mu.
 func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers policyLayers, p *phase, ns, name string) error {
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
@@ -189,7 +195,11 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 		p.failed = true
 		return d.deny(codes.NotFound, "%s: %s", withdrawn(p), status.Convert(err).Message())
 	}
-	approval, err := g.findApproval(ctx, &intent, p.stage, p.subject)
+	prefer := ""
+	if p.auth != nil && p.auth.Kind == authApproval {
+		prefer = strings.TrimPrefix(p.auth.Name, ns+"/")
+	}
+	approval, err := g.findApproval(ctx, &intent, p.stage, p.subject, prefer)
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
@@ -199,6 +209,7 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 	}
 	auto := p.autoAuthorized()
 	if auto && string(intent.UID) == p.uid && layers.mode(&intent, p.stage) == lastv1alpha1.ModeAuto {
+		p.auth = autoBy(p.stage) // Auto again, after a fallback to an Approve
 		return nil
 	}
 	if approval == nil {
@@ -214,11 +225,17 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 		p.failed = true
 		return err
 	}
+	if auth := approvedBy(ns, approval); p.auth == nil || *p.auth != *auth {
+		if err := observeApproval(d, approval); err != nil {
+			return err // nothing ran; the step can be retried
+		}
+		p.auth = auth
+	}
 	return nil
 }
 
-// autoAuthorized reports whether Auto authorized the phase, not an approval.
-func (p *phase) autoAuthorized() bool { return p.auth != nil && p.auth.Kind == authAuto }
+// autoAuthorized reports whether Auto opened the phase, not an approval.
+func (p *phase) autoAuthorized() bool { return p.auto }
 
 // authorizedAs names how the phase's steps were authorized, for refusals.
 func authorizedAs(p *phase) string {

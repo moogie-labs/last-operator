@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -741,4 +743,134 @@ func TestAutoPhaseRefusalsDoNotSpeakOfAnApproval(t *testing.T) {
 			t.Fatalf("RunCommand = %v", err)
 		}
 	})
+}
+
+// threeSteps is a plan with no references between its steps.
+func threeSteps() []lastv1alpha1.Command {
+	return []lastv1alpha1.Command{argvStep("s1", "echo", "one"), argvStep("s2", "echo", "two"), argvStep("s3", "echo", "three")}
+}
+
+// wantStepAudit asserts the entries written from index from on: an
+// approval.observed for each name in observed, in order, and every
+// command.start and phase.end authorized as {kind, name}.
+func (e *testEnv) wantStepAudit(from int, observed []string, kind, name string) {
+	e.t.Helper()
+	var got []string
+	stamped := 0
+	for _, en := range e.entries()[from:] {
+		switch en.Type {
+		case audit.TypeApprovalObserved:
+			var ao approvalObserved
+			if err := json.Unmarshal(en.Payload, &ao); err != nil {
+				e.t.Fatal(err)
+			}
+			got = append(got, ao.Name)
+		case audit.TypeCommandStart, audit.TypePhaseEnd:
+			if a := en.AuthorizedBy; a == nil || a.Kind != kind || a.Name != name {
+				e.t.Fatalf("%s authorizedBy = %+v, want {%s %s}", en.Type, a, kind, name)
+			}
+			stamped++
+		}
+	}
+	if !slices.Equal(got, observed) {
+		e.t.Fatalf("approval.observed for %v, want %v", got, observed)
+	}
+	if stamped == 0 {
+		e.t.Fatal("no command.start or phase.end to check")
+	}
+}
+
+func TestAnAutoPhaseThatFallsBackToAnApproveIsAuditedAsApproved(t *testing.T) {
+	in := intentWithPlan(t, threeSteps())
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in)
+	env.setDefaultModes(lastv1alpha1.ModeAuto)
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.run(h, threeSteps()[0]); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, nil, authAuto, string(policy.KeyCreate))
+
+	// A namespace admin turns Create to Manual, and a person approves the plan.
+	env.addPolicy("manual", lastv1alpha1.IntentPolicySpec{Modes: &lastv1alpha1.StageModes{Create: lastv1alpha1.ModeManual}})
+	env.approve(approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	before = len(env.entries())
+	for _, s := range threeSteps()[1:] {
+		if _, err := env.run(h, s); err != nil {
+			t.Fatalf("RunCommand(%s) = %v", s.ID, err)
+		}
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, []string{"ok"}, authApproval, envNS+"/ok")
+}
+
+func TestAnAutoPhaseIsAuditedAsAutoAgainWhenItsStageIsAutoAgain(t *testing.T) {
+	in := intentWithPlan(t, threeSteps())
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in)
+	env.setDefaultModes(lastv1alpha1.ModeAuto)
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	env.addPolicy("manual", lastv1alpha1.IntentPolicySpec{Modes: &lastv1alpha1.StageModes{Create: lastv1alpha1.ModeManual}})
+	env.approve(approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
+	before := len(env.entries())
+	if _, err := env.run(h, threeSteps()[0]); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, []string{"ok"}, authApproval, envNS+"/ok")
+
+	if err := env.crd.Delete(env.ctx, &lastv1alpha1.IntentPolicy{ObjectMeta: metav1.ObjectMeta{Name: "manual", Namespace: envNS}}); err != nil {
+		t.Fatal(err)
+	}
+	before = len(env.entries())
+	for _, s := range threeSteps()[1:] {
+		if _, err := env.run(h, s); err != nil {
+			t.Fatalf("RunCommand(%s) = %v", s.ID, err)
+		}
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, nil, authAuto, string(policy.KeyCreate))
+}
+
+func TestAnApprovedPhaseAuditsTheApproveThatAuthorizesEachStep(t *testing.T) {
+	in := intentWithPlan(t, threeSteps())
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in, approvalFor("first", h, lastv1alpha1.DecisionApprove, approver))
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.run(h, threeSteps()[0]); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, nil, authApproval, envNS+"/first")
+
+	// An Approve that sorts first appears: the standing one still authorizes.
+	env.approve(approvalFor("an-earlier-name", h, lastv1alpha1.DecisionApprove, approver))
+	before = len(env.entries())
+	if _, err := env.run(h, threeSteps()[1]); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, nil, authApproval, envNS+"/first")
+
+	// The approval the phase opened with is withdrawn; another stands.
+	if err := env.crd.Delete(env.ctx, &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{Name: "first", Namespace: envNS}}); err != nil {
+		t.Fatal(err)
+	}
+	before = len(env.entries())
+	if _, err := env.run(h, threeSteps()[2]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatal(err)
+	}
+	env.wantStepAudit(before, []string{"an-earlier-name"}, authApproval, envNS+"/an-earlier-name")
 }

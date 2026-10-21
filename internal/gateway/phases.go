@@ -47,15 +47,21 @@ const (
 // phase (ended by EndPhase, or interrupted) must never run anything, even when
 // a caller still holds a stale pointer to it.
 type phase struct {
-	mu       sync.Mutex // held while a step or output write runs
-	closed   bool       // phase.end is durable; set under mu
-	endSeq   uint64     // seq of the phase.end already written; non-zero while the state save is pending
-	outcome  string     // outcome recorded by that phase.end
-	stage    lastv1alpha1.Stage
-	subject  string
-	uid      string // the Intent's UID when the phase opened
-	body     plan.Body
-	auth     *audit.Authorization
+	mu      sync.Mutex // held while a step or output write runs
+	closed  bool       // phase.end is durable; set under mu
+	endSeq  uint64     // seq of the phase.end already written; non-zero while the state save is pending
+	outcome string     // outcome recorded by that phase.end
+	stage   lastv1alpha1.Stage
+	subject string
+	uid     string // the Intent's UID when the phase opened
+	body    plan.Body
+	// auth is what authorizes the phase's steps now, as its entries record it:
+	// what BeginPhase found, or the Approve a later step's re-check fell back
+	// to (recheckAuthorization). Set under mu after BeginPhase.
+	auth *audit.Authorization
+	// auto is whether Auto opened the phase; the re-check keeps passing it
+	// while the stage is still Auto, whatever auth now names.
+	auto     bool
 	beginSeq uint64
 	began    time.Time    // the gateway clock at BeginPhase; the executed plan's Began
 	next     int          // index of the next step to run; also the count of steps that succeeded
@@ -275,9 +281,11 @@ func (g *Gateway) clock() time.Time {
 	return time.Now()
 }
 
-// findApproval returns the approving IntentApproval for the subject. Any matching
-// Deny wins over every Approve (errApprovalDenied, with the denying object).
-func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) (*lastv1alpha1.IntentApproval, error) {
+// findApproval returns the approving IntentApproval for the subject: the one
+// named prefer when it applies, else the first by name. Any matching Deny wins
+// over every Approve (errApprovalDenied, with the denying object).
+func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject,
+	prefer string) (*lastv1alpha1.IntentApproval, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -303,7 +311,7 @@ func (g *Gateway) findApproval(ctx context.Context, intent *lastv1alpha1.Intent,
 		if a.Spec.Decision != lastv1alpha1.DecisionApprove {
 			continue
 		}
-		if found == nil || a.Name < found.Name {
+		if found == nil || (found.Name != prefer && (a.Name == prefer || a.Name < found.Name)) {
 			found = a
 		}
 	}
@@ -557,7 +565,7 @@ func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval)
 // audited through d.
 func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLayers, rec *LoadedRecord, intent *lastv1alpha1.Intent,
 	stage lastv1alpha1.Stage, subject string, body plan.Body) (*audit.Authorization, *lastv1alpha1.IntentApproval, error) {
-	approval, err := g.findApproval(ctx, intent, stage, subject)
+	approval, err := g.findApproval(ctx, intent, stage, subject, "")
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		return nil, nil, d.deny(codes.PermissionDenied, "%sapproval %s denies this %s", gatewayv1.MsgDeniedPrefix, approval.Name, subjectNoun(stage))
@@ -571,7 +579,7 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 			return nil, nil, err
 		}
 		if within {
-			return &audit.Authorization{Kind: authAuto, Name: string(policy.KeyFor(stage))}, nil, nil
+			return autoBy(stage), nil, nil
 		}
 	}
 	if approval == nil {
@@ -583,7 +591,28 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 	if err := g.checkApprover(d, approval); err != nil {
 		return nil, nil, err
 	}
-	return &audit.Authorization{Kind: authApproval, Name: intent.Namespace + "/" + approval.Name}, approval, nil
+	return approvedBy(intent.Namespace, approval), approval, nil
+}
+
+// autoBy is the audit.Authorization of an Auto phase, or step, of stage.
+func autoBy(stage lastv1alpha1.Stage) *audit.Authorization {
+	return &audit.Authorization{Kind: authAuto, Name: string(policy.KeyFor(stage))}
+}
+
+// approvedBy is the audit.Authorization of an approval phase, or step.
+func approvedBy(ns string, approval *lastv1alpha1.IntentApproval) *audit.Authorization {
+	return &audit.Authorization{Kind: authApproval, Name: ns + "/" + approval.Name}
+}
+
+// observeApproval writes approval.observed for the approval that authorizes a
+// phase (BeginPhase) or, after a fallback, its steps (recheckAuthorization).
+func observeApproval(d denial, approval *lastv1alpha1.IntentApproval) error {
+	if _, err := d.w.Append(d.ctx, audit.Draft{Type: audit.TypeApprovalObserved, Actor: d.actor, Intent: d.intent, Stage: d.stage,
+		SubjectHash: d.subject, Payload: approvalObserved{Name: approval.Name, UID: string(approval.UID), ApprovedBy: approval.Spec.ApprovedBy,
+			Decision: string(approval.Spec.Decision), Created: approval.CreationTimestamp.UTC().Format(time.RFC3339)}}); err != nil {
+		return status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
+	}
+	return nil
 }
 
 // withinAutoLimits reports whether Auto may authorize the stage's plan without
@@ -765,10 +794,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	}
 
 	if approval != nil { // an Auto phase observed no approval
-		if _, err := w.Append(ctx, audit.Draft{Type: audit.TypeApprovalObserved, Actor: actor, Intent: key, Stage: string(stage), SubjectHash: subject,
-			Payload: approvalObserved{Name: approval.Name, UID: string(approval.UID), ApprovedBy: approval.Spec.ApprovedBy,
-				Decision: string(approval.Spec.Decision), Created: approval.CreationTimestamp.UTC().Format(time.RFC3339)}}); err != nil {
-			return nil, status.Errorf(codes.Unavailable, "record approval.observed: %v", err)
+		if err := observeApproval(d, approval); err != nil {
+			return nil, err
 		}
 	}
 	begin, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseBegin, Actor: actor, Intent: key, Stage: string(stage),
@@ -785,8 +812,8 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		}
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
-	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, beginSeq: begin.Seq,
-		began: began, results: plan.Results{}})
+	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, auto: auth.Kind == authAuto,
+		beginSeq: begin.Seq, began: began, results: plan.Results{}})
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
 }
 

@@ -1112,6 +1112,12 @@ necessarily the one it opened with: any `Approve` for the subject that is
 bound to the Intent's UID, within `approvals.maxAge`, and passes the
 approver checks (it names neither the operator nor a gateway-namespace
 ServiceAccount as approver; `BeginPhase` and every step share one check).
+The `Approve` that authorized the previous step is kept while it stands.
+When a step is authorized by an `Approve` that the phase's entries do not
+name yet (an Auto phase whose stage turned Manual, or an approved phase
+whose `Approve` was replaced), the gateway writes `approval.observed` for
+it, once, and that step's entries and every later entry of the phase carry
+`authorizedBy: {kind: approval, name: <namespace>/<IntentApproval>}`.
 Every refusal fails the phase: only `EndPhase(failed)` remains.
 
 ## 9. Allow rules and suggestions
