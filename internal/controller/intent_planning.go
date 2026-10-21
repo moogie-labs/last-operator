@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -267,6 +268,17 @@ func (r *IntentReconciler) turnCheck(ctx context.Context, in *lastv1alpha1.Inten
 	return both(answeredCheck(in), rerunCheck(used, feedback)), nil
 }
 
+// msgWithoutApproval ends the Ready message of a plan or discovery command
+// that record sent to run without waiting for an approval: its stage was Auto.
+const msgWithoutApproval = " without approval (Auto)"
+
+// autoRun reports whether the Intent's plan reached the phase that runs it
+// through record's Auto skip, not through an approval (awaitApproval).
+func autoRun(in *lastv1alpha1.Intent) bool {
+	c := meta.FindStatusCondition(in.Status.Conditions, CondReady)
+	return c != nil && strings.HasSuffix(c.Message, msgWithoutApproval)
+}
+
 // record writes the model's turn to the Intent's status and moves the Intent
 // to the phase that waits on it: AwaitingApproval for a plan, Clarifying for
 // questions, AwaitingDiscoveryApproval for a command. status.stage keeps the
@@ -325,7 +337,7 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			in.Status.Plan = turn.Plan
 			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionTrue, ReasonPlanWritten, "Plan "+subject)
 			if modes.For(stage) == lastv1alpha1.ModeAuto {
-				setRunning(in, stage, "Running plan "+subject+" without approval (Auto)")
+				setRunning(in, stage, "Running plan "+subject+msgWithoutApproval)
 				break
 			}
 			setPhase(in, lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval,
@@ -338,7 +350,7 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			in.Status.PendingCommand = pending
 			if modes.For(lastv1alpha1.StageDiscovery) == lastv1alpha1.ModeAuto {
 				setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonRunningDiscovery,
-					"Running discovery command "+subject+" without approval (Auto)")
+					"Running discovery command "+subject+msgWithoutApproval)
 				break
 			}
 			setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonAwaitingDiscoveryApproval,

@@ -22,10 +22,7 @@ const (
 // (DefaultProbeInterval when none sets one). Neither is below the cluster floor
 // OperatorConfig.spec.probes.minInterval, and fast is never above steady.
 func ProbeIntervals(op *lastv1alpha1.OperatorConfig, policies []lastv1alpha1.IntentPolicy) (fast, steady time.Duration) {
-	floor := DefaultMinProbeInterval
-	if op != nil && op.Spec.Probes != nil && op.Spec.Probes.MinInterval != nil && op.Spec.Probes.MinInterval.Duration > 0 {
-		floor = op.Spec.Probes.MinInterval.Duration
-	}
+	floor := ProbeFloor(op)
 	consider := func(p *lastv1alpha1.ProbePolicy) {
 		if p == nil {
 			return
@@ -52,4 +49,14 @@ func ProbeIntervals(op *lastv1alpha1.OperatorConfig, policies []lastv1alpha1.Int
 	steady = max(steady, floor)
 	fast = min(max(fast, floor), steady)
 	return fast, steady
+}
+
+// ProbeFloor returns the cluster floor for every probe interval and for the
+// gap between two scheduled runs, jitter included: OperatorConfig.spec.probes.minInterval,
+// or DefaultMinProbeInterval when it is not set (spec §10.1).
+func ProbeFloor(op *lastv1alpha1.OperatorConfig) time.Duration {
+	if op != nil && op.Spec.Probes != nil && op.Spec.Probes.MinInterval != nil && op.Spec.Probes.MinInterval.Duration > 0 {
+		return op.Spec.Probes.MinInterval.Duration
+	}
+	return DefaultMinProbeInterval
 }

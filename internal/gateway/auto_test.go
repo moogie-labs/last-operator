@@ -426,6 +426,9 @@ func TestManualIsUnchanged(t *testing.T) {
 			if gatewayv1.NeedsApproval(err) {
 				t.Fatal("a Manual refusal reads as needing approval in Auto mode")
 			}
+			if !gatewayv1.NoApproval(err) {
+				t.Fatalf("NoApproval(%v) = false", err)
+			}
 
 			env.approve(approvalFor("ok", h, lastv1alpha1.DecisionApprove, approver))
 			before = len(env.entries())
@@ -873,4 +876,22 @@ func TestAnApprovedPhaseAuditsTheApproveThatAuthorizesEachStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.wantStepAudit(before, []string{"an-earlier-name"}, authApproval, envNS+"/an-earlier-name")
+}
+
+func TestNoApprovalMatchesOnlyTheManualRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{status.Error(codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan"), true},
+		{status.Error(codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"discovery command"), true},
+		{status.Error(codes.PermissionDenied, gatewayv1.MsgNoApprovalPrefix+"plan"), false},
+		{status.Error(codes.PermissionDenied, "approval withdrawn: "+gatewayv1.MsgNoApprovalPrefix+"plan"), false},
+		{status.Error(codes.PermissionDenied, gatewayv1.MsgNeedsApproval), false},
+	} {
+		if got := gatewayv1.NoApproval(tc.err); got != tc.want {
+			t.Errorf("NoApproval(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
 }

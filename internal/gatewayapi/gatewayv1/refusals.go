@@ -43,3 +43,16 @@ func Denied(err error) bool {
 	s, ok := status.FromError(err)
 	return ok && err != nil && s.Code() == codes.PermissionDenied && strings.HasPrefix(s.Message(), MsgDeniedPrefix)
 }
+
+// MsgNoApprovalPrefix starts BeginPhase's refusal of a subject that no
+// IntentApproval approves while its stage is Manual; the subject's noun
+// follows ("plan" or "discovery command"). An operator that skipped the wait
+// because it found the stage Auto reads it as the stage having turned Manual
+// since, and waits for an approval.
+const MsgNoApprovalPrefix = "no IntentApproval approves this "
+
+// NoApproval reports whether err is the gateway's MsgNoApprovalPrefix refusal.
+func NoApproval(err error) bool {
+	s, ok := status.FromError(err)
+	return ok && err != nil && s.Code() == codes.FailedPrecondition && strings.HasPrefix(s.Message(), MsgNoApprovalPrefix)
+}

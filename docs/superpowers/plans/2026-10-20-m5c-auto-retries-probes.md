@@ -67,7 +67,7 @@
       - the interval starts at `fast`, doubles after a run where every probe passed, up to `steady`, and resets to `fast` on any failure or when `status.plan.hash` changes;
       - `next` is the run's start plus `interval × (1 + j)`, where `j` is uniform in [−0.1, 0.1] from an injectable source;
       - after an operator restart, the interval restarts at `fast`.
-    - Metrics: a gauge `last_probe_interval_seconds{namespace,intent}`; the existing skip counter is kept.
+    - Metrics: a gauge `last_operator_last_probe_interval_seconds{namespace,intent}`; the existing skip counter is kept.
 - **New status fields** (`IntentStatus`):
   - `effectiveModes *StageModes` (JSON `effectiveModes,omitempty`);
   - `replans int32` and `retries int32` (`omitempty`).

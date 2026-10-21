@@ -558,7 +558,7 @@ func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval)
 //  3. an Approve, from neither the operator nor a gateway-namespace
 //     ServiceAccount, authorizes it as {approval, <namespace>/<name>};
 //  4. with no Approve, an Auto stage refuses with gatewayv1.MsgNeedsApproval,
-//     and a Manual stage with FailedPrecondition.
+//     and a Manual stage with FailedPrecondition and gatewayv1.MsgNoApprovalPrefix.
 //
 // It also returns the approval that authorized the phase, nil for Auto. The
 // caller has read layers once, for the command policy too. Every refusal is
@@ -586,7 +586,7 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 		if auto {
 			return nil, nil, d.deny(codes.PermissionDenied, "%s", gatewayv1.MsgNeedsApproval)
 		}
-		return nil, nil, d.deny(codes.FailedPrecondition, "no IntentApproval approves this %s", subjectNoun(stage))
+		return nil, nil, d.deny(codes.FailedPrecondition, "%s%s", gatewayv1.MsgNoApprovalPrefix, subjectNoun(stage))
 	}
 	if err := g.checkApprover(d, approval); err != nil {
 		return nil, nil, err

@@ -64,3 +64,19 @@ func TestProbeIntervalsDefaultsAndFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestProbeFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		op   *lastv1alpha1.OperatorConfig
+		want time.Duration
+	}{
+		{"no OperatorConfig", nil, policy.DefaultMinProbeInterval},
+		{"no floor set", opWith(nil, 0), policy.DefaultMinProbeInterval},
+		{"floor set", opWith(nil, 3*time.Minute), 3 * time.Minute},
+	} {
+		if got := policy.ProbeFloor(tc.op); got != tc.want {
+			t.Errorf("%s: ProbeFloor = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

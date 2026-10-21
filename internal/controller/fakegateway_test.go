@@ -77,9 +77,10 @@ type script struct {
 
 	interrupt map[string]bool // step ID → the gateway restarts before it: the phase ends as interrupted, once
 
-	beginErr error             // returned by BeginPhase once the call is recorded
-	onRun    func(step string) // called with f.mu held as each RunCommand of an open phase begins, before its re-check
-	queryErr error             // returned by QueryAudit
+	beginErr error              // returned by BeginPhase once the call is recorded
+	onBegin  func(stage string) // called as each BeginPhase begins, before it reads anything, without f.mu
+	onRun    func(step string)  // called with f.mu held as each RunCommand of an open phase begins, before its re-check
+	queryErr error              // returned by QueryAudit
 	// queryHook, when set, is called with each QueryAudit call's types; an error it returns is the call's.
 	queryHook      func(types []string) error
 	auditTruncated bool // QueryAudit reports that the index dropped every entry, and serves none
@@ -439,6 +440,12 @@ func (f *fakeGateway) nonceRule(key types.NamespacedName, stage string, body pla
 func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRequest, _ ...grpc.CallOption) (*gatewayv1.BeginPhaseResponse, error) {
 	key, stage, subject := keyOf(in.GetIntent()), in.GetStage(), in.GetSubjectHash()
 	discovery := stage == string(lastv1alpha1.StageDiscovery)
+	f.mu.Lock()
+	onBegin := f.scriptFor(key).onBegin
+	f.mu.Unlock()
+	if onBegin != nil {
+		onBegin(stage)
+	}
 	approved, denied, err := f.approval(ctx, key, stage, subject)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -503,8 +510,10 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 		f.auths[key] = append(f.auths[key], "approval")
 	case mode == lastv1alpha1.ModeAuto:
 		return nil, status.Error(codes.PermissionDenied, gatewayv1.MsgNeedsApproval)
+	case discovery:
+		return nil, status.Error(codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"discovery command")
 	default:
-		return nil, status.Error(codes.FailedPrecondition, "no IntentApproval approves this plan")
+		return nil, status.Error(codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan")
 	}
 	f.open[key], f.openStage[key], f.openUID[key], f.openKept[key] = subject, stage, intent.UID, kept
 	f.openAuto[key] = auto

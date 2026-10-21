@@ -160,7 +160,7 @@ var _ = Describe("Intent retries", func() {
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
 		Expect(readyReason(key)).To(Equal(ReasonPlanningFailed))
 		Expect(readyCondition(key).Message).To(Equal(
-			"The plan failed 3 times; last failure: step s1 exited 1: boom; edit the Intent's spec to plan again"))
+			"The plan failed after 3 replans; last failure: step s1 exited 1: boom; edit the Intent's spec to plan again"))
 		Expect(countOf(gw.calls(key), beginPhase)).To(Equal(4), "the first plan and 3 replans ran")
 		Expect(countOf(gw.calls(key), endFailed)).To(Equal(4))
 		Expect(replans()).To(Equal(int32(3)))

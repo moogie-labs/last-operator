@@ -82,8 +82,8 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 	switch {
 	case tornDown(in, err):
 		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
-	case gatewayv1.NeedsApproval(err):
-		return ctrl.Result{}, r.needsApproval(ctx, in, err)
+	case gatewayv1.NeedsApproval(err), autoRun(in) && gatewayv1.NoApproval(err):
+		return r.needsApproval(ctx, in, err)
 	case gatewayv1.Denied(err):
 		return ctrl.Result{}, r.failDenied(ctx, in, "The gateway refused to open the phase: "+describe(err))
 	case status.Code(err) == codes.AlreadyExists:
@@ -102,30 +102,41 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 	return r.runSteps(ctx, in)
 }
 
-// msgNeedsApproval starts the message of an Intent that waits for the approval
-// the gateway needs; the gateway's refusal follows.
-const msgNeedsApproval = "The gateway needs an approval for this plan: "
-
-// needsApproval makes an Intent wait for an approval the gateway needs: it
-// refused to open the phase of an Auto stage without one, because the plan is
-// outside Auto mode's limits (design D9). Nothing ran. A plan moves to
+// needsApproval handles the gateway's refusal to open a phase without an
+// approval: an Auto stage's plan outside Auto mode's limits (design D9,
+// gatewayv1.NeedsApproval), or a stage that turned Manual after record found it
+// Auto (gatewayv1.NoApproval, which callers pass only for what record sent to
+// run in Auto). Nothing ran.
+//
+// What record sent to run in Auto waits for an IntentApproval: a plan moves to
 // AwaitingApproval, and a discovery command stays in AwaitingDiscoveryApproval
-// without ReasonRunningDiscovery. From there the Intent waits for an
-// IntentApproval as in Manual mode, even though its own modes say Auto: only
-// record skips the wait, so the operator never asks the gateway again unapproved.
-func (r *IntentReconciler) needsApproval(ctx context.Context, in *lastv1alpha1.Intent, err error) error {
+// without ReasonRunningDiscovery. From there the Intent waits as in Manual
+// mode, even though its own modes say Auto: only record skips the wait, so the
+// operator never asks the gateway again unapproved.
+//
+// What an approval sent to run stays where it is, and the gateway is asked
+// again after RetryDelay: the operator saw an Approve that the gateway does
+// not see yet, and moving to AwaitingApproval would bounce straight back.
+func (r *IntentReconciler) needsApproval(ctx context.Context, in *lastv1alpha1.Intent, err error) (ctrl.Result, error) {
 	from, subject := in.Status.Phase, subjectOf(in)
-	to, reason := lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval
-	if from == lastv1alpha1.PhaseAwaitingDiscoveryApproval {
-		to, reason = from, ReasonAwaitingDiscoveryApproval
+	log := logf.FromContext(ctx)
+	if (from == lastv1alpha1.PhaseAwaitingDiscoveryApproval && !autoDiscovery(in)) ||
+		(from != lastv1alpha1.PhaseAwaitingDiscoveryApproval && !autoRun(in)) {
+		log.Info("Gateway needs an IntentApproval that the operator sees; retrying", "subject", subject,
+			"stage", in.Status.Stage, "reason", describe(err), "after", r.RetryDelay)
+		return ctrl.Result{RequeueAfter: r.RetryDelay}, nil
 	}
-	logf.FromContext(ctx).Info("Waiting for the IntentApproval the gateway needs", "subject", subject, "stage", in.Status.Stage)
-	return r.update(ctx, in, func(in *lastv1alpha1.Intent) {
+	to, reason, noun := lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval, "plan"
+	if from == lastv1alpha1.PhaseAwaitingDiscoveryApproval {
+		to, reason, noun = from, ReasonAwaitingDiscoveryApproval, "command"
+	}
+	log.Info("Waiting for the IntentApproval the gateway needs", "subject", subject, "stage", in.Status.Stage)
+	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		// A conflict retry re-reads the Intent: move only the subject the gateway refused.
 		if in.Status.Phase != from || subjectOf(in) != subject {
 			return
 		}
-		setPhase(in, to, reason, msgNeedsApproval+describe(err))
+		setPhase(in, to, reason, "The gateway needs an approval for this "+noun+": "+describe(err))
 	})
 }
 
@@ -310,7 +321,7 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 	if stage := planStage(in); replan && replannable(stage) {
 		if in.Status.Replans >= maxReplans {
 			return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed,
-				fmt.Sprintf("The plan failed %d times; last failure: %s%s", maxReplans, reason, specEditHint(in)))
+				fmt.Sprintf("The plan failed after %d replans; last failure: %s%s", maxReplans, reason, specEditHint(in)))
 		}
 		return r.startSession(ctx, in, stage, reason, causeReplan) // the failed phase left the executed plan as it was
 	}

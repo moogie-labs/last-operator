@@ -33,10 +33,12 @@ type probeSchedule struct {
 // flight. The interval doubles after a pass up to steady, resets to fast after
 // a failure and is kept when the run was aborted; it is first clamped to
 // [fast, steady], so a policy edit takes effect at the next run. The next run
-// is due at start + interval·(1+jitter). If that passed before finish, the run
+// is due at start + interval·(1+jitter), but never less than floor after
+// start, whatever the jitter. If that passed before finish, the run
 // overran: due times skip forward by whole jittered intervals, and each is
 // counted as skipped (an Intent never has two runs in flight, spec §10.1).
-func (s probeSchedule) after(start, finish time.Time, result runResult, fast, steady time.Duration, jitter float64) (probeSchedule, int) {
+func (s probeSchedule) after(start, finish time.Time, result runResult, fast, steady, floor time.Duration,
+	jitter float64) (probeSchedule, int) {
 	interval := min(max(s.interval, fast), steady)
 	switch result {
 	case runPassed:
@@ -44,7 +46,7 @@ func (s probeSchedule) after(start, finish time.Time, result runResult, fast, st
 	case runFailed:
 		interval = fast
 	}
-	step := time.Duration(float64(interval) * (1 + jitter))
+	step := max(time.Duration(float64(interval)*(1+jitter)), floor) // jitter never steps below the floor
 	if step <= 0 {
 		step = fast
 	}
@@ -59,12 +61,13 @@ func (s probeSchedule) after(start, finish time.Time, result runResult, fast, st
 
 // firstRun returns when the first run is due after an operator restart, or
 // for a new plan, given the newest recorded probe (last) and the jitter in
-// [-maxJitter, maxJitter]: a jittered fast interval after last. If that time
+// [-maxJitter, maxJitter]: a jittered fast interval after last, but never
+// less than floor after it. If that time
 // has passed, as after a restart for every Intent probed before it, the run is
 // spread over the first tenth of the fast interval from now, the jitter mapped
 // to [0, maxJitter]·fast, so that a restart does not make every Intent due at once.
-func firstRun(last, now time.Time, fast time.Duration, jitter float64) time.Time {
-	next := last.Add(time.Duration(float64(fast) * (1 + jitter)))
+func firstRun(last, now time.Time, fast, floor time.Duration, jitter float64) time.Time {
+	next := last.Add(max(time.Duration(float64(fast)*(1+jitter)), floor))
 	if next.Before(now) {
 		next = now.Add(time.Duration(float64(fast) * (jitter + maxJitter) / 2))
 	}

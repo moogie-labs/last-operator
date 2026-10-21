@@ -95,7 +95,7 @@ func (d *day2) createAuto(wantHash string) client.ObjectKey {
 		d.t.Fatalf("kubectl last: %v\n%s", err, out)
 	}
 	d.t.Logf("kubectl last (Auto):\n%s", out)
-	for _, want := range []string{"Modes: ", "create=Auto", "Plan " + wantHash + " is running without approval (Auto)", "Intent " + d.ns + "/web is Ready."} {
+	for _, want := range []string{"Modes: ", "create=Auto", "Plan " + wantHash + " may run without approval (Auto)", "Intent " + d.ns + "/web is Ready."} {
 		if !strings.Contains(out, want) {
 			d.t.Errorf("kubectl last output lacks %q:\n%s", want, out)
 		}

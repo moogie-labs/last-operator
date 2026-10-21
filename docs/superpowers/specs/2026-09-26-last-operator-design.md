@@ -612,14 +612,25 @@ Pending → Clarifying ⇄ (user answers)
     a plan moves to `AwaitingApproval`, a discovery command stays in
     `AwaitingDiscoveryApproval` with reason `AwaitingDiscoveryApproval`,
     and the message reads "The gateway needs an approval for this plan:
-    <the gateway's reason>". Nothing ran, and the Intent does not fail.
-    An `IntentApproval` then runs it as in Manual mode.
+    <the gateway's reason>" ("for this command" for a discovery command).
+    Nothing ran, and the Intent does not fail. An `IntentApproval` then
+    runs it as in Manual mode.
+  - **Turned Manual before the phase opened.** If a policy edit turns
+    the stage Manual after the operator recorded an Auto plan or
+    discovery command but before `BeginPhase`, the gateway refuses with
+    `FailedPrecondition` and "no IntentApproval approves this …"
+    (`gatewayv1.NoApproval`). For what it sent to run in Auto, the
+    operator reads this as the cue to wait for an approval too, never as
+    a failure.
   - **No bouncing.** The operator skips the wait only when it records a
     turn. An Intent in `AwaitingApproval`, or waiting for a discovery
     approval, waits for an `IntentApproval` even when its own modes say
-    Auto, so a refusal never turns into a loop of `BeginPhase` calls. A
-    plan that was waiting when a policy turned its stage to Auto still
-    waits; a new session picks the mode up.
+    Auto, so a refusal never turns into a tight loop of `BeginPhase`
+    calls. A plan or command that an approval sent to run, and that the
+    gateway still refuses as needing one (its view of the approvals lags
+    the operator's), stays where it is, and the operator asks again after
+    a short delay (5s). A plan that was waiting when a policy turned its
+    stage to Auto still waits; a new session picks the mode up.
   - **Auto withdrawn mid-phase.** If a policy edit turns the stage to
     Manual while an Auto phase runs, the gateway refuses the next step
     ("auto authorization withdrawn: …") unless an `Approve` stands. The
@@ -808,7 +819,7 @@ Pending → Clarifying ⇄ (user answers)
   - **Replans (D10).** A step that exits non-zero replans at most 3
     times in a row, counted in `status.replans`. The next failed step
     fails the Intent with `PlanningFailed` and the message "The plan
-    failed 3 times; last failure: <reason>". In Manual mode every replan
+    failed after 3 replans; last failure: <reason>". In Manual mode every replan
     needs a fresh approval; in Auto mode a replan runs as any Auto plan
     does.
   - **Spec edit.** A spec edit plans a failed Intent again, a Create or
@@ -1306,6 +1317,8 @@ probes:
   intervals and each one passed is skipped and counted.
 - **Jitter.** Each scheduled run is offset by a uniform random ±10% of
   its interval, so Intents created together don't probe in lockstep.
+  The jitter never brings a run closer than `probes.minInterval` to the
+  run before it: at the floor, it only delays.
 - **No overlap.** An Intent never has more than one probe run in flight
   or queued. If the previous run hasn't finished when the next one is
   due, the new run is skipped and the skip is counted in metrics.

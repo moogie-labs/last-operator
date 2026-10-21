@@ -40,7 +40,7 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 		return r.startPlanning(ctx, in, "")
 	}
 	if autoDiscovery(in) {
-		return ctrl.Result{}, r.runDiscovery(ctx, in)
+		return r.runDiscovery(ctx, in)
 	}
 	approved, denial, err := r.decision(ctx, in, lastv1alpha1.StageDiscovery, pc.Hash)
 	switch {
@@ -51,7 +51,7 @@ func (r *IntentReconciler) awaitDiscovery(ctx context.Context, in *lastv1alpha1.
 	case !approved:
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}
-	return ctrl.Result{}, r.runDiscovery(ctx, in)
+	return r.runDiscovery(ctx, in)
 }
 
 // endApprovedPhase ends the pending command's phase, if it is approved or runs
@@ -88,12 +88,15 @@ func autoDiscovery(in *lastv1alpha1.Intent) bool {
 // runDiscovery runs the approved, or Auto, command as a one-step Discovery
 // phase. A command that exits non-zero still completes the phase: the model
 // reads its result. If the gateway needs an approval to open it, the Intent
-// waits for one (needsApproval).
-func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.Intent) error {
+// waits for one, or asks again after a delay (needsApproval). Discovery is
+// always within Auto's limits, so a NeedsApproval refusal is not expected
+// here; it is handled defensively. A NoApproval refusal of an Auto command
+// means a policy turned the Discovery stage Manual after record.
+func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	subject := in.Status.PendingCommand.Hash
 	raw, err := json.Marshal(in.Status.PendingCommand.Command)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	bctx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
 	_, err = r.Gateway.BeginPhase(bctx, &gatewayv1.BeginPhaseRequest{Intent: intentRef(in),
@@ -103,16 +106,22 @@ func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.In
 	case status.Code(err) == codes.AlreadyExists:
 		const why = "a phase from an earlier attempt was still open"
 		if eerr := r.endPhase(ctx, in, subject, false, why); eerr != nil && status.Code(eerr) != codes.FailedPrecondition {
-			return eerr
+			return ctrl.Result{}, eerr
 		}
-		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn(why+"; ask again if you still need it"))
-	case gatewayv1.NeedsApproval(err):
+		return ctrl.Result{}, r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn(why+"; ask again if you still need it"))
+	case gatewayv1.NeedsApproval(err), autoDiscovery(in) && gatewayv1.NoApproval(err):
 		return r.needsApproval(ctx, in, err)
 	case terminal(err):
-		return r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn("the gateway refused it: "+describe(err)))
+		return ctrl.Result{}, r.discovered(ctx, in, ReasonDiscoveryFailed, agent.NotRunTurn("the gateway refused it: "+describe(err)))
 	case err != nil:
-		return err
+		return ctrl.Result{}, err
 	}
+	return ctrl.Result{}, r.runOpenDiscovery(ctx, in, subject, raw)
+}
+
+// runOpenDiscovery runs the command of the Discovery phase BeginPhase opened,
+// ends the phase, and records how the command ended for the model.
+func (r *IntentReconciler) runOpenDiscovery(ctx context.Context, in *lastv1alpha1.Intent, subject string, raw []byte) error {
 	logf.FromContext(ctx).Info("Opened discovery phase", "command", subject)
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		setExecuted(in, metav1.ConditionUnknown, ReasonPhaseOpen, "Running discovery command "+subject)

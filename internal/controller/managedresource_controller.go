@@ -65,7 +65,7 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
-	fast, steady, err := r.intervals(ctx, in.Namespace)
+	fast, steady, floor, err := r.intervals(ctx, in.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -78,7 +78,7 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		sched = probeSchedule{interval: fast, planHash: in.Status.Plan.Hash, next: firstRun(last, now, fast, r.jitter())}
+		sched = probeSchedule{interval: fast, planHash: in.Status.Plan.Hash, next: firstRun(last, now, fast, floor, r.jitter())}
 		r.setSchedule(req.NamespacedName, sched)
 	}
 	if now.Before(sched.next) {
@@ -100,7 +100,7 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	default:
 		result, recordErr = r.record(ctx, &in, resp, now)
 	}
-	next, skipped := sched.after(now, finish, result, fast, steady, r.jitter())
+	next, skipped := sched.after(now, finish, result, fast, steady, floor, r.jitter())
 	if result == runAborted {
 		skipped++
 	}
@@ -185,20 +185,21 @@ func (r *ManagedResourceReconciler) forget(key types.NamespacedName) {
 	probeInterval.DeleteLabelValues(key.Namespace, key.Name)
 }
 
-// intervals resolves the namespace's fast and steady probe intervals (spec §10.1).
-func (r *ManagedResourceReconciler) intervals(ctx context.Context, ns string) (fast, steady time.Duration, err error) {
+// intervals resolves the namespace's fast and steady probe intervals, and the
+// cluster floor no gap between two runs goes below (spec §10.1).
+func (r *ManagedResourceReconciler) intervals(ctx context.Context, ns string) (fast, steady, floor time.Duration, err error) {
 	op := &lastv1alpha1.OperatorConfig{}
 	if err := r.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
 		op = nil
 	} else if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	var policies lastv1alpha1.IntentPolicyList
 	if err := r.List(ctx, &policies, client.InNamespace(ns)); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	fast, steady = policy.ProbeIntervals(op, policies.Items)
-	return fast, steady, nil
+	return fast, steady, policy.ProbeFloor(op), nil
 }
 
 // lastProbe returns the newest probe time among the ManagedResources of the

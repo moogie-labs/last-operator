@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
@@ -129,7 +130,7 @@ var _ = Describe("Auto modes", func() {
 			beginErr: status.Error(codes.PermissionDenied, gatewayv1.MsgNeedsApproval)})
 		createIntentWithModes(key, lastv1alpha1.StageModes{Discovery: modeAuto})
 
-		Eventually(readyMessage(key)).Should(Equal("The gateway needs an approval for this plan: " + gatewayv1.MsgNeedsApproval))
+		Eventually(readyMessage(key)).Should(Equal("The gateway needs an approval for this command: " + gatewayv1.MsgNeedsApproval))
 		Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseAwaitingDiscoveryApproval))
 		Expect(readyReason(key)).To(Equal(ReasonAwaitingDiscoveryApproval))
 		Consistently(func() int { return countOf(gw.calls(key), beginDiscovery) }).Should(Equal(1),
@@ -139,6 +140,74 @@ var _ = Describe("Auto modes", func() {
 		approveCommand(key, getIntent(key).Status.PendingCommand.Hash, lastv1alpha1.DecisionApprove, "")
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 		Expect(gw.calls(key)).To(ContainElement(runDiscoveryStep))
+	})
+
+	Describe("when a policy turns the stage Manual between record and BeginPhase", func() {
+		// toManual turns key to Manual for the namespace as the stage's first BeginPhase begins.
+		toManual := func(stage lastv1alpha1.Stage, modes lastv1alpha1.StageModes) func(string) {
+			var once sync.Once
+			return func(got string) { // called in the controller's goroutine
+				if got != string(stage) {
+					return
+				}
+				once.Do(func() {
+					defer GinkgoRecover()
+					Expect(k8sClient.Create(ctx, &lastv1alpha1.IntentPolicy{ObjectMeta: metav1.ObjectMeta{Name: "manual", Namespace: key.Namespace},
+						Spec: lastv1alpha1.IntentPolicySpec{Modes: &modes}})).To(Succeed())
+				})
+			}
+		}
+
+		It("waits for an approval of the plan instead of failing", func() {
+			gw.setScript(key, &script{llm: turns(answer(steps)),
+				onBegin: toManual(lastv1alpha1.StageCreate, lastv1alpha1.StageModes{Create: modeManual})})
+			createIntentWithModes(key, lastv1alpha1.StageModes{Create: modeAuto})
+
+			Eventually(readyMessage(key)).Should(Equal("The gateway needs an approval for this plan: " +
+				gatewayv1.MsgNoApprovalPrefix + "plan"))
+			Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval))
+			Consistently(func() int { return countOf(gw.calls(key), beginPhase) }).Should(Equal(1))
+
+			approve(key, lastv1alpha1.DecisionApprove)
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+			Expect(gw.authsOf(key)).To(Equal([]string{authApproval}))
+		})
+
+		It("waits for an approval of the discovery command instead of telling the model it was refused", func() {
+			gw.setScript(key, &script{llm: turns(commandTurn(look), answer(steps)),
+				onBegin: toManual(lastv1alpha1.StageDiscovery, lastv1alpha1.StageModes{Discovery: modeManual})})
+			createIntentWithModes(key, lastv1alpha1.StageModes{Discovery: modeAuto})
+
+			Eventually(readyMessage(key)).Should(Equal("The gateway needs an approval for this command: " +
+				gatewayv1.MsgNoApprovalPrefix + "discovery command"))
+			Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseAwaitingDiscoveryApproval))
+			Expect(readyReason(key)).To(Equal(ReasonAwaitingDiscoveryApproval))
+			Consistently(func() int { return countOf(gw.calls(key), beginDiscovery) }).Should(Equal(1))
+			Expect(countOf(gw.calls(key), callLLM)).To(Equal(1), "the model is not told")
+
+			approveCommand(key, getIntent(key).Status.PendingCommand.Hash, lastv1alpha1.DecisionApprove, "")
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			Expect(gw.calls(key)).To(ContainElement(runDiscoveryStep))
+		})
+	})
+
+	It("retries after a delay when the gateway needs an approval the operator saw", func() {
+		gw.setScript(key, &script{llm: turns(answer(steps)),
+			beginErr: status.Error(codes.PermissionDenied, gatewayv1.MsgNeedsApproval)}) // the gateway's view lags
+		createIntentWithModes(key, lastv1alpha1.StageModes{Create: modeManual})
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(func() int { return countOf(gw.calls(key), beginPhase) }).Should(BeNumerically(">", 1))
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseExecuting), "it never bounces back to AwaitingApproval")
+		res, err := intentReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(intentReconciler.RetryDelay), "it waits before asking again")
+
+		gw.updateScript(key, func(s *script) { s.beginErr = nil })
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+		Expect(gw.authsOf(key)).To(Equal([]string{authApproval}))
 	})
 
 	It("plans and runs an Auto Update on an edit", func() {

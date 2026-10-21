@@ -201,16 +201,18 @@ func modesLine(in *lastv1alpha1.Intent) string {
 	return b.String()
 }
 
-// noteAuto says so when the operator runs what it would otherwise have put to
-// the user: an Auto discovery command, or a plan in an Auto stage that is
-// already running. Nothing is asked or decided on either.
+// noteAuto says so when the operator may run what it would otherwise have put
+// to the user: an Auto discovery command, or a plan in an Auto stage that is
+// already running. Nothing is asked or decided on either. It says "may": the
+// CLI cannot see what authorized the phase, which the gateway decides, and a
+// plan approved by hand also runs while its stage is Auto.
 func noteAuto(w io.Writer, in *lastv1alpha1.Intent) {
 	switch {
 	case runsWithoutApproval(in) && in.Status.PendingCommand != nil:
-		writef(w, "Discovery command %s is running without approval (Auto).\n", clean(in.Status.PendingCommand.Hash))
+		writef(w, "Discovery command %s may run without approval (Auto).\n", clean(in.Status.PendingCommand.Hash))
 	case (in.Status.Phase == lastv1alpha1.PhaseExecuting || in.Status.Phase == lastv1alpha1.PhaseRemediating ||
 		in.Status.Phase == lastv1alpha1.PhaseTearingDown) && in.Status.Plan != nil &&
 		stageModeOf(in, planStageOf(in)) == lastv1alpha1.ModeAuto:
-		writef(w, "Plan %s is running without approval (Auto).\n", clean(in.Status.Plan.Hash))
+		writef(w, "Plan %s may run without approval (Auto).\n", clean(in.Status.Plan.Hash))
 	}
 }

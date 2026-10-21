@@ -483,7 +483,7 @@ func TestFollowDoesNotPromptInAuto(t *testing.T) {
 		t.Errorf("approvals = %+v, want none", a)
 	}
 	got := out.String()
-	for _, want := range []string{"Discovery command", "running without approval (Auto)", "Plan " + webPlan().Hash} {
+	for _, want := range []string{"Discovery command", "may run without approval (Auto)", "Plan " + webPlan().Hash} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output lacks %q:\n%s", want, got)
 		}
