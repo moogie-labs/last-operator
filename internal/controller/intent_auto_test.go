@@ -2,6 +2,8 @@ package controller
 
 import (
 	"strings"
+	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -278,6 +280,61 @@ var _ = Describe("Auto modes", func() {
 		approve(key, lastv1alpha1.DecisionApprove)
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
 		Expect(gw.authsOf(key)).To(Equal([]string{authApproval}))
+	})
+
+	Describe("a Deny", func() {
+		BeforeEach(func() { DeferCleanup(resetClock) })
+
+		// wantNoRetry advances the clock past any backoff and checks that the
+		// denied Intent stays Failed, with no new call to the gateway.
+		wantNoRetry := func() {
+			calls := gw.calls(key)
+			advanceClock(2 * time.Hour)
+			poke(key)
+			Consistently(func() []string { return gw.calls(key) }).Should(Equal(calls),
+				"the Create stage is Auto, but the plan was denied")
+			Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseFailed))
+			Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
+			Expect(getIntent(key).Status.Retries).To(BeZero())
+		}
+
+		It("fails an Auto phase it stops with ApprovalDenied, which never retries by itself", func() {
+			twoSteps := []lastv1alpha1.Command{s1, s2}
+			deny := func(step string) { // called in the controller's goroutine
+				defer GinkgoRecover()
+				if step == "s2" {
+					createApproval(key, lastv1alpha1.StageCreate, hashOf(twoSteps), lastv1alpha1.DecisionDeny)
+				}
+			}
+			gw.setScript(key, &script{llm: turns(answer(twoSteps)), onRun: deny})
+			createIntentWithModes(key, lastv1alpha1.StageModes{Create: modeAuto})
+
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+			Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
+			Expect(readyCondition(key).Message).To(Equal("step s2: " + gatewayv1.MsgDeniedPrefix +
+				"auto authorization withdrawn: an approval denies this plan"))
+			Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase, runS1, runS2, endFailed}))
+			wantNoRetry()
+		})
+
+		It("fails an Auto plan the gateway refuses to open with ApprovalDenied, which never retries by itself", func() {
+			var once sync.Once
+			gw.setScript(key, &script{llm: func(*gatewayv1.CallLLMRequest) (string, error) {
+				once.Do(func() { // called in the controller's goroutine, before the plan is recorded
+					defer GinkgoRecover()
+					createApproval(key, lastv1alpha1.StageCreate, hashOf(steps), lastv1alpha1.DecisionDeny)
+				})
+				return answer(steps), nil
+			}})
+			createIntentWithModes(key, lastv1alpha1.StageModes{Create: modeAuto})
+
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+			Expect(readyReason(key)).To(Equal(ReasonApprovalDenied))
+			Expect(readyCondition(key).Message).To(Equal("The gateway refused to open the phase: " +
+				gatewayv1.MsgDeniedPrefix + "an approval denies this plan"))
+			Expect(gw.calls(key)).To(Equal([]string{callLLM, beginPhase}))
+			wantNoRetry()
+		})
 	})
 
 	It("fails the step when Auto is withdrawn mid-phase", func() {

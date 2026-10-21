@@ -63,7 +63,7 @@ func (g *Gateway) runProbes(ctx context.Context, req *gatewayv1.RunProbesRequest
 	if deny, err := g.findDeny(ctx, &existing, rec.Executed); err != nil {
 		return nil, err
 	} else if deny != nil {
-		return nil, d.deny(codes.PermissionDenied, "approval %s denies this plan", deny.Name)
+		return nil, d.deny(codes.PermissionDenied, "%sapproval %s denies this plan", gatewayv1.MsgDeniedPrefix, deny.Name)
 	}
 	var probes []lastv1alpha1.Probe
 	for _, r := range body.Resources {

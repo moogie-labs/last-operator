@@ -356,7 +356,8 @@ func TestRunCommandRechecksApprovalAndPolicyOnEveryStep(t *testing.T) {
 		name    string
 		change  func(*testing.T, *testEnv, *lastv1alpha1.Intent)
 		message string
-	}{{"approval withdrawn", withdraw, "approval withdrawn"}, {"policy narrowed", narrow, "policy:"}} {
+		denied  bool // the refusal is a Deny's (gatewayv1.Denied)
+	}{{"approval withdrawn", withdraw, "approval withdrawn", true}, {"policy narrowed", narrow, "policy:", false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, in := newRunEnv(t, []lastv1alpha1.Command{s1, s2})
 			h := in.Status.Plan.Hash
@@ -372,6 +373,9 @@ func TestRunCommandRechecksApprovalAndPolicyOnEveryStep(t *testing.T) {
 			env.wantDenied(err, codes.PermissionDenied)
 			if !strings.Contains(err.Error(), tc.message) {
 				t.Fatalf("error = %v, want %q", err, tc.message)
+			}
+			if gatewayv1.Denied(err) != tc.denied {
+				t.Fatalf("Denied(%v) = %v, want %v", err, !tc.denied, tc.denied)
 			}
 			for _, e := range env.entries()[before:] {
 				if e.Type == audit.TypeCommandStart {

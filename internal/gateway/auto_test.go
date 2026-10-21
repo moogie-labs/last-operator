@@ -92,6 +92,9 @@ func (e *testEnv) wantNeedsApproval(err error, before int) {
 	if !gatewayv1.NeedsApproval(err) {
 		e.t.Fatalf("NeedsApproval(%v) = false", err)
 	}
+	if gatewayv1.Denied(err) {
+		e.t.Fatalf("Denied(%v) = true", err)
+	}
 }
 
 func TestAutoCreateRunsWithoutApproval(t *testing.T) {
@@ -305,6 +308,7 @@ func TestADenyStopsAnAutoPhase(t *testing.T) {
 		before := len(env.entries())
 		_, err := env.begin(h)
 		env.refusedWith(err, codes.PermissionDenied, "approval no denies this plan", before)
+		wantDeniedByApproval(t, err)
 	})
 	t.Run("at RunCommand", func(t *testing.T) {
 		in := intentWithPlan(t, twoSteps())
@@ -324,10 +328,20 @@ func TestADenyStopsAnAutoPhase(t *testing.T) {
 		if !strings.Contains(err.Error(), "auto authorization withdrawn: no denies this plan") {
 			t.Fatalf("RunCommand = %v, want the Deny named", err)
 		}
+		wantDeniedByApproval(t, err)
 		wantNoCommandStart(t, env, before)
 		_, err = env.end(h, true)
 		env.wantDenied(err, codes.FailedPrecondition)
 	})
+}
+
+// wantDeniedByApproval asserts that err is a refusal a Deny caused, as the
+// operator matches it (gatewayv1.Denied).
+func wantDeniedByApproval(t *testing.T, err error) {
+	t.Helper()
+	if !gatewayv1.Denied(err) {
+		t.Fatalf("Denied(%v) = false, want true", err)
+	}
 }
 
 func wantNoCommandStart(t *testing.T, env *testEnv, from int) {
@@ -382,6 +396,9 @@ func TestTurningAutoOffMidPhaseNeedsAnApproval(t *testing.T) {
 			env.wantDenied(err, codes.PermissionDenied)
 			if !strings.Contains(err.Error(), tc.refused) {
 				t.Fatalf("RunCommand = %v, want %q", err, tc.refused)
+			}
+			if gatewayv1.Denied(err) {
+				t.Fatal("a withdrawal without a Deny reads as denied")
 			}
 			wantNoCommandStart(t, env, before)
 			_, err = env.end(h, true)
@@ -501,6 +518,25 @@ func TestNeedsApprovalMatchesOnlyItsRefusal(t *testing.T) {
 	} {
 		if got := gatewayv1.NeedsApproval(tc.err); got != tc.want {
 			t.Errorf("NeedsApproval(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestDeniedMatchesOnlyADenysRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{status.Error(codes.PermissionDenied, gatewayv1.MsgDeniedPrefix+"approval no denies this plan"), true},
+		{status.Error(codes.PermissionDenied, gatewayv1.MsgDeniedPrefix+"auto authorization withdrawn: no denies this plan"), true},
+		{status.Error(codes.FailedPrecondition, gatewayv1.MsgDeniedPrefix+"approval no denies this plan"), false},
+		{status.Error(codes.PermissionDenied, "approval no denies this plan"), false},
+		{status.Error(codes.PermissionDenied, gatewayv1.MsgNeedsApproval), false},
+		{status.Error(codes.PermissionDenied, "approval withdrawn: no IntentApproval approves this plan"), false},
+	} {
+		if got := gatewayv1.Denied(tc.err); got != tc.want {
+			t.Errorf("Denied(%v) = %v, want %v", tc.err, got, tc.want)
 		}
 	}
 }

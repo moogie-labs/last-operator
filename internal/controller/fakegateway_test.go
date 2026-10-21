@@ -343,7 +343,7 @@ func (f *fakeGateway) recheck(ctx context.Context, key types.NamespacedName) err
 		return status.Error(codes.Unavailable, err.Error())
 	}
 	if denied {
-		return status.Errorf(codes.PermissionDenied, "%s: an approval denies this plan", withdrawn)
+		return status.Errorf(codes.PermissionDenied, "%s%s: an approval denies this plan", gatewayv1.MsgDeniedPrefix, withdrawn)
 	}
 	if auto && intent.UID == f.openUID[key] {
 		mode, err := f.mode(ctx, &intent, stage)
@@ -491,7 +491,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	case f.used[subject]:
 		return nil, status.Error(codes.FailedPrecondition, "this plan already opened a phase; a plan runs only once, so plan a different one")
 	case denied:
-		return nil, status.Error(codes.PermissionDenied, "an approval denies this plan")
+		return nil, status.Error(codes.PermissionDenied, gatewayv1.MsgDeniedPrefix+"an approval denies this plan")
 	}
 	// The gateway's authorization order (ruling R2): Auto within D9's limits,
 	// then an Approve, then NeedsApproval for an Auto stage.

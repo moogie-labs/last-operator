@@ -1,6 +1,8 @@
 package gatewayv1
 
 import (
+	"strings"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -27,4 +29,17 @@ const MsgNeedsApproval = "needs approval: the plan is outside Auto mode's limits
 func NeedsApproval(err error) bool {
 	s, ok := status.FromError(err)
 	return ok && err != nil && s.Code() == codes.PermissionDenied && s.Message() == MsgNeedsApproval
+}
+
+// MsgDeniedPrefix starts every refusal an IntentApproval's Deny caused: a
+// BeginPhase refused for a denied subject, a step whose phase a Deny stopped,
+// in an Auto or an approval phase, and a probe run of a denied executed plan.
+// The operator reads it as the plan having been denied, which never retries by
+// itself (design D10), however the stage's mode stands.
+const MsgDeniedPrefix = "denied: "
+
+// Denied reports whether err is a refusal a Deny caused (MsgDeniedPrefix).
+func Denied(err error) bool {
+	s, ok := status.FromError(err)
+	return ok && err != nil && s.Code() == codes.PermissionDenied && strings.HasPrefix(s.Message(), MsgDeniedPrefix)
 }

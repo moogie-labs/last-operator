@@ -198,6 +198,7 @@ func (e *testEnv) refusesProbes() {
 	if !strings.Contains(err.Error(), "denies") {
 		e.t.Fatalf("refusal = %v; want the Deny named", err)
 	}
+	wantDeniedByApproval(e.t, err)
 	for _, en := range e.entries()[before:] {
 		if en.Type == audit.TypeProbeStart {
 			e.t.Fatal("a probe ran after a Deny")

@@ -171,7 +171,8 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 }
 
 // recheckAuthorization refuses the step, failing the phase, when what
-// authorized the phase no longer stands. A Deny for the subject always refuses.
+// authorized the phase no longer stands. A Deny for the subject always refuses,
+// with gatewayv1.MsgDeniedPrefix.
 // An Auto phase passes while its stage is still Auto for the same Intent, from
 // layers, which the caller read for this step; D9's limits held at BeginPhase
 // and do not change within the phase. An approval phase, and an Auto phase
@@ -192,7 +193,7 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
-		return d.deny(codes.PermissionDenied, "%s: %s denies this %s", withdrawn(p), approval.Name, subjectNoun(p.stage))
+		return d.deny(codes.PermissionDenied, "%s%s: %s denies this %s", gatewayv1.MsgDeniedPrefix, withdrawn(p), approval.Name, subjectNoun(p.stage))
 	case err != nil:
 		return err
 	}

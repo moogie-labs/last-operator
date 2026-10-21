@@ -84,6 +84,8 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
 	case gatewayv1.NeedsApproval(err):
 		return ctrl.Result{}, r.needsApproval(ctx, in, err)
+	case gatewayv1.Denied(err):
+		return ctrl.Result{}, r.failDenied(ctx, in, "The gateway refused to open the phase: "+describe(err))
 	case status.Code(err) == codes.AlreadyExists:
 		return r.abandonPhase(ctx, in, "A phase from an earlier attempt was still open")
 	case terminal(err):
@@ -162,6 +164,8 @@ func (r *IntentReconciler) runSteps(ctx context.Context, in *lastv1alpha1.Intent
 			return ctrl.Result{}, ctx.Err() // shutting down; the next process abandons the phase
 		case tornDown(in, err):
 			return ctrl.Result{}, r.release(ctx, in, msgTornDown)
+		case gatewayv1.Denied(err):
+			return r.endDenied(ctx, in, fmt.Sprintf("step %s: %s", step.ID, describe(err)))
 		case err != nil:
 			return r.endFailed(ctx, in, fmt.Sprintf("step %s: %s", step.ID, describe(err)), false)
 		case res.GetExitCode() != 0 || res.GetError() != "":
@@ -311,6 +315,33 @@ func (r *IntentReconciler) endFailed(ctx context.Context, in *lastv1alpha1.Inten
 		return r.startSession(ctx, in, stage, reason, causeReplan) // the failed phase left the executed plan as it was
 	}
 	return ctrl.Result{}, r.failRun(ctx, in, ReasonExecutionFailed, reason)
+}
+
+// endDenied closes the phase as failed for a step the gateway refused because
+// an IntentApproval denies the plan (gatewayv1.Denied), then fails the Intent
+// as denied (failDenied).
+func (r *IntentReconciler) endDenied(ctx context.Context, in *lastv1alpha1.Intent, reason string) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("Ending denied phase as failed", "plan", in.Status.Plan.Hash, "reason", clip(reason))
+	err := r.endPhase(ctx, in, in.Status.Plan.Hash, false, reason)
+	switch {
+	case tornDown(in, err):
+		return ctrl.Result{}, r.release(ctx, in, msgTornDown)
+	case err != nil && status.Code(err) != codes.FailedPrecondition:
+		return ctrl.Result{}, err // still PhaseOpen: the next attempt abandons the phase
+	}
+	return ctrl.Result{}, r.failDenied(ctx, in, reason)
+}
+
+// failDenied fails the Intent with ApprovalDenied for a gateway refusal that a
+// Deny caused, at BeginPhase or at a step (gatewayv1.Denied), as a Deny seen
+// in AwaitingApproval does. It is never ExecutionFailed: a denied plan never
+// retries by itself, whatever the stage's mode (D10). A teardown keeps the
+// finalizer, and the message says how to plan it again.
+func (r *IntentReconciler) failDenied(ctx context.Context, in *lastv1alpha1.Intent, msg string) error {
+	if planStage(in) == lastv1alpha1.StageDelete {
+		msg += "; " + retryTeardownHint
+	}
+	return r.fail(ctx, in, ReasonApprovalDenied, msg)
 }
 
 // specEditHint tells the user how to plan again after a failed Create, Update

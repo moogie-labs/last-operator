@@ -543,7 +543,8 @@ func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval)
 
 // authorizePhase decides what authorizes opening a phase for the subject, in
 // this order (main spec §8.3):
-//  1. a Deny for the subject refuses, whatever the mode;
+//  1. a Deny for the subject refuses, whatever the mode, with
+//     gatewayv1.MsgDeniedPrefix;
 //  2. an Auto stage whose plan is within design D9's limits is authorized as
 //     {auto, <stage key>}, whatever Approve exists;
 //  3. an Approve, from neither the operator nor a gateway-namespace
@@ -559,7 +560,7 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 	approval, err := g.findApproval(ctx, intent, stage, subject)
 	switch {
 	case errors.Is(err, errApprovalDenied):
-		return nil, nil, d.deny(codes.PermissionDenied, "approval %s denies this %s", approval.Name, subjectNoun(stage))
+		return nil, nil, d.deny(codes.PermissionDenied, "%sapproval %s denies this %s", gatewayv1.MsgDeniedPrefix, approval.Name, subjectNoun(stage))
 	case err != nil:
 		return nil, nil, err
 	}

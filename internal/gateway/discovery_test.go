@@ -247,6 +247,7 @@ func TestDiscoveryRefusalsNameTheDiscoveryCommand(t *testing.T) {
 		if !strings.Contains(err.Error(), "approval no denies this discovery command") {
 			t.Fatalf("BeginPhase = %v", err)
 		}
+		wantDeniedByApproval(t, err)
 	})
 	t.Run("approval withdrawn while the phase is open", func(t *testing.T) {
 		env := newProviderEnv(t, in, discoveryApproval("look", subject, lastv1alpha1.DecisionApprove))
@@ -261,5 +262,6 @@ func TestDiscoveryRefusalsNameTheDiscoveryCommand(t *testing.T) {
 		if !strings.Contains(err.Error(), "approval withdrawn: no denies this discovery command") {
 			t.Fatalf("RunCommand = %v", err)
 		}
+		wantDeniedByApproval(t, err)
 	})
 }

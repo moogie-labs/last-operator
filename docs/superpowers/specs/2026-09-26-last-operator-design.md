@@ -833,7 +833,11 @@ Pending → Clarifying ⇄ (user answers)
     `lastTransitionTime`, which the operator sets when the Intent moves
     to `Failed`. Until then the Intent is requeued for the time left.
     `ApprovalDenied` is never retried automatically: a person refused
-    the plan, so only the annotation or a spec edit retries it. The mode
+    the plan, so only the annotation or a spec edit retries it. A Deny
+    the gateway enforces counts the same: when `BeginPhase` or a step is
+    refused because a Deny names the plan (`gatewayv1.Denied`), the
+    operator ends any open phase as failed and fails the Intent with
+    `ApprovalDenied`, never `ExecutionFailed`, in Manual and Auto mode. The mode
     is read when the Intent is reconciled; the operator does not watch
     policies for a Failed Intent.
   - **Counts and resets.** Every retry, by the annotation or the
@@ -1051,7 +1055,8 @@ for Remediate, `delete` for Delete) from the same `OperatorConfig` and
 `spec.modes`. It then authorizes in this order:
 
 1. A `Deny` for the subject (bound to the Intent's UID and within
-   `approvals.maxAge`) refuses with `PermissionDenied`, whatever the mode.
+   `approvals.maxAge`) refuses with `PermissionDenied`, whatever the mode,
+   and a message that starts with `gatewayv1.MsgDeniedPrefix` ("denied: ").
 2. An Auto stage whose plan is within **Auto's limits** opens without an
    approval, even when an `Approve` exists. Commands compare as written,
    before `${steps…}` resolution: canonical JSON with the step `id`
@@ -1091,7 +1096,9 @@ phase keeps the same authorization; an approved phase carries
 
 **`RunCommand` re-checks authorization before every step**, with fresh
 reads of the policy layers, the Intent and its `IntentApproval`s. A `Deny`
-for the subject stops any phase. An Auto phase passes while the stage is
+for the subject stops any phase, with the same prefix. Every refusal a Deny
+causes, at `BeginPhase`, at a step or at `RunProbes`, carries it, and
+`gatewayv1.Denied(err)` matches it. An Auto phase passes while the stage is
 still Auto for the same Intent UID; its plan was checked against Auto's
 limits at `BeginPhase` and cannot change within the phase, so the limits
 are not checked again. Once a policy edit turns the stage to Manual, the
