@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/policy"
 )
 
 // condReady is the Intent condition whose message says what the Intent waits for.
@@ -222,3 +223,40 @@ func phaseOf(in *lastv1alpha1.Intent) lastv1alpha1.Phase {
 func writef(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 
 func writeln(w io.Writer, a ...any) { _, _ = fmt.Fprintln(w, a...) }
+
+// reasonRunningDiscovery is the Ready reason of a discovery command the
+// operator runs without waiting for approval (Auto discovery): nothing is left
+// to decide on it.
+const reasonRunningDiscovery = "RunningDiscovery"
+
+// runsWithoutApproval reports whether the pending discovery command is
+// already running in Auto.
+func runsWithoutApproval(in *lastv1alpha1.Intent) bool {
+	c := meta.FindStatusCondition(in.Status.Conditions, condReady)
+	return in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && c != nil && c.Reason == reasonRunningDiscovery
+}
+
+// stageModeOf is the mode the Intent's status says stage resolved to, or ""
+// when the operator recorded none.
+func stageModeOf(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) lastv1alpha1.Mode {
+	m := in.Status.EffectiveModes
+	if m == nil {
+		return ""
+	}
+	return policy.EffectiveModes{Discovery: m.Discovery, Create: m.Create, Reconcile: m.Reconcile, Delete: m.Delete}.For(stage)
+}
+
+// printModes writes the Intent's effective modes on one line, and its replans
+// and retries when they are not zero.
+func printModes(w io.Writer, in *lastv1alpha1.Intent) {
+	if m := in.Status.EffectiveModes; m != nil {
+		writef(w, "Modes: discovery=%s create=%s reconcile=%s delete=%s\n",
+			clean(string(m.Discovery)), clean(string(m.Create)), clean(string(m.Reconcile)), clean(string(m.Delete)))
+	}
+	if in.Status.Replans != 0 {
+		writef(w, "Replans: %d\n", in.Status.Replans)
+	}
+	if in.Status.Retries != 0 {
+		writef(w, "Retries: %d\n", in.Status.Retries)
+	}
+}

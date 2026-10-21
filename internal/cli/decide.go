@@ -23,11 +23,13 @@ var approvablePlanStages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1
 
 // subjectOf returns what the Intent asks its user to decide, with the hash
 // the operator states for it: the pending discovery command in
-// AwaitingDiscoveryApproval, the plan in AwaitingApproval. Only verifiedSubject
+// AwaitingDiscoveryApproval, the plan in AwaitingApproval. A discovery command
+// that runs without approval (Auto, Ready reason RunningDiscovery) is none: it is
+// already running, so there is nothing to approve or deny. Only verifiedSubject
 // makes it something to show or decide.
 func subjectOf(in *lastv1alpha1.Intent) (lastv1alpha1.Stage, string, bool) {
 	switch {
-	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil:
+	case in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && in.Status.PendingCommand != nil && !runsWithoutApproval(in):
 		return lastv1alpha1.StageDiscovery, in.Status.PendingCommand.Hash, true
 	case in.Status.Phase == lastv1alpha1.PhaseAwaitingApproval && in.Status.Plan != nil:
 		return planStageOf(in), in.Status.Plan.Hash, true

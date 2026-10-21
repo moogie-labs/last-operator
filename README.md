@@ -10,8 +10,8 @@ approved discovery commands, and executes approved plans in sandbox pods,
 building the images their commands need. It tears an Intent down when you
 delete it, plans an Update when you edit it, and plans a Remediate when its
 probes find drift. Every action goes through the gateway, which records it in a
-write-once audit log. Auto modes and adaptive probing arrive in M5c, allow
-rules in M6 and rule suggestions in M7.
+write-once audit log. Auto modes, retries and adaptive probing are in M5c; allow
+rules arrive in M6 and rule suggestions in M7.
 
 ## What works today
 
@@ -95,8 +95,9 @@ teardown completes:
   and asks the model to order its teardown commands. The model can reorder them,
   not change, add or drop any. The Intent shows `AwaitingApproval` for stage
   Delete.
-- **Approval.** A Delete always needs your approval; no allow rule or Auto mode
-  covers it. Approve it as usual, with `kubectl last plan web -n team-x` and
+- **Approval.** A Delete needs your approval, unless the `delete` stage is Auto and the
+  plan only orders the teardown commands the Intent executed (see Auto modes
+  below); no allow rule covers it. Approve it as usual, with `kubectl last plan web -n team-x` and
   `kubectl last approve web -n team-x --hash H`, or `y` at the prompt of a
   following `kubectl last`.
 - **Teardown.** The phase is `TearingDown` while the commands run. On success the
@@ -146,14 +147,43 @@ An Intent that has executed is not frozen.
   remediation is in flight abandons it and plans an Update.
 - **Denying a Remediate.** Like any denied plan, a denied Remediate fails the
   Intent with `ApprovalDenied`. A Failed Intent runs no probes, so drift is no
-  longer watched. Edit the spec to plan an Update, which you approve as usual;
-  the Intent is not otherwise retried.
+  longer watched. Edit the spec to plan an Update, which you approve as usual,
+  or change the retry annotation to plan a new Remediate. A denied plan is never
+  retried automatically, even in Auto.
 - **Approving.** `approve` and `deny` act only while the Intent is
   `AwaitingApproval`: during planning, `status.plan` is still the previous plan
   and is never approvable. A plan that carries a nonce is shown as
   `(stage Remediate)`. After a `DriftCleared` return the plan shown is the last
   one recorded: the executed plan, labelled `(executed plan)`, or an earlier
   remediation's plan, labelled `(stage Remediate)`.
+
+## Auto modes, retries and probes
+
+- **Modes.** Each stage key runs in Manual or Auto: `discovery`, `create`
+  (Create and Update), `reconcile` (Remediate) and `delete`. The default is
+  Manual. Auto needs `allowAutoModes.<key>: true` in `OperatorConfig.spec.defaults`
+  and in every IntentPolicy of the namespace, and then `modes.<key>: Auto` in an
+  IntentPolicy, the defaults or `spec.modes` of the Intent. A `Manual` in an
+  IntentPolicy is final. `kubectl last plan web -n team-x` shows what resolved,
+  as `Modes: discovery=Manual create=Auto reconcile=Auto delete=Manual`.
+- **What Auto skips.** An Auto plan runs without an IntentApproval ("Running plan
+  H without approval (Auto)"), and the audit records `authorizedBy` `auto` with
+  the stage key and no `approval.observed`. An Auto discovery command runs
+  without a prompt. Auto stays inside limits: a Remediate may only re-run steps
+  the executed plan ran, and a Delete may only reorder the executed teardown
+  commands. A plan outside them waits for your approval as in Manual. A Deny
+  still stops an Auto phase.
+- **Retries.** A Failed Intent in an Auto stage retries by itself after 1m, 2m,
+  4m, and so on up to 1h (`Retries: n` in `kubectl last plan`), except after
+  `ApprovalDenied`. In any mode, changing the retry annotation retries a Failed
+  Intent of any stage at once:
+  `kubectl annotate intent web -n team-x last.moogie-labs.com/retry=3 --overwrite`.
+- **Replans.** A failed step makes the model plan again, at most 3 times
+  (`Replans: n`); then the Intent fails with `PlanningFailed`.
+- **Probes.** Probes run every minute after a change or drift, double after each
+  run in which every probe passes up to 5m, and go back to 1m on a failure. Each
+  interval is jittered by up to 10%. `probes.fastInterval`, `probes.interval` and
+  the floor `probes.minInterval` (1m) set them.
 
 ## Upgrading to M5a
 

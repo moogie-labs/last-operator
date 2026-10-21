@@ -304,6 +304,8 @@ spec:
 status:
   phase: AwaitingApproval
   stage: Create                  # Discovery | Create | Update | Remediate | Delete
+  effectiveModes:                # what each stage key resolved to (§6); display data, the gateway resolves it itself
+    { discovery: Manual, create: Auto, reconcile: Auto, delete: Manual }
   observedGeneration: 3
   observedRequestHash: "sha256:…" # spec.request of the current planning session
   planningSessionSeq: 1042        # audit seq of the session's first llm.request
@@ -529,6 +531,21 @@ Settings resolve as **`OperatorConfig.defaults` → `IntentPolicy` →
 
 - A mode can move from Auto to Manual, never from Manual to Auto,
   unless the policy layer sets `allowAutoModes.<stage>: true`.
+- **Resolving a stage key** (`discovery`, `create` for Create and Update,
+  `reconcile` for Remediate, `delete`) does not depend on the order the
+  policies are read in:
+  - Auto is **allowed** only when every policy layer allows it:
+    `OperatorConfig.spec.defaults` and every `IntentPolicy` in the
+    namespace set `allowAutoModes.<key>: true`.
+  - The **policy mode** is Manual if any `IntentPolicy` sets Manual.
+    Otherwise it is Auto if the defaults or any `IntentPolicy` set Auto.
+    Otherwise it is Manual.
+  - The **effective mode** is Auto only when Auto is allowed and either
+    the Intent sets Auto, or it sets nothing and the policy mode is Auto.
+    An Intent that sets Manual gets Manual.
+  - **A Manual set by an `IntentPolicy` is final:** the Intent cannot
+    loosen it, even when every layer allows Auto. The Intent's Auto can
+    loosen only the defaults layer's Manual.
 - Lists (providers, egress) resolve to the **intersection** of the
   layers.
 - Allow rules are additive: the cluster's `ClusterCommandRule`s plus the

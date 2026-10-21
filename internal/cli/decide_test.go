@@ -300,3 +300,14 @@ func TestPreviousPlanIsNotApprovableWhilePlanning(t *testing.T) {
 		}
 	}
 }
+
+func TestSubjectOfRefusesADiscoveryCommandThatRunsWithoutApproval(t *testing.T) {
+	in := pendingIntent()
+	if _, _, ok := subjectOf(in); !ok {
+		t.Fatal("a pending discovery command is a subject")
+	}
+	setReady(in, "RunningDiscovery", "Running discovery command without approval (Auto)")
+	if stage, hash, ok := subjectOf(in); ok {
+		t.Errorf("subjectOf = %s %s, want none: the command is already running", stage, hash)
+	}
+}

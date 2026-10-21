@@ -22,6 +22,7 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 				return err
 			}
 			printStatus(d.Out, in)
+			printModes(d.Out, in)
 			if in.Status.Phase == lastv1alpha1.PhaseClarifying && len(in.Status.Questions) > 0 {
 				for _, q := range in.Status.Questions {
 					writeln(d.Out)
@@ -46,6 +47,9 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 				return nil
 			}
 			renderSubject(d.Out, in, stage, hash, files)
+			if runsWithoutApproval(in) {
+				writeln(d.Out, "Running without approval (Auto); there is nothing to decide.")
+			}
 			if decidable, _, ok, err := verifiedSubject(in); ok && err == nil && decidable == stage {
 				printDecisionCommands(d.Out, in, hash)
 			}

@@ -453,3 +453,44 @@ func TestFailedNamesTheRetryAnnotationForEveryStage(t *testing.T) {
 		})
 	}
 }
+
+func TestFollowDoesNotPromptInAuto(t *testing.T) {
+	c := fakeClient()
+	d, out := depsFor(c, "") // no input: a prompt would end the follow with an error
+	auto := &lastv1alpha1.StageModes{Discovery: lastv1alpha1.ModeAuto, Create: lastv1alpha1.ModeAuto,
+		Reconcile: lastv1alpha1.ModeAuto, Delete: lastv1alpha1.ModeAuto}
+	w := &world{t: t, c: c}
+	w.steps = []step{
+		{apply: func(in *lastv1alpha1.Intent) {
+			in.Status.EffectiveModes = auto
+			in.Status.Stage = lastv1alpha1.StageCreate
+			in.Status.Phase = lastv1alpha1.PhaseAwaitingDiscoveryApproval
+			in.Status.PendingCommand = lookCommand()
+			setReady(in, "RunningDiscovery", "Running discovery command")
+		}},
+		{apply: func(in *lastv1alpha1.Intent) {
+			in.Status.Plan = webPlan()
+			in.Status.Phase = lastv1alpha1.PhaseExecuting
+			setReady(in, "Executing", "Running plan without approval (Auto)")
+		}},
+		{apply: func(in *lastv1alpha1.Intent) { in.Status.Phase = lastv1alpha1.PhaseReady }},
+	}
+	d.Wait = w.wait
+	if err := execute(d, "run an nginx web server", "--name", webName); err != nil {
+		t.Fatalf("kubectl last = %v\n%s", err, out)
+	}
+	if a := approvalsIn(t, c); len(a) != 0 {
+		t.Errorf("approvals = %+v, want none", a)
+	}
+	got := out.String()
+	for _, want := range []string{"Discovery command", "running without approval (Auto)", "Plan " + webPlan().Hash} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{"Approve:", "Deny:", "Approve?"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("output offers %q:\n%s", bad, got)
+		}
+	}
+}

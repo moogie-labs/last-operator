@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
-	"github.com/moogie-labs/last-operator/internal/policy"
 )
 
 // ErrIntentFailed is returned when a followed Intent fails, after its reason is printed.
@@ -39,6 +38,7 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 	asked := map[string]bool{}  // subjects already put to the user, decided or left pending
 	warned := map[string]bool{} // stated hashes whose content did not hash to them
 	var last lastv1alpha1.Phase
+	var shownModes string         // the modes, replans and retries last printed
 	var prev *lastv1alpha1.Intent // the last Intent read
 	for {
 		var in lastv1alpha1.Intent
@@ -59,9 +59,14 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 			return err
 		}
 		prev = in.DeepCopy()
+		if modes := modesLine(&in); modes != shownModes {
+			shownModes = modes
+			printModes(d.Out, &in)
+		}
 		if phaseOf(&in) != last {
 			printStatus(d.Out, &in)
 			last = phaseOf(&in)
+			noteAuto(d.Out, &in)
 		}
 		var err error
 		switch in.Status.Phase {
@@ -176,8 +181,7 @@ func failed(w io.Writer, in *lastv1alpha1.Intent) error {
 	if stage == lastv1alpha1.StageDelete {
 		again = "Change its " + lastv1alpha1.AnnotationRetry + " annotation to plan the teardown again."
 	}
-	if m := in.Status.EffectiveModes; m != nil && reason != reasonApprovalDenied &&
-		(policy.EffectiveModes{Discovery: m.Discovery, Create: m.Create, Reconcile: m.Reconcile, Delete: m.Delete}).For(stage) == lastv1alpha1.ModeAuto {
+	if reason != reasonApprovalDenied && stageModeOf(in, stage) == lastv1alpha1.ModeAuto {
 		again += " Its " + string(stage) + " stage is Auto, so the operator also retries it automatically, with backoff."
 	}
 	writef(w, "Intent %s/%s failed: %s: %s\n%s\n", in.Namespace, in.Name, clean(reason), clean(msg), again)
@@ -188,4 +192,25 @@ func stopped(w io.Writer, key client.ObjectKey) error {
 	writef(w, "\nStopped following Intent %s/%s; it carries on. See where it is with kubectl last plan %s -n %s.\n",
 		key.Namespace, key.Name, key.Name, key.Namespace)
 	return nil
+}
+
+// modesLine is what printModes writes, to print it again only when it changes.
+func modesLine(in *lastv1alpha1.Intent) string {
+	var b strings.Builder
+	printModes(&b, in)
+	return b.String()
+}
+
+// noteAuto says so when the operator runs what it would otherwise have put to
+// the user: an Auto discovery command, or a plan in an Auto stage that is
+// already running. Nothing is asked or decided on either.
+func noteAuto(w io.Writer, in *lastv1alpha1.Intent) {
+	switch {
+	case runsWithoutApproval(in) && in.Status.PendingCommand != nil:
+		writef(w, "Discovery command %s is running without approval (Auto).\n", clean(in.Status.PendingCommand.Hash))
+	case (in.Status.Phase == lastv1alpha1.PhaseExecuting || in.Status.Phase == lastv1alpha1.PhaseRemediating ||
+		in.Status.Phase == lastv1alpha1.PhaseTearingDown) && in.Status.Plan != nil &&
+		stageModeOf(in, planStageOf(in)) == lastv1alpha1.ModeAuto:
+		writef(w, "Plan %s is running without approval (Auto).\n", clean(in.Status.Plan.Hash))
+	}
 }

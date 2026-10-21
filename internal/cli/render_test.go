@@ -192,3 +192,30 @@ func TestAPlanForAnUnknownStageIsNeverDecidedAsCreate(t *testing.T) {
 		t.Fatalf("verifiedSubject = ok %v, err %v; want a refusal naming stage Rename", ok, err)
 	}
 }
+
+func TestRenderShowsEffectiveModes(t *testing.T) {
+	in := testIntent(webName, func(in *lastv1alpha1.Intent) {
+		in.Status.EffectiveModes = &lastv1alpha1.StageModes{Discovery: lastv1alpha1.ModeManual, Create: lastv1alpha1.ModeAuto,
+			Reconcile: lastv1alpha1.ModeAuto, Delete: lastv1alpha1.ModeManual}
+	})
+	var b strings.Builder
+	printModes(&b, in)
+	if want := "Modes: discovery=Manual create=Auto reconcile=Auto delete=Manual\n"; b.String() != want {
+		t.Errorf("printModes = %q, want %q", b.String(), want)
+	}
+
+	in.Status.Replans, in.Status.Retries = 2, 3
+	b.Reset()
+	printModes(&b, in)
+	for _, want := range []string{"Replans: 2\n", "Retries: 3\n"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("printModes lacks %q:\n%s", want, b.String())
+		}
+	}
+
+	b.Reset()
+	printModes(&b, testIntent(webName, nil))
+	if b.Len() != 0 {
+		t.Errorf("an Intent with no modes, replans or retries shows %q", b.String())
+	}
+}
