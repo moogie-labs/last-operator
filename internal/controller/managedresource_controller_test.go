@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -14,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -59,6 +63,12 @@ var _ = Describe("ManagedResource probe schedule", func() {
 		return n
 	}
 
+	scheduledInterval := func() time.Duration {
+		sched, ok := r.schedule(key)
+		Expect(ok).To(BeTrue())
+		return sched.interval
+	}
+
 	It("runs the probes when they are due and not before", func() {
 		before := probeCalls()
 		Expect(reconcileAt(last.Add(30 * time.Second)).RequeueAfter).To(Equal(30 * time.Second))
@@ -93,6 +103,42 @@ var _ = Describe("ManagedResource probe schedule", func() {
 		gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
 		Expect(reconcileAt(last.Add(3 * time.Minute)).RequeueAfter).To(Equal(time.Minute))
 		Expect(testutil.ToFloat64(probeInterval.WithLabelValues(key.Namespace, key.Name))).To(Equal(60.0))
+	})
+
+	It("probes fast again when a passed run could not be recorded", func() {
+		reconcileAt(last.Add(time.Minute)) // passed: the interval doubles to 2m
+		Expect(scheduledInterval()).To(Equal(2 * time.Minute))
+		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+		Expect(err).NotTo(HaveOccurred())
+		r.Client = interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if _, ok := obj.(*lastv1alpha1.ManagedResource); ok {
+					return errors.New("status update refused")
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		})
+		now = last.Add(3 * time.Minute)
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).To(HaveOccurred())
+		Expect(scheduledInterval()).To(Equal(time.Minute))
+	})
+
+	It("probes fast again when the plan changes", func() {
+		reconcileAt(last.Add(time.Minute))
+		reconcileAt(last.Add(3 * time.Minute)) // the interval is now 4m
+		Expect(scheduledInterval()).To(Equal(4 * time.Minute))
+		Eventually(func() error {
+			var in lastv1alpha1.Intent
+			if err := k8sClient.Get(ctx, key, &in); err != nil {
+				return err
+			}
+			in.Status.Plan.Hash = "changed"
+			return k8sClient.Status().Update(ctx, &in)
+		}).Should(Succeed())
+		// The first run of a new plan is due a fast interval after the newest probe.
+		Expect(reconcileAt(last.Add(3*time.Minute + 30*time.Second)).RequeueAfter).To(Equal(30 * time.Second))
+		Expect(scheduledInterval()).To(Equal(time.Minute))
 	})
 
 	It("forgets the interval gauge when the Intent is no longer probed", func() {

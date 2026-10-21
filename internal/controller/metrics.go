@@ -5,14 +5,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// intentLabels labels the per-Intent probe metrics.
-var intentLabels = []string{"namespace", "intent"}
+// intentLabels labels the per-Intent probe metrics; probeRuns adds a result.
+var (
+	intentLabels    = []string{"namespace", "intent"}
+	probeRunsLabels = []string{"namespace", "intent", "result"}
+)
 
 var (
 	probeRuns = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "last_operator_probe_runs_total",
 		Help: "Scheduled probe runs, by result (passed, failed, error).",
-	}, append(intentLabels[:2:2], "result"))
+	}, probeRunsLabels)
 	probeRunsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "last_operator_probe_runs_skipped_total",
 		Help: "Scheduled probe runs skipped because the previous run was still in flight (spec §10.1).",

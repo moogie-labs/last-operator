@@ -25,9 +25,9 @@ import (
 // It covers the longest image build (images.MaxBuildTimeout, 30m) plus the probe.
 const probeTimeout = 45 * time.Minute
 
-// ManagedResourceReconciler runs each Ready or Drifted Intent's probes on a
-// adaptive, jittered interval and records the outcomes on its ManagedResources (spec §10,
-// §10.1). One RunProbes call covers all of an Intent's ManagedResources, so the
+// ManagedResourceReconciler runs each Ready or Drifted Intent's probes at an
+// adaptive, jittered interval and records the outcomes on its ManagedResources
+// (spec §10, §10.1). One RunProbes call covers all of an Intent's ManagedResources, so the
 // reconcile key is the Intent. It never calls the LLM.
 type ManagedResourceReconciler struct {
 	client.Client
@@ -120,7 +120,8 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // executed plan a Remediate plan repaired (probedPlanHash).
 //
 // It returns runPassed when the run was recorded and every probe passed, and
-// runFailed when a probe failed or the run could not be recorded.
+// runFailed when a probe failed or the run could not be recorded, including
+// when recording it returned an error.
 func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, resp *gatewayv1.RunProbesResponse, at time.Time) (runResult, error) {
 	log := logf.FromContext(ctx)
 	want, err := probedPlanHash(ctx, r.Gateway, in)
@@ -140,7 +141,9 @@ func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1
 			result = runPassed
 		}
 		probeRuns.WithLabelValues(in.Namespace, in.Name, label).Inc()
-		return result, applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), at)
+		if err := applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), at); err != nil {
+			return runFailed, err // not recorded: probe often until a run is
+		}
 	}
 	return result, nil
 }
