@@ -370,7 +370,8 @@ var _ = Describe("Intent retries", func() {
 
 			By("resetting retries with remediations after a fully passing scheduled probe run")
 			mr := &ManagedResourceReconciler{Client: k8sClient, Reader: k8sClient, Scheme: scheme.Scheme, Gateway: gw,
-				Now: func() time.Time { return time.Now().Add(10 * time.Minute) }}
+				Now:    func() time.Time { return time.Now().Add(10 * time.Minute) },
+				Jitter: func() float64 { return -0.1 }} // the overdue first run is due at once
 			_, err := mr.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(retries).Should(BeZero())

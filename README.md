@@ -216,6 +216,28 @@ An Intent that has executed is not frozen.
   for a Remediate, so its drift cannot be repaired. Edit the Intent to plan an
   Update instead.
 
+## Upgrading to M5c
+
+- **Staged Auto settings take effect at once.** Before M5c, `spec.modes` on an
+  Intent, and `modes` and `allowAutoModes` in IntentPolicies and
+  `OperatorConfig.spec.defaults`, were stored but did nothing. From the first
+  reconcile after the upgrade they decide, so a cluster that staged them runs
+  those stages in Auto. Check them before you upgrade:
+  `kubectl get intentpolicies -A -o yaml`, `kubectl get operatorconfig -o yaml`
+  and `kubectl get intents -A -o yaml`.
+- **Failed Intents in an Auto stage retry at once.** The backoff counts from
+  when the Intent failed, which is long past for an Intent that failed before
+  the upgrade, so its first retry is due immediately. `ApprovalDenied` is never
+  retried by itself.
+- **Drift is remediated unattended where `reconcile` is Auto.** A Ready or
+  `Drifted` Intent whose `reconcile` stage resolves to Auto remediates its next
+  drift without asking, within Auto's limits. A plan already waiting in
+  `AwaitingApproval` keeps waiting for your approval.
+- **Probes restart at the fast interval.** Every operator restart, the upgrade
+  included, probes each Intent at `probes.fastInterval` again (1m by default),
+  backing off from there. The first runs after a restart are spread over the
+  first tenth of that interval, so they do not all start at once.
+
 ## Demo against Claude (opt-in)
 
 ```bash

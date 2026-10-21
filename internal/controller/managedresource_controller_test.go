@@ -98,6 +98,29 @@ var _ = Describe("ManagedResource probe schedule", func() {
 		Expect(testutil.ToFloat64(probeInterval.WithLabelValues(key.Namespace, key.Name))).To(Equal(300.0))
 	})
 
+	It("jitters the first run after a restart", func() {
+		r.Jitter = func() float64 { return 0.1 }
+		before := probeCalls()
+		Expect(reconcileAt(last).RequeueAfter).To(Equal(66*time.Second), "a fast interval plus 10%% after the last probe")
+		Expect(probeCalls()).To(Equal(before))
+	})
+
+	It("spreads an overdue first run after a restart over a tenth of the fast interval", func() {
+		r.Jitter = func() float64 { return 0.1 }
+		before := probeCalls()
+		overdue := last.Add(10 * time.Minute)
+		Expect(reconcileAt(overdue).RequeueAfter).To(Equal(6*time.Second), "not every Intent is due at once")
+		Expect(probeCalls()).To(Equal(before))
+		reconcileAt(overdue.Add(6 * time.Second))
+		Expect(probeCalls()).To(Equal(before + 1))
+
+		By("running at once with the least jitter")
+		r.forget(key) // as a restart does
+		r.Jitter = func() float64 { return -0.1 }
+		reconcileAt(overdue.Add(10 * time.Minute))
+		Expect(probeCalls()).To(Equal(before + 2))
+	})
+
 	It("probes fast again after a failure", func() {
 		reconcileAt(last.Add(time.Minute))
 		gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })

@@ -73,12 +73,12 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	sched, ok := r.schedule(req.NamespacedName)
 	if !ok || sched.planHash != in.Status.Plan.Hash {
 		// First sight, a restart, or a new plan: probe often again, resuming
-		// from the newest recorded probe.
+		// from the newest recorded probe, jittered (firstRun).
 		last, err := r.lastProbe(ctx, &in)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		sched = probeSchedule{interval: fast, planHash: in.Status.Plan.Hash, next: last.Add(fast)}
+		sched = probeSchedule{interval: fast, planHash: in.Status.Plan.Hash, next: firstRun(last, now, fast, r.jitter())}
 		r.setSchedule(req.NamespacedName, sched)
 	}
 	if now.Before(sched.next) {

@@ -57,6 +57,20 @@ func (s probeSchedule) after(start, finish time.Time, result runResult, fast, st
 	return probeSchedule{interval: interval, planHash: s.planHash, next: next}, skipped
 }
 
+// firstRun returns when the first run is due after an operator restart, or
+// for a new plan, given the newest recorded probe (last) and the jitter in
+// [-maxJitter, maxJitter]: a jittered fast interval after last. If that time
+// has passed, as after a restart for every Intent probed before it, the run is
+// spread over the first tenth of the fast interval from now, the jitter mapped
+// to [0, maxJitter]·fast, so that a restart does not make every Intent due at once.
+func firstRun(last, now time.Time, fast time.Duration, jitter float64) time.Time {
+	next := last.Add(time.Duration(float64(fast) * (1 + jitter)))
+	if next.Before(now) {
+		next = now.Add(time.Duration(float64(fast) * (jitter + maxJitter) / 2))
+	}
+	return next
+}
+
 // randomJitter returns a uniform value in [-maxJitter, maxJitter].
 func randomJitter() float64 {
 	return (rand.Float64()*2 - 1) * maxJitter

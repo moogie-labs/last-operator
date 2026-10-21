@@ -1286,8 +1286,11 @@ probes:
   policy edit takes effect at the next run. The interval is kept in
   memory per Intent. It starts at `fastInterval` when the operator first
   sees the Intent, after an operator restart, and when the Intent's plan
-  changes; the first run is due `fastInterval` after the newest recorded
-  probe, or at once if that has passed. A run that was recorded with
+  changes; the first run is due a jittered `fastInterval` after the
+  newest recorded probe. If that has passed, as it has for every Intent
+  after a restart, the first run is due within the first tenth of
+  `fastInterval` from now, at a random offset, so a restart does not make
+  every Intent due at once. A run that was recorded with
   every probe passing doubles the interval, up to the steady interval. A
   failed probe, or a run that could not be recorded, resets it to
   `fastInterval`. A run skipped because one is still in flight leaves it

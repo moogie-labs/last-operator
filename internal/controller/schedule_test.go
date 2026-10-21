@@ -82,3 +82,23 @@ func TestSkipsAreCountedWhenARunOverruns(t *testing.T) {
 		}
 	}
 }
+
+func TestFirstRunIsJitteredAndSpreadWhenOverdue(t *testing.T) {
+	cases := []struct {
+		name   string
+		now    time.Time
+		jitter float64
+		want   time.Time
+	}{
+		{"due later", t0.Add(10 * time.Second), 0.1, t0.Add(66 * time.Second)},
+		{"due later, least jitter", t0.Add(10 * time.Second), -0.1, t0.Add(54 * time.Second)},
+		{"overdue, most jitter", t0.Add(time.Hour), 0.1, t0.Add(time.Hour + 6*time.Second)},
+		{"overdue, no jitter", t0.Add(time.Hour), 0, t0.Add(time.Hour + 3*time.Second)},
+		{"overdue, least jitter", t0.Add(time.Hour), -0.1, t0.Add(time.Hour)},
+	}
+	for _, tc := range cases {
+		if got := firstRun(t0, tc.now, fast, tc.jitter); !got.Equal(tc.want) {
+			t.Errorf("%s: first run at +%v, want +%v", tc.name, got.Sub(t0), tc.want.Sub(t0))
+		}
+	}
+}
