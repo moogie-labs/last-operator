@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
@@ -50,6 +51,31 @@ type sandboxEnv struct {
 	targetIP string
 	canaries []string
 	image    string
+	ownRuns  *ownRuns
+}
+
+// ownRuns records the run IDs this test's executor starts, so the leftover
+// check looks only at its own objects: other Intents' probe runs share the
+// namespace and its managed-by label.
+type ownRuns struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+func (o *ownRuns) newID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	id := hex.EncodeToString(b)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ids[id] = true
+	return id
+}
+
+func (o *ownRuns) has(labels map[string]string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.ids[labels[sandbox.LabelRun]]
 }
 
 func setupSandbox(t *testing.T) *sandboxEnv {
@@ -159,12 +185,13 @@ func setupSandbox(t *testing.T) *sandboxEnv {
 		var p lastv1alpha1.Provider
 		return &p, ctrl.Get(ctx, client.ObjectKey{Name: name}, &p)
 	}
+	runs := &ownRuns{ids: map[string]bool{}}
 	exec := sandbox.NewExecutor(kube, getProvider, w, sandbox.NewScheduler(4), sandbox.KubeLogReader(kube), sandbox.ExecutorConfig{
 		Pod: sandbox.PodConfig{Namespace: "last-sandbox", Image: image, RunnerImage: image, ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}},
-		ProviderNamespace: "last-gateway", EgressCanaries: canaries,
+		ProviderNamespace: "last-gateway", EgressCanaries: canaries, NewRunID: runs.newID,
 	})
-	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canaries: canaries, image: image}
+	return &sandboxEnv{kube: kube, ctrl: ctrl, exec: exec, sink: sink, signer: signer, targetIP: targetIP, canaries: canaries, image: image, ownRuns: runs}
 }
 
 func (s *sandboxEnv) run(t *testing.T, c lastv1alpha1.Command) sandbox.RunResult {
@@ -383,8 +410,20 @@ func TestSandboxExecution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(pods.Items)+len(secrets.Items)+len(nps.Items) != 0 {
-			t.Fatalf("leftovers: %d pods, %d secrets, %d policies", len(pods.Items), len(secrets.Items), len(nps.Items))
+		own := func(n int, labels func(i int) map[string]string) int {
+			c := 0
+			for i := range n {
+				if s.ownRuns.has(labels(i)) {
+					c++
+				}
+			}
+			return c
+		}
+		p := own(len(pods.Items), func(i int) map[string]string { return pods.Items[i].Labels })
+		sc := own(len(secrets.Items), func(i int) map[string]string { return secrets.Items[i].Labels })
+		np := own(len(nps.Items), func(i int) map[string]string { return nps.Items[i].Labels })
+		if p+sc+np != 0 {
+			t.Fatalf("leftovers of this test's runs: %d pods, %d secrets, %d policies", p, sc, np)
 		}
 		rep, err := audit.Verify(ctx, s.sink, s.signer.Public(), "e2e-sandbox", audit.VerifyOptions{})
 		if err != nil || !rep.OK() {
