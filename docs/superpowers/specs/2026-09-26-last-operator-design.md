@@ -1248,14 +1248,26 @@ probes:
   `probes.interval`. Any failure resets it to `fastInterval`.
 - **Floor.** No layer can set an interval below
   `OperatorConfig.probes.minInterval`.
-- **Fixed interval (M2).** Until adaptive intervals arrive (M5), each
-  Intent is probed at a fixed interval: the shortest `probes.interval` set
-  by `OperatorConfig.spec.defaults` or any `IntentPolicy` in its namespace
-  (default 5m), never below `probes.minInterval`. Runs are scheduled on a
-  grid from the previous run's start; grid points that pass while a run is
-  in flight are skipped and counted.
-- **Jitter.** Each scheduled run is offset by a random ±10% of its
-  interval, so Intents created together don't probe in lockstep.
+- **Interval in force.** `fastInterval` is the shortest
+  `probes.fastInterval` set by `OperatorConfig.spec.defaults` or any
+  `IntentPolicy` in the Intent's namespace (default 1m), and the steady
+  interval is the shortest `probes.interval` set (default 5m). Both are
+  at least `probes.minInterval`, and `fastInterval` is capped at the
+  steady interval. The operator re-reads them before every run, so a
+  policy edit takes effect at the next run. The interval is kept in
+  memory per Intent. It starts at `fastInterval` when the operator first
+  sees the Intent, after an operator restart, and when the Intent's plan
+  changes; the first run is due `fastInterval` after the newest recorded
+  probe, or at once if that has passed. A run that was recorded with
+  every probe passing doubles the interval, up to the steady interval. A
+  failed probe, or a run that could not be recorded, resets it to
+  `fastInterval`. A run skipped because one is still in flight leaves it
+  unchanged. The current interval is exported as the gauge
+  `last_operator_last_probe_interval_seconds{namespace,intent}`.
+  If a run overruns the next due time, due times advance by whole
+  intervals and each one passed is skipped and counted.
+- **Jitter.** Each scheduled run is offset by a uniform random ±10% of
+  its interval, so Intents created together don't probe in lockstep.
 - **No overlap.** An Intent never has more than one probe run in flight
   or queued. If the previous run hasn't finished when the next one is
   due, the new run is skipped and the skip is counted in metrics.

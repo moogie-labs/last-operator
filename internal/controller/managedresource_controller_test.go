@@ -32,7 +32,7 @@ var _ = Describe("ManagedResource probe schedule", func() {
 	BeforeEach(func() {
 		key = types.NamespacedName{Namespace: newNamespace(), Name: intentName}
 		r = &ManagedResourceReconciler{Client: k8sClient, Reader: k8sClient, Scheme: scheme.Scheme, Gateway: gw,
-			Now: func() time.Time { return now }}
+			Now: func() time.Time { return now }, Jitter: func() float64 { return 0 }}
 		resource := lastv1alpha1.ManagedResourceSpec{Probes: []lastv1alpha1.Probe{{ID: "p1",
 			Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"true"}}}, Assert: "true"}}}
 		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{argvStep("s1", "true")}, resource))})
@@ -61,20 +61,50 @@ var _ = Describe("ManagedResource probe schedule", func() {
 
 	It("runs the probes when they are due and not before", func() {
 		before := probeCalls()
-		Expect(reconcileAt(last.Add(time.Minute)).RequeueAfter).To(Equal(4 * time.Minute))
+		Expect(reconcileAt(last.Add(30 * time.Second)).RequeueAfter).To(Equal(30 * time.Second))
 		Expect(probeCalls()).To(Equal(before))
 
-		Expect(reconcileAt(last.Add(5 * time.Minute)).RequeueAfter).To(Equal(5 * time.Minute))
+		// A new Intent is probed at the fast interval; the next run is 2m out.
+		Expect(reconcileAt(last.Add(time.Minute)).RequeueAfter).To(Equal(2 * time.Minute))
 		Expect(probeCalls()).To(Equal(before + 1))
 		mr := getMR(key.Namespace, "web-0")
-		Expect(mr.Status.LastProbeTime.Time).To(BeTemporally("~", last.Add(5*time.Minute), time.Second))
+		Expect(mr.Status.LastProbeTime.Time).To(BeTemporally("~", last.Add(time.Minute), time.Second))
 		Expect(meta.IsStatusConditionTrue(mr.Status.Conditions, CondInSync)).To(BeTrue())
 		Expect(testutil.ToFloat64(probeRuns.WithLabelValues(key.Namespace, key.Name, "passed"))).To(Equal(1.0))
 	})
 
+	It("probes a Ready Intent at the fast interval, then less often", func() {
+		at := last
+		wait := reconcileAt(at).RequeueAfter // first sight: the first run is due a fast interval after the last probe
+		Expect(wait).To(Equal(time.Minute))
+		gaps := make([]time.Duration, 0, 5)
+		for range 5 {
+			at = at.Add(wait)
+			res := reconcileAt(at)
+			wait = res.RequeueAfter
+			gaps = append(gaps, res.RequeueAfter)
+		}
+		Expect(gaps).To(Equal([]time.Duration{2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}))
+		Expect(testutil.ToFloat64(probeInterval.WithLabelValues(key.Namespace, key.Name))).To(Equal(300.0))
+	})
+
+	It("probes fast again after a failure", func() {
+		reconcileAt(last.Add(time.Minute))
+		gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
+		Expect(reconcileAt(last.Add(3 * time.Minute)).RequeueAfter).To(Equal(time.Minute))
+		Expect(testutil.ToFloat64(probeInterval.WithLabelValues(key.Namespace, key.Name))).To(Equal(60.0))
+	})
+
+	It("forgets the interval gauge when the Intent is no longer probed", func() {
+		reconcileAt(last.Add(time.Minute))
+		Expect(testutil.CollectAndCount(probeInterval)).To(BeNumerically(">=", 1))
+		r.forget(key)
+		Expect(testutil.ToFloat64(probeInterval.WithLabelValues(key.Namespace, key.Name))).To(Equal(0.0))
+	})
+
 	It("records drift when a scheduled run fails", func() {
 		gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
-		reconcileAt(last.Add(5 * time.Minute))
+		reconcileAt(last.Add(time.Minute))
 		Expect(meta.IsStatusConditionFalse(getMR(key.Namespace, "web-0").Status.Conditions, CondInSync)).To(BeTrue())
 		Eventually(func() []string { return eventReasons(key, corev1.EventTypeNormal) }).Should(
 			ContainElement(string(lastv1alpha1.PhaseDrifted)))
@@ -82,10 +112,10 @@ var _ = Describe("ManagedResource probe schedule", func() {
 	})
 
 	It("counts the runs that fell due while a run was in flight as skipped", func() {
-		start := last.Add(5 * time.Minute)
-		gw.updateScript(key, func(s *script) { s.onProbe = func() { now = start.Add(11 * time.Minute) } })
-		// Runs were due at start+5m and start+10m while this one took 11 minutes; the next is at start+15m.
-		Expect(reconcileAt(start).RequeueAfter).To(Equal(4 * time.Minute))
+		start := last.Add(time.Minute)
+		gw.updateScript(key, func(s *script) { s.onProbe = func() { now = start.Add(5 * time.Minute) } })
+		// The next run was due at start+2m and start+4m while this one took 5 minutes; the next is at start+6m.
+		Expect(reconcileAt(start).RequeueAfter).To(Equal(time.Minute))
 		Expect(testutil.ToFloat64(probeRunsSkipped.WithLabelValues(key.Namespace, key.Name))).To(Equal(2.0))
 	})
 
@@ -93,7 +123,7 @@ var _ = Describe("ManagedResource probe schedule", func() {
 		gw.updateScript(key, func(s *script) {
 			s.probeErr = status.Error(codes.Aborted, "a probe run for this intent is already in flight")
 		})
-		Expect(reconcileAt(last.Add(5 * time.Minute)).RequeueAfter).To(Equal(5 * time.Minute))
+		Expect(reconcileAt(last.Add(time.Minute)).RequeueAfter).To(Equal(time.Minute))
 		Expect(testutil.ToFloat64(probeRunsSkipped.WithLabelValues(key.Namespace, key.Name))).To(Equal(1.0))
 		Expect(getMR(key.Namespace, "web-0").Status.LastProbeTime.Time).To(BeTemporally("~", last, time.Second))
 	})

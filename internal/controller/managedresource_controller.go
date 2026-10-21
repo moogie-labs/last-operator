@@ -26,7 +26,7 @@ import (
 const probeTimeout = 45 * time.Minute
 
 // ManagedResourceReconciler runs each Ready or Drifted Intent's probes on a
-// fixed interval and records the outcomes on its ManagedResources (spec §10,
+// adaptive, jittered interval and records the outcomes on its ManagedResources (spec §10,
 // §10.1). One RunProbes call covers all of an Intent's ManagedResources, so the
 // reconcile key is the Intent. It never calls the LLM.
 type ManagedResourceReconciler struct {
@@ -38,9 +38,12 @@ type ManagedResourceReconciler struct {
 	Reader client.Reader
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
+	// Jitter returns the offset, a fraction in [-0.1, 0.1] of the interval, to
+	// schedule the next run at; nil means a uniform random value.
+	Jitter func() float64
 
-	mu   sync.Mutex
-	next map[types.NamespacedName]time.Time // when each Intent's next probe run is due
+	mu        sync.Mutex
+	schedules map[types.NamespacedName]probeSchedule // each Intent's probe schedule
 }
 
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources,verbs=get;list;watch
@@ -62,53 +65,66 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
-	interval, err := r.interval(ctx, in.Namespace)
+	fast, steady, err := r.intervals(ctx, in.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	now := r.now()
-	due, ok := r.due(req.NamespacedName)
-	if !ok {
+	sched, ok := r.schedule(req.NamespacedName)
+	if !ok || sched.planHash != in.Status.Plan.Hash {
+		// First sight, a restart, or a new plan: probe often again, resuming
+		// from the newest recorded probe.
 		last, err := r.lastProbe(ctx, &in)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		due = last.Add(interval)
-		r.setDue(req.NamespacedName, due)
+		sched = probeSchedule{interval: fast, planHash: in.Status.Plan.Hash, next: last.Add(fast)}
+		r.setSchedule(req.NamespacedName, sched)
 	}
-	if now.Before(due) {
-		return ctrl.Result{RequeueAfter: due.Sub(now)}, nil
+	if now.Before(sched.next) {
+		return ctrl.Result{RequeueAfter: sched.next.Sub(now)}, nil
 	}
 
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	resp, err := r.Gateway.RunProbes(pctx, &gatewayv1.RunProbesRequest{Intent: intentRef(&in)})
 	cancel()
 	finish := r.now()
-	next, skipped := nextRun(now, finish, interval)
-	r.setDue(req.NamespacedName, next)
+	result := runFailed
+	var recordErr error
 	switch {
 	case status.Code(err) == codes.Aborted:
-		skipped++ // a run for this Intent is still in flight: never overlap
+		result = runAborted // a run for this Intent is still in flight: never overlap
 	case err != nil:
 		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
 		log.Error(err, "Could not run probes")
 	default:
-		if err := r.record(ctx, &in, resp, now); err != nil {
-			return ctrl.Result{}, err
-		}
+		result, recordErr = r.record(ctx, &in, resp, now)
 	}
+	next, skipped := sched.after(now, finish, result, fast, steady, r.jitter())
+	if result == runAborted {
+		skipped++
+	}
+	r.setSchedule(req.NamespacedName, next)
+	probeInterval.WithLabelValues(in.Namespace, in.Name).Set(next.interval.Seconds())
 	if skipped > 0 {
 		probeRunsSkipped.WithLabelValues(in.Namespace, in.Name).Add(float64(skipped))
 	}
-	return ctrl.Result{RequeueAfter: next.Sub(finish)}, nil
+	if recordErr != nil {
+		return ctrl.Result{}, recordErr
+	}
+	return ctrl.Result{RequeueAfter: next.next.Sub(finish)}, nil
 }
 
 // record records a probe run on the Intent's ManagedResources, once it is
 // clear the gateway probed the plan they belong to: the Intent's plan, or the
 // executed plan a Remediate plan repaired (probedPlanHash).
-func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, resp *gatewayv1.RunProbesResponse, at time.Time) error {
+//
+// It returns runPassed when the run was recorded and every probe passed, and
+// runFailed when a probe failed or the run could not be recorded.
+func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, resp *gatewayv1.RunProbesResponse, at time.Time) (runResult, error) {
 	log := logf.FromContext(ctx)
 	want, err := probedPlanHash(ctx, r.Gateway, in)
+	result := runFailed
 	switch {
 	case err != nil:
 		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
@@ -117,14 +133,16 @@ func (r *ManagedResourceReconciler) record(ctx context.Context, in *lastv1alpha1
 		probeRuns.WithLabelValues(in.Namespace, in.Name, "error").Inc()
 		log.Info("Gateway probed a plan other than the Intent's", "probed", resp.GetPlanHash(), "plan", want)
 	default:
-		result := "passed"
+		label := "passed"
 		if len(failedProbes(resp.GetOutcomes())) > 0 {
-			result = "failed"
+			label = "failed"
+		} else {
+			result = runPassed
 		}
-		probeRuns.WithLabelValues(in.Namespace, in.Name, result).Inc()
-		return applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), at)
+		probeRuns.WithLabelValues(in.Namespace, in.Name, label).Inc()
+		return result, applyProbeOutcomes(ctx, r.Client, r.Reader, in, resp.GetOutcomes(), at)
 	}
-	return nil
+	return result, nil
 }
 
 func (r *ManagedResourceReconciler) now() time.Time {
@@ -134,41 +152,50 @@ func (r *ManagedResourceReconciler) now() time.Time {
 	return time.Now()
 }
 
-func (r *ManagedResourceReconciler) due(key types.NamespacedName) (time.Time, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.next[key]
-	return t, ok
+func (r *ManagedResourceReconciler) jitter() float64 {
+	if r.Jitter != nil {
+		return r.Jitter()
+	}
+	return randomJitter()
 }
 
-func (r *ManagedResourceReconciler) setDue(key types.NamespacedName, t time.Time) {
+func (r *ManagedResourceReconciler) schedule(key types.NamespacedName) (probeSchedule, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.next == nil {
-		r.next = map[types.NamespacedName]time.Time{}
+	s, ok := r.schedules[key]
+	return s, ok
+}
+
+func (r *ManagedResourceReconciler) setSchedule(key types.NamespacedName, s probeSchedule) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.schedules == nil {
+		r.schedules = map[types.NamespacedName]probeSchedule{}
 	}
-	r.next[key] = t
+	r.schedules[key] = s
 }
 
 func (r *ManagedResourceReconciler) forget(key types.NamespacedName) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.next, key)
+	delete(r.schedules, key)
+	probeInterval.DeleteLabelValues(key.Namespace, key.Name)
 }
 
-// interval resolves the namespace's fixed probe interval (spec §10.1).
-func (r *ManagedResourceReconciler) interval(ctx context.Context, ns string) (time.Duration, error) {
+// intervals resolves the namespace's fast and steady probe intervals (spec §10.1).
+func (r *ManagedResourceReconciler) intervals(ctx context.Context, ns string) (fast, steady time.Duration, err error) {
 	op := &lastv1alpha1.OperatorConfig{}
 	if err := r.Get(ctx, client.ObjectKey{Name: operatorConfigName}, op); apierrors.IsNotFound(err) {
 		op = nil
 	} else if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var policies lastv1alpha1.IntentPolicyList
 	if err := r.List(ctx, &policies, client.InNamespace(ns)); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return policy.ProbeInterval(op, policies.Items), nil
+	fast, steady = policy.ProbeIntervals(op, policies.Items)
+	return fast, steady, nil
 }
 
 // lastProbe returns the newest probe time among the ManagedResources of the

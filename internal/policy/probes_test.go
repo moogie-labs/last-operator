@@ -26,25 +26,41 @@ func nsPolicy(p *lastv1alpha1.ProbePolicy) lastv1alpha1.IntentPolicy {
 	return lastv1alpha1.IntentPolicy{Spec: lastv1alpha1.IntentPolicySpec{Probes: p}}
 }
 
-func TestProbeInterval(t *testing.T) {
+func fastProbes(fast, steady time.Duration) *lastv1alpha1.ProbePolicy {
+	p := &lastv1alpha1.ProbePolicy{}
+	if fast > 0 {
+		p.FastInterval = &metav1.Duration{Duration: fast}
+	}
+	if steady > 0 {
+		p.Interval = &metav1.Duration{Duration: steady}
+	}
+	return p
+}
+
+func TestProbeIntervalsDefaultsAndFloor(t *testing.T) {
+	m := time.Minute
 	cases := []struct {
-		name     string
-		op       *lastv1alpha1.OperatorConfig
-		policies []lastv1alpha1.IntentPolicy
-		want     time.Duration
+		name         string
+		op           *lastv1alpha1.OperatorConfig
+		policies     []lastv1alpha1.IntentPolicy
+		fast, steady time.Duration
 	}{
-		{"no config", nil, nil, 5 * time.Minute},
-		{"cluster default", opWith(probes(3*time.Minute), 0), nil, 3 * time.Minute},
-		{"policy shortens", opWith(probes(3*time.Minute), 0), []lastv1alpha1.IntentPolicy{nsPolicy(probes(2 * time.Minute))}, 2 * time.Minute},
-		{"shortest policy wins", nil, []lastv1alpha1.IntentPolicy{nsPolicy(probes(4 * time.Minute)), nsPolicy(probes(90 * time.Second))}, 90 * time.Second},
-		{"policy cannot go below the default floor", nil, []lastv1alpha1.IntentPolicy{nsPolicy(probes(10 * time.Second))}, time.Minute},
-		{"cluster floor applies", opWith(probes(2*time.Minute), 3*time.Minute), nil, 3 * time.Minute},
-		{"floor above the default", opWith(nil, 10*time.Minute), nil, 10 * time.Minute},
-		{"unset and zero intervals are ignored", opWith(&lastv1alpha1.ProbePolicy{}, 0), []lastv1alpha1.IntentPolicy{nsPolicy(probes(0)), nsPolicy(nil)}, 5 * time.Minute},
+		{"no config", nil, nil, m, 5 * m},
+		{"cluster default", opWith(probes(3*m), 0), nil, m, 3 * m},
+		{"policy shortens", opWith(probes(3*m), 0), []lastv1alpha1.IntentPolicy{nsPolicy(probes(2 * m))}, m, 2 * m},
+		{"shortest policy wins", nil, []lastv1alpha1.IntentPolicy{nsPolicy(probes(4 * m)), nsPolicy(probes(90 * time.Second))}, m, 90 * time.Second},
+		{"policy cannot go below the default floor", nil, []lastv1alpha1.IntentPolicy{nsPolicy(probes(10 * time.Second))}, m, m},
+		{"cluster floor lifts both", opWith(fastProbes(90*time.Second, 2*m), 3*m), nil, 3 * m, 3 * m},
+		{"floor above the default", opWith(nil, 10*m), nil, 10 * m, 10 * m},
+		{"fast interval set", opWith(fastProbes(2*m, 0), 0), nil, 2 * m, 5 * m},
+		{"shortest fast interval wins", opWith(fastProbes(3*m, 0), 0), []lastv1alpha1.IntentPolicy{nsPolicy(fastProbes(2*m, 0))}, 2 * m, 5 * m},
+		{"fast above steady is clamped to steady", opWith(fastProbes(20*m, 0), 0), nil, 5 * m, 5 * m},
+		{"unset and zero intervals are ignored", opWith(&lastv1alpha1.ProbePolicy{}, 0), []lastv1alpha1.IntentPolicy{nsPolicy(probes(0)), nsPolicy(nil)}, m, 5 * m},
 	}
 	for _, tc := range cases {
-		if got := policy.ProbeInterval(tc.op, tc.policies); got != tc.want {
-			t.Errorf("%s: ProbeInterval = %v, want %v", tc.name, got, tc.want)
+		fast, steady := policy.ProbeIntervals(tc.op, tc.policies)
+		if fast != tc.fast || steady != tc.steady {
+			t.Errorf("%s: ProbeIntervals = %v, %v; want %v, %v", tc.name, fast, steady, tc.fast, tc.steady)
 		}
 	}
 }
