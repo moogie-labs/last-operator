@@ -217,7 +217,9 @@ func (r *IntentReconciler) driftCleared(ctx context.Context, in *lastv1alpha1.In
 		if giveBack && in.Status.Remediations > 0 {
 			in.Status.Remediations--
 		}
-		in.Status.Replans, in.Status.Retries = 0, 0 // back at Ready (D10)
+		// Back at Ready (D10). Retries stay until a scheduled probe run passes
+		// everywhere, so a drift that keeps coming back backs off (followProbes).
+		in.Status.Replans = 0
 		setPhase(in, lastv1alpha1.PhaseReady, ReasonDriftCleared, why)
 	}); err != nil || !applied {
 		return err

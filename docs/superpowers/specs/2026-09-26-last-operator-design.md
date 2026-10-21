@@ -843,8 +843,13 @@ Pending → Clarifying ⇄ (user answers)
   - **Counts and resets.** Every retry, by the annotation or the
     backoff, increments `status.retries` in the write that starts it,
     and resets `status.replans`. Reaching Ready (Verifying passed, or a
-    confirming probe run found no drift) resets both to 0, and so does a
-    spec edit; a deletion's first Delete session does too.
+    confirming probe run found no drift) resets `status.replans` to 0.
+    `status.retries` resets to 0 only when a Create or Update reaches
+    Ready, or when a scheduled probe run passes everywhere while the
+    Intent is Ready, as `status.remediations` does: after a Remediate,
+    drift that comes back to the remediation cap retries after a longer
+    wait each time. A spec edit resets both, and so does a deletion's
+    first Delete session.
 - **Operator restarts during Executing.** Step results live only in the
   operator's memory and the gateway's record, so the operator never
   resumes a phase. An `Executed` condition checkpoints the phase:

@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -336,6 +337,45 @@ var _ = Describe("Intent retries", func() {
 			Expect(plans()).To(Equal(int32(1)))
 			Expect(gw.authsOf(key)).To(Equal([]string{authApproval, "auto:reconcile"}))
 			Expect(getIntent(key).Status.Remediations).To(Equal(int32(1)))
+		})
+
+		It("waits longer for each retry when the remediation cap recurs, until a passing scheduled run", func() {
+			plans := autoRemediate(lastv1alpha1.StageModes{Create: modeManual, Reconcile: modeAuto},
+				func(int32) bool { return false }, func(m int) bool { return m >= 2 })
+			// capped drift reaches the remediation cap, as recurring drift does.
+			capped := func() {
+				setStatus(key, func(in *lastv1alpha1.Intent) { in.Status.Remediations = maxRemediations })
+				drift()
+				Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+				Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
+			}
+
+			By("retrying the first RemediationFailed after 1m")
+			capped()
+			advanceClock(65 * time.Second)
+			poke(key)
+			Eventually(readyAfterRemediate).Should(BeTrue())
+			Expect(retries()).To(Equal(int32(1)), "a Remediate's Ready does not reset retries")
+
+			By("retrying the second RemediationFailed only after 2m")
+			capped()
+			advanceClock(65 * time.Second)
+			poke(key)
+			Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed), "the second retry waits 2m")
+			advanceClock(time.Minute)
+			poke(key)
+			Eventually(readyAfterRemediate).Should(BeTrue())
+			Expect(plans()).To(Equal(int32(2)))
+			Expect(retries()).To(Equal(int32(2)))
+
+			By("resetting retries with remediations after a fully passing scheduled probe run")
+			mr := &ManagedResourceReconciler{Client: k8sClient, Reader: k8sClient, Scheme: scheme.Scheme, Gateway: gw,
+				Now: func() time.Time { return time.Now().Add(10 * time.Minute) }}
+			_, err := mr.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(retries).Should(BeZero())
+			Expect(getIntent(key).Status.Remediations).To(BeZero())
+			Expect(phase(key)()).To(Equal(lastv1alpha1.PhaseReady))
 		})
 	})
 

@@ -18,7 +18,10 @@ import (
 
 // verify runs every probe of the executed plan once; all must pass (spec §7).
 // A failure here surfaces a bad probe at creation time instead of as drift.
-// Reaching Ready resets status.replans and status.retries (D10).
+// Reaching Ready resets status.replans, and after a Create or Update also
+// status.retries (D10). After a Remediate, retries stay: drift that keeps
+// coming back fails at the remediation cap again, and each retry of it must
+// wait longer; a fully passing scheduled probe run resets them (followProbes).
 // After a Remediate, the probed plan is the executed plan it repaired, and a
 // failure is drift that persists (D11): the Intent goes Drifted, so the next
 // remediation is counted, or the cap fails it with RemediationFailed.
@@ -62,7 +65,10 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 		return ctrl.Result{}, r.fail(ctx, in, ReasonVerificationFailed, "Probes failed: "+strings.Join(failed, ", "))
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		in.Status.Replans, in.Status.Retries = 0, 0 // the execution succeeded (D10)
+		in.Status.Replans = 0 // the execution succeeded (D10)
+		if planStage(in) != lastv1alpha1.StageRemediate {
+			in.Status.Retries = 0
+		}
 		setPhase(in, lastv1alpha1.PhaseReady, ReasonReady, "Every probe passed")
 	})
 }
@@ -72,7 +78,7 @@ func (r *IntentReconciler) verify(ctx context.Context, in *lastv1alpha1.Intent) 
 // (startRemediate); a spec edit has already planned an Update instead.
 // ManagedResources an earlier plan left behind do not count. A scheduled probe
 // run that passed everywhere since the Intent became Ready resets
-// status.remediations (D11).
+// status.remediations (D11) and status.retries (D10): the drift is over.
 func (r *IntentReconciler) followProbes(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	mrs, err := planManagedResources(ctx, r.Reader, in)
 	if err != nil {
@@ -91,11 +97,12 @@ func (r *IntentReconciler) followProbes(ctx context.Context, in *lastv1alpha1.In
 		return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 			setPhase(in, lastv1alpha1.PhaseDrifted, ReasonDrifted, "Probes failed on "+strings.Join(drifted, ", "))
 		})
-	case in.Status.Remediations > 0 && probedSinceReady(in, mrs):
-		logf.FromContext(ctx).Info("Reset the remediation count", "remediations", in.Status.Remediations)
+	case (in.Status.Remediations > 0 || in.Status.Retries > 0) && probedSinceReady(in, mrs):
+		logf.FromContext(ctx).Info("Reset the remediation and retry counts", "remediations", in.Status.Remediations,
+			"retries", in.Status.Retries)
 		return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 			if in.Status.Phase == lastv1alpha1.PhaseReady {
-				in.Status.Remediations = 0
+				in.Status.Remediations, in.Status.Retries = 0, 0
 			}
 		})
 	}
