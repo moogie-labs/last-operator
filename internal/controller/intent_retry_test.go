@@ -13,6 +13,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -71,6 +72,37 @@ func TestFailedStage(t *testing.T) {
 		if got := failedStage(in); got != tc.want {
 			t.Errorf("failedStage(stage %q, reason %s) = %q, want %q", tc.stage, tc.reason, got, tc.want)
 		}
+	}
+}
+
+func TestBeginSessionRacedBySpecEdit(t *testing.T) {
+	failed := func(gen int64) *lastv1alpha1.Intent {
+		in := &lastv1alpha1.Intent{}
+		in.Generation, in.Status.ObservedGeneration = gen, 2
+		in.Annotations = map[string]string{lastv1alpha1.AnnotationRetry: "1"}
+		in.Status.Retries, in.Status.Replans = 2, 1
+		setPhase(in, lastv1alpha1.PhaseFailed, ReasonExecutionFailed, "boom")
+		return in
+	}
+
+	// The retry as decided: counted, with the failure as feedback.
+	in := failed(2)
+	beginSession(in, lastv1alpha1.StageUpdate, "boom", causeRetry)
+	if in.Status.Retries != 3 || in.Status.Replans != 0 || replanFeedback(in) != "boom" || in.Status.ObservedRetry != "1" {
+		t.Errorf("retry: retries %d, replans %d, feedback %q, observedRetry %q; want 3, 0, \"boom\", \"1\"",
+			in.Status.Retries, in.Status.Replans, replanFeedback(in), in.Status.ObservedRetry)
+	}
+
+	// A conflict re-read shows a spec edit made meanwhile: the write starts the
+	// edit's session, which is no retry and has no stale failure to address.
+	in = failed(3)
+	beginSession(in, lastv1alpha1.StageUpdate, "boom", causeRetry)
+	if in.Status.Retries != 0 || in.Status.Replans != 0 || replanFeedback(in) != "" || in.Status.ObservedGeneration != 3 {
+		t.Errorf("raced edit: retries %d, replans %d, feedback %q, observedGeneration %d; want 0, 0, \"\", 3",
+			in.Status.Retries, in.Status.Replans, replanFeedback(in), in.Status.ObservedGeneration)
+	}
+	if in.Status.ObservedRetry != "1" {
+		t.Errorf("raced edit: observedRetry %q, want \"1\": the session absorbs the annotation", in.Status.ObservedRetry)
 	}
 }
 
@@ -198,16 +230,138 @@ var _ = Describe("Intent retries", func() {
 			poke(key)
 			Consistently(llmCalls).Should(Equal((i + 1) * perAttempt))
 			Expect(failedWith(n)()).To(BeTrue())
+			// The time left, by the injected clock read before and after the reconcile.
+			due := readyCondition(key).LastTransitionTime.Add(delay)
+			before := clockNow()
 			res, err := intentReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			after := clockNow()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.RequeueAfter).To(BeNumerically(">", early-5*time.Second), "it requeues for the time left")
-			Expect(res.RequeueAfter).To(BeNumerically("<=", early))
+			Expect(res.RequeueAfter).To(BeNumerically(">=", due.Sub(after)), "it requeues for the time left")
+			Expect(res.RequeueAfter).To(BeNumerically("<=", due.Sub(before)))
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 
 			advanceClock(early)
 			poke(key)
 			Eventually(llmCalls).Should(Equal((i + 2) * perAttempt))
 			Eventually(failedWith(n + 1)).Should(BeTrue())
 		}
+	})
+
+	Describe("an Auto Remediate", func() {
+		probed := lastv1alpha1.ManagedResourceSpec{Description: "the nginx Deployment",
+			Probes: []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{
+				Argv: []string{argKubectl, argGet, deployWeb, "-o", formatJSON}}}, Assert: replicasAssert}}}
+
+		// autoRemediate runs the Create plan of steps[0] to Ready with modes,
+		// approving it when the Create stage is Manual. Each Remediate plan
+		// re-runs steps[0] as step r<n>, n counting the Remediate plans from 1,
+		// so that Auto runs it; step r<n> fails while fails(n). p1 fails until
+		// clear(m) holds for the m-th phase that succeeds. It returns the number
+		// of Remediate plans so far.
+		autoRemediate := func(modes lastv1alpha1.StageModes, fails func(n int32) bool, clear func(m int) bool) func() int32 {
+			allowAuto()
+			var plans atomic.Int32
+			var succeeded int
+			s := &script{exit: map[string]int32{}, failing: map[string]bool{}}
+			s.llm = func(req *gatewayv1.CallLLMRequest) (string, error) {
+				if !remediating(req) {
+					return answer(steps, probed), nil
+				}
+				rerun := steps[0]
+				rerun.ID = fmt.Sprintf("r%d", plans.Add(1))
+				return answer([]lastv1alpha1.Command{rerun}), nil
+			}
+			for n := int32(1); n <= 20; n++ {
+				if fails(n) {
+					s.exit[fmt.Sprintf("r%d", n)] = 1
+				}
+			}
+			s.onEnd = func(ok bool) { // called with the fake's lock held
+				if ok {
+					if succeeded++; clear(succeeded) {
+						s.failing = nil
+					}
+				}
+			}
+			gw.setScript(key, s)
+			createIntentWithModes(key, modes)
+			if modes.Create != modeAuto {
+				Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+				approve(key, lastv1alpha1.DecisionApprove)
+			}
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+			return plans.Load
+		}
+		// drift makes p1 fail and marks web-0 out of sync, as a scheduled probe run that found the drift does.
+		drift := func() {
+			gw.updateScript(key, func(s *script) { s.failing = map[string]bool{"p1": true} })
+			setOutOfSync(key.Namespace, "web-0")
+		}
+		readyAfterRemediate := func() bool {
+			in := getIntent(key)
+			return in.Status.Phase == lastv1alpha1.PhaseReady && in.Status.Stage == lastv1alpha1.StageRemediate
+		}
+
+		It("starts a new drift episode with no replans", func() {
+			// Episode 1: r1 and r2 fail, r3 succeeds, and the drift persists.
+			// Episode 2: r4, r5 and r6 fail, and r7 succeeds and repairs it.
+			plans := autoRemediate(lastv1alpha1.StageModes{Create: modeAuto, Reconcile: modeAuto},
+				func(n int32) bool { return n != 3 && n != 7 }, func(m int) bool { return m == 3 })
+			drift()
+
+			Eventually(readyAfterRemediate).Should(BeTrue())
+			Expect(plans()).To(Equal(int32(7)))
+			Expect(remediateBegins(key)).To(Equal(7))
+			in := getIntent(key)
+			Expect(in.Status.Remediations).To(Equal(int32(2)), "two drift episodes")
+			Expect(in.Status.Replans).To(BeZero())
+			Expect(eventReasons(key, corev1.EventTypeWarning)).NotTo(ContainElement(string(lastv1alpha1.PhaseFailed)))
+		})
+
+		It("retries a RemediationFailed after the backoff when reconcile is Auto", func() {
+			plans := autoRemediate(lastv1alpha1.StageModes{Create: modeManual, Reconcile: modeAuto},
+				func(int32) bool { return false }, func(m int) bool { return m == 2 })
+			setStatus(key, func(in *lastv1alpha1.Intent) { in.Status.Remediations = maxRemediations })
+			drift()
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+			Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
+			Expect(getIntent(key).Status.Stage).To(Equal(lastv1alpha1.StageCreate), "the cap fails it before the Remediate stage")
+
+			advanceClock(50 * time.Second)
+			poke(key)
+			Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+			advanceClock(15 * time.Second)
+			poke(key)
+			Eventually(readyAfterRemediate).Should(BeTrue())
+			Expect(plans()).To(Equal(int32(1)))
+			Expect(gw.authsOf(key)).To(Equal([]string{authApproval, "auto:reconcile"}))
+			Expect(getIntent(key).Status.Remediations).To(Equal(int32(1)))
+		})
+	})
+
+	It("retries a TeardownFailed after the backoff when delete is Auto", func() {
+		allowAuto()
+		t1 := argvStep("t1", argKubectl, "delete", "deployment", "web")
+		torn := lastv1alpha1.ManagedResourceSpec{Description: "the web Deployment", Teardown: []lastv1alpha1.Command{t1}}
+		gw.setScript(key, &script{exit: map[string]int32{"t1": 1},
+			llm: lifecycle(turns(answer(steps, torn)), func(*gatewayv1.CallLLMRequest) (string, error) {
+				return answer([]lastv1alpha1.Command{t1}), nil
+			})})
+		createIntentWithModes(key, lastv1alpha1.StageModes{Create: modeAuto, Delete: modeAuto})
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+		deleteIntent(key)
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonTeardownFailed))
+
+		advanceClock(50 * time.Second)
+		poke(key)
+		Consistently(func() int { return countOf(gw.calls(key), runT1) }).Should(Equal(1))
+		advanceClock(15 * time.Second)
+		poke(key)
+		Eventually(failedWith(1)).Should(BeTrue())
+		Expect(countOf(gw.calls(key), runT1)).To(Equal(2))
+		Expect(gw.authsOf(key)).To(Equal([]string{authAutoCreate, authAutoDelete, authAutoDelete}))
+		Expect(readyReason(key)).To(Equal(ReasonTeardownFailed))
 	})
 
 	It("never retries ApprovalDenied automatically", func() {
@@ -241,9 +395,9 @@ var _ = Describe("Intent retries", func() {
 	})
 
 	Describe("with the retry annotation", func() {
-		web := lastv1alpha1.ManagedResourceSpec{Description: "nginx Deployment",
+		web := lastv1alpha1.ManagedResourceSpec{Description: "the nginx Deployment",
 			Probes: []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{
-				Argv: []string{argKubectl, argGet, "deploy/web", "-o", formatJSON}}}, Assert: "result.json.replicas == 2"}},
+				Argv: []string{argKubectl, argGet, deployWeb, "-o", formatJSON}}}, Assert: replicasAssert}},
 			Teardown: []lastv1alpha1.Command{argvStep("t1", argKubectl, "delete", "deployment", "web")}}
 		update := []lastv1alpha1.Command{argvStep("s1", argKubectl, "apply", "-f", "web-v2.yaml")}
 		updateAgain := []lastv1alpha1.Command{argvStep("s1", argKubectl, "apply", "-f", "web-v3.yaml")}
@@ -351,6 +505,23 @@ var _ = Describe("Intent retries", func() {
 			Expect(in.Status.Remediations).To(Equal(int32(1)), "counted from 0: the retried remediation is the first")
 			Expect(in.Status.Retries).To(Equal(int32(1)))
 			Expect(in.Status.Plan.Steps).To(Equal(fix))
+		})
+
+		It("resets retries on a spec edit", func() {
+			gw.setScript(key, &script{llm: llm})
+			createIntent(key, "provision")
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			approve(key, lastv1alpha1.DecisionDeny)
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+			setRetry(key, "1")
+			Eventually(planHash(key)).Should(Equal(hashOf(stepsAgain, web)))
+			Expect(retries()).To(Equal(int32(1)))
+
+			editRequest(key, "provision v2")
+			Eventually(planHash(key)).Should(Equal(hashOf(update, web)))
+			in := getIntent(key)
+			Expect(in.Status.ObservedGeneration).To(Equal(in.Generation))
+			Expect(in.Status.Retries).To(BeZero())
 		})
 
 		It("resets retries when the Intent reaches Ready", func() {

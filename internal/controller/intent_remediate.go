@@ -44,7 +44,8 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 // beginRemediate is startRemediate for a cause. A retry (causeRetry) starts
 // from a Failed Remediate rather than from Drifted: the count of consecutive
 // remediations starts over at 0, the retried remediation is counted as the
-// first, and feedback is the failure the plan must address (D10, D11).
+// first, and feedback is the failure the plan must address (D10, D11). New
+// drift (causePlan) starts with no replans.
 func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.Intent, feedback string,
 	cause sessionCause) (ctrl.Result, error) {
 	from := lastv1alpha1.PhaseDrifted
@@ -67,8 +68,14 @@ func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.
 		if in.Status.Phase != from || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
 			return
 		}
-		if cause == causeRetry {
+		switch cause {
+		case causeRetry:
 			in.Status.Remediations = 0
+		case causePlan:
+			// A new drift episode is a new trigger: the replans of an earlier
+			// episode, whose steps succeeded but whose drift persisted, do not
+			// count against it (D10).
+			in.Status.Replans = 0
 		}
 		if capped = in.Status.Remediations >= maxRemediations; capped {
 			return

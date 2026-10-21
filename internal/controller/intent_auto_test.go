@@ -23,6 +23,7 @@ const (
 	authApproval      = "approval"
 	authAutoCreate    = "auto:create"
 	authAutoDiscovery = "auto:discovery"
+	authAutoDelete    = "auto:delete"
 )
 
 // allStages sets every stage key.
@@ -162,7 +163,7 @@ var _ = Describe("Auto modes", func() {
 	Describe("Remediate", func() {
 		web := lastv1alpha1.ManagedResourceSpec{Description: "nginx Deployment",
 			Probes: []lastv1alpha1.Probe{{ID: "p1", Command: lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{
-				Argv: []string{argKubectl, argGet, "deploy/web", "-o", formatJSON}}}, Assert: "result.json.replicas == 2"}}}
+				Argv: []string{argKubectl, argGet, deployWeb, "-o", formatJSON}}}, Assert: replicasAssert}}}
 		applied := argvStep("s1", argKubectl, "apply", "-f", "web.yaml")
 		applied.Reason = "create the Deployment"
 
@@ -242,7 +243,7 @@ var _ = Describe("Auto modes", func() {
 
 		deleteIntent(key)
 		Eventually(gone(key)).Should(BeTrue())
-		Expect(gw.authsOf(key)).To(Equal([]string{authAutoCreate, "auto:delete"}))
+		Expect(gw.authsOf(key)).To(Equal([]string{authAutoCreate, authAutoDelete}))
 		calls := gw.calls(key)
 		Expect(strings.Join(calls, ",")).To(HaveSuffix(strings.Join([]string{beginPhase, runT2, runT1, endSucceeded}, ",")))
 		Expect(approvalsIn(key.Namespace)).To(BeEmpty())

@@ -31,6 +31,8 @@ const (
 	web1           = "web-1"
 	s1Stdout       = "${steps.s1.stdout}"
 	formatJSON     = "json"
+	deployWeb      = "deploy/web"
+	replicasAssert = "result.json.replicas == 2"
 )
 
 func newNamespace() string {

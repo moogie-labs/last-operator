@@ -74,18 +74,30 @@ func (r *IntentReconciler) startSession(ctx context.Context, in *lastv1alpha1.In
 	}
 	return ctrl.Result{}, r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		in.Status.EffectiveModes = l.modes(in).Status()
-		if stage != lastv1alpha1.StageRemediate {
-			if in.Generation != in.Status.ObservedGeneration {
-				in.Status.Remediations, in.Status.Replans, in.Status.Retries = 0, 0, 0
-			}
-			in.Status.ObservedGeneration = in.Generation
-			in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
-			in.Status.Plan = nil
-		}
-		cause.count(in)
-		resetSession(in, stage, feedback)
-		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM for a plan")
+		beginSession(in, stage, feedback, cause)
 	})
+}
+
+// beginSession applies the start of a session of stage to in: startSession's
+// write, which a conflict retry applies again to the Intent as re-read. When
+// that re-read shows a spec edit made since a retry was decided, the write
+// starts the edit's session instead: it is not counted as a retry, and the
+// failure it would have retried is no longer the plan's to address.
+func beginSession(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, feedback string, cause sessionCause) {
+	if stage != lastv1alpha1.StageRemediate {
+		if in.Generation != in.Status.ObservedGeneration {
+			in.Status.Remediations, in.Status.Replans, in.Status.Retries = 0, 0, 0
+			if cause == causeRetry {
+				cause, feedback = causePlan, ""
+			}
+		}
+		in.Status.ObservedGeneration = in.Generation
+		in.Status.ObservedRequestHash = requestHash(in.Spec.Request)
+		in.Status.Plan = nil
+	}
+	cause.count(in)
+	resetSession(in, stage, feedback)
+	setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Asking the LLM for a plan")
 }
 
 // resetSession clears the Intent's planning session for a new one of stage.
