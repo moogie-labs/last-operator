@@ -254,6 +254,9 @@ var chainCache struct {
 	entries []audit.Entry
 }
 
+// auditReaders is how many audit entries auditEntries fetches at once.
+const auditReaders = 16
+
 // auditEntries reads the bundled audit store and returns every entry, in chain order,
 // that belongs to intent ("" returns all of them). Only entries written since
 // the last call are fetched.
@@ -279,16 +282,33 @@ func auditEntries(t *testing.T, intent string) []audit.Entry {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range objs {
-		body, err := sink.Get(ctx, o.Key, "")
-		if err != nil {
-			t.Fatal(err)
+	// Fetched concurrently and kept in chain order: on a long-lived cluster the
+	// first call reads tens of thousands of entries, one GET each.
+	fetched := make([]audit.Entry, len(objs))
+	errs := make([]error, len(objs))
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range auditReaders {
+		wg.Go(func() {
+			for i := range next {
+				body, err := sink.Get(ctx, objs[i].Key, "")
+				if err == nil {
+					err = json.Unmarshal(body, &fetched[i])
+				}
+				errs[i] = err
+			}
+		})
+	}
+	for i := range objs {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for i, o := range objs {
+		if errs[i] != nil {
+			t.Fatalf("audit entry %s: %v", o.Key, errs[i])
 		}
-		var e audit.Entry
-		if err := json.Unmarshal(body, &e); err != nil {
-			t.Fatal(err)
-		}
-		chainCache.entries = append(chainCache.entries, e)
+		chainCache.entries = append(chainCache.entries, fetched[i])
 		chainCache.lastKey = o.Key
 	}
 	var entries []audit.Entry
