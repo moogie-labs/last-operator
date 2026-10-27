@@ -6,11 +6,9 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 **Every task and the final fix wave passed review.** The final review found no path where something that needs a human approval runs without one.
 
-**The full e2e suite has not yet passed on the final head (2930db4).**
-- **First run:** it timed out at the 50-minute limit. Every test that finished passed, including the whole Manual × Auto matrix of edit, drift and delete. The time went into the harness reading a long audit chain one entry at a time; 2930db4 reads it concurrently.
-- **Second run:** the session restarted mid-run and the run was lost. It left three test namespaces and `OperatorConfig.spec.defaults.allowAutoModes` set to true for every key. Clean these up before the next run, or the Auto test will save that state as the original and restore it.
-
-**On the head before the final fix wave (c274731),** the full suite passed in 2149s.
+**The full e2e suite passed on the final code** (0872dd3) on the two-node kind cluster `last-m4a`: `ok test/e2e 2351.5s`, all 14 tests. That is M5's done-criterion: edit, drift and delete, each in Manual and in Auto, with the audit chain verifying.
+- **Earlier attempts:** the first run on the fix wave timed out at the 50-minute limit, because the harness read a long audit chain one entry at a time (2930db4 now reads it concurrently). A second run was lost when the session restarted.
+- **Cleanup before the passing run:** the lost run had left OperatorConfig allowing Auto for every key, plus test namespaces, Providers and LLMProviders from earlier runs. These were cleaned up first. After the passing run the cluster had no Intents and empty OperatorConfig defaults.
 
 **What the reviews found:**
 - **An Auto Remediate could rewire `${steps…}` references.** An approved step could then run with the output of a different approved command. Remediate steps are now compared by an extended key that includes what each reference points at.
