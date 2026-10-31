@@ -18,6 +18,29 @@ var fileFlags = []string{"-f", "--filename", "--from-file"}
 // flag, that rules match argv only. Match comes first, then install patterns in
 // order; within a pattern the findings follow that order.
 func Lint(spec lastv1alpha1.CommandRuleSpec) []string {
+	fs := LintFindings(spec)
+	out := make([]string, len(fs))
+	for i, f := range fs {
+		out[i] = f.Message
+	}
+	return out
+}
+
+// Finding is one lint warning. Nothing is set when the pattern can never match
+// a command (non-literal argv[0], misplaced "...", invalid regex, malformed
+// glob); every other finding is about breadth.
+type Finding struct {
+	Message string
+	Nothing bool
+}
+
+// MatchesNothing reports whether any finding says its pattern matches nothing.
+func MatchesNothing(fs []Finding) bool {
+	return slices.ContainsFunc(fs, func(f Finding) bool { return f.Nothing })
+}
+
+// LintFindings is Lint with each warning's kind; Lint returns its messages.
+func LintFindings(spec lastv1alpha1.CommandRuleSpec) []Finding {
 	out := lintPattern("match", spec.Match.Argv)
 	for i, p := range spec.Install {
 		out = append(out, lintPattern(fmt.Sprintf("install[%d]", i), p.Argv)...)
@@ -25,24 +48,29 @@ func Lint(spec lastv1alpha1.CommandRuleSpec) []string {
 	return out
 }
 
-func lintPattern(where string, argv []string) []string {
-	var out []string
-	warn := func(format string, a ...any) { out = append(out, where+": "+fmt.Sprintf(format, a...)) }
+func lintPattern(where string, argv []string) []Finding {
+	var out []Finding
+	warn := func(format string, a ...any) {
+		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...)})
+	}
+	never := func(format string, a ...any) {
+		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...), Nothing: true})
+	}
 
 	if len(argv) > 0 && (argv[0] == restToken || strings.HasPrefix(argv[0], regexPrefix) || isGlob(argv[0])) {
-		warn("argv[0] must be a literal, so this pattern matches nothing")
+		never("argv[0] must be a literal, so this pattern matches nothing")
 	}
 	if i := slices.Index(argv, restToken); i >= 0 && i != len(argv)-1 {
-		warn("'...' is only valid as the last element, so this pattern matches nothing")
+		never("'...' is only valid as the last element, so this pattern matches nothing")
 	}
 	for i, a := range argv {
 		if expr, ok := strings.CutPrefix(a, regexPrefix); ok {
 			if _, ok := anchoredRegex(expr); !ok && i > 0 {
-				warn("invalid regex %q at position %d matches nothing", a, i)
+				never("invalid regex %q at position %d matches nothing", a, i)
 			}
 		} else if i > 0 && isGlob(a) {
 			if _, ok := globToRegex(a); !ok {
-				warn("malformed glob %q at position %d matches nothing", a, i)
+				never("malformed glob %q at position %d matches nothing", a, i)
 			}
 		}
 	}

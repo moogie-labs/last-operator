@@ -116,13 +116,27 @@ func follow(ctx context.Context, d Deps, k *Kube, key client.ObjectKey) error {
 // contents if asked, and records the user's decision on it.
 func putToUser(ctx context.Context, k *Kube, p *prompter, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, subject string) error {
 	files := hasFiles(in, stage)
+	always := stage != lastv1alpha1.StageDiscovery && in.Status.Plan != nil && len(in.Status.Plan.UncoveredSteps) > 0
 	writeln(p.w)
 	renderSubject(p.w, in, stage, subject, false)
+	if always {
+		writef(p.w, "Not covered by allow rules: %s. Answer a to approve and always allow them.\n",
+			clean(strings.Join(in.Status.Plan.UncoveredSteps, ", ")))
+	}
 	for {
-		decision, reason, err := p.askDecision(ctx, stage, files)
+		decision, reason, err := p.askDecisionOrAllow(ctx, stage, files, always)
 		switch {
 		case err != nil:
 			return err
+		case decision == decisionAlwaysAllow:
+			if err := alwaysAllow(ctx, k, p, p.w, in, stage, allowOpts{mode: allowPrompt}); err != nil {
+				if errors.Is(err, errNoInput) || ctx.Err() != nil {
+					return err
+				}
+				writef(p.w, "%v\n", err)
+				continue
+			}
+			return decide(ctx, k, p.w, in, stage, subject, lastv1alpha1.DecisionApprove, "")
 		case decision == decisionShowFiles:
 			writeln(p.w)
 			renderSubject(p.w, in, stage, subject, true)
@@ -207,12 +221,13 @@ func modesLine(in *lastv1alpha1.Intent) string {
 // CLI cannot see what authorized the phase, which the gateway decides, and a
 // plan approved by hand also runs while its stage is Auto.
 func noteAuto(w io.Writer, in *lastv1alpha1.Intent) {
+	basis, byMessage := approvalBasis(in)
 	switch {
 	case runsWithoutApproval(in) && in.Status.PendingCommand != nil:
-		writef(w, "Discovery command %s may run without approval (Auto).\n", clean(in.Status.PendingCommand.Hash))
+		writef(w, "Discovery command %s may run without approval (%s).\n", clean(in.Status.PendingCommand.Hash), basis)
 	case (in.Status.Phase == lastv1alpha1.PhaseExecuting || in.Status.Phase == lastv1alpha1.PhaseRemediating ||
 		in.Status.Phase == lastv1alpha1.PhaseTearingDown) && in.Status.Plan != nil &&
-		stageModeOf(in, planStageOf(in)) == lastv1alpha1.ModeAuto:
-		writef(w, "Plan %s may run without approval (Auto).\n", clean(in.Status.Plan.Hash))
+		(byMessage || stageModeOf(in, planStageOf(in)) == lastv1alpha1.ModeAuto):
+		writef(w, "Plan %s may run without approval (%s).\n", clean(in.Status.Plan.Hash), basis)
 	}
 }

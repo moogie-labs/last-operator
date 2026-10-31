@@ -47,9 +47,10 @@ func newPlanCommand(d Deps, kf *KubeFlags) *cobra.Command {
 				return nil
 			}
 			renderSubject(d.Out, in, stage, hash, files)
-			if runsWithoutApproval(in) {
-				writeln(d.Out, "It may run without approval (Auto); there is nothing to decide.")
+			if basis, byMessage := approvalBasis(in); byMessage || runsWithoutApproval(in) {
+				writef(d.Out, "It may run without approval (%s); there is nothing to decide.\n", basis)
 			}
+			printCoverage(cmd.Context(), d.Out, k, in, stage)
 			if decidable, _, ok, err := verifiedSubject(in); ok && err == nil && decidable == stage {
 				printDecisionCommands(d.Out, in, hash)
 			}

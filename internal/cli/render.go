@@ -236,6 +236,27 @@ func runsWithoutApproval(in *lastv1alpha1.Intent) bool {
 	return in.Status.Phase == lastv1alpha1.PhaseAwaitingDiscoveryApproval && c != nil && c.Reason == reasonRunningDiscovery
 }
 
+// Ends of the Ready message of a plan or discovery command the operator sent to
+// run without waiting for an approval: its stage was Auto, or allow rules covered it.
+const (
+	suffixAuto       = " without approval (Auto)"
+	suffixAllowRules = " without approval (allow rules)"
+)
+
+// approvalBasis says what let the Ready message's plan or command run without
+// approval, "allow rules" or "Auto", and whether the message says so at all.
+// Without the message it is "Auto", which is what older operators meant.
+func approvalBasis(in *lastv1alpha1.Intent) (basis string, byMessage bool) {
+	c := meta.FindStatusCondition(in.Status.Conditions, condReady)
+	switch {
+	case c != nil && strings.HasSuffix(c.Message, suffixAllowRules):
+		return "allow rules", true
+	case c != nil && strings.HasSuffix(c.Message, suffixAuto):
+		return "Auto", true
+	}
+	return "Auto", false
+}
+
 // stageModeOf is the mode the Intent's status says stage resolved to, or ""
 // when the operator recorded none.
 func stageModeOf(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) lastv1alpha1.Mode {

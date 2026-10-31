@@ -148,7 +148,8 @@ func decide(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, 
 // newDecisionCommand builds approve or deny: both decide exactly what
 // kubectl last plan shows.
 func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *cobra.Command {
-	var hash, reason string
+	var hash, reason, always, stagesList string
+	var cluster bool
 	cmd := &cobra.Command{
 		Use:   "approve NAME",
 		Short: "Approve the plan or discovery command that kubectl last plan shows",
@@ -156,6 +157,10 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if decision == lastv1alpha1.DecisionDeny && strings.TrimSpace(reason) == "" {
 				return errors.New("--reason is required: the model reads it")
+			}
+			opts, err := allowOptsFrom(always, stagesList, cluster)
+			if err != nil {
+				return err
 			}
 			k, err := d.Kube(*kf)
 			if err != nil {
@@ -180,14 +185,53 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 				return fmt.Errorf("intent %s/%s asks about %s, not %s; nothing was recorded", in.Namespace, in.Name, subject, hash)
 			}
 			renderSubject(d.Out, in, stage, subject, false)
+			if always != "" {
+				var p *prompter
+				if opts.mode == allowPrompt {
+					p = newPrompter(d.In, d.Out)
+				}
+				if err := alwaysAllow(cmd.Context(), k, p, d.Out, in, stage, opts); err != nil {
+					return err
+				}
+			}
 			return decide(cmd.Context(), k, d.Out, in, stage, subject, decision, reason)
 		},
 	}
 	cmd.Flags().StringVar(&hash, "hash", "", "decide only if the Intent still asks about this hash")
+	if decision == lastv1alpha1.DecisionApprove {
+		cmd.Flags().StringVar(&always, "always-allow", "", "also create allow rules for the commands no rule covers: prompt for each, "+
+			"or --always-allow=exact|generalized to apply one choice to all of them")
+		cmd.Flags().Lookup("always-allow").NoOptDefVal = allowPrompt
+		cmd.Flags().StringVar(&stagesList, "stages", "", "with --always-allow, the stages every rule applies to, comma-separated "+
+			"(default: the plan's stage, and Delete for teardown commands)")
+		cmd.Flags().BoolVar(&cluster, "cluster", false, "with --always-allow, create ClusterCommandRules instead of CommandRules")
+	}
 	if decision == lastv1alpha1.DecisionDeny {
 		cmd.Use = "deny NAME --reason REASON"
 		cmd.Short = "Deny the plan or discovery command that kubectl last plan shows"
 		cmd.Flags().StringVar(&reason, "reason", "", "why (required; the model reads a discovery command's, and denying a plan fails the Intent)")
 	}
 	return cmd
+}
+
+// allowOptsFrom checks the flags of approve --always-allow.
+func allowOptsFrom(always, stagesList string, cluster bool) (allowOpts, error) {
+	opts := allowOpts{mode: always, cluster: cluster}
+	if always == "" {
+		if stagesList != "" || cluster {
+			return opts, errors.New("--stages and --cluster need --always-allow")
+		}
+		return opts, nil
+	}
+	if !slices.Contains([]string{allowPrompt, allowExact, allowGeneralized}, always) {
+		return opts, fmt.Errorf("--always-allow=%s: want exact or generalized, or no value to be asked for each command", clean(always))
+	}
+	if stagesList != "" {
+		stages, err := parseStages(stagesList)
+		if err != nil {
+			return opts, err
+		}
+		opts.stages = stages
+	}
+	return opts, nil
 }

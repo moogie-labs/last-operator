@@ -77,3 +77,16 @@ func escapeGlob(s, prefix string) string {
 	}
 	return b.String()
 }
+
+// Exact returns the pattern that matches argv and nothing else: each argument
+// is escaped like Generalize's literals. An empty argv gives an empty pattern.
+func Exact(argv []string) lastv1alpha1.ArgvPattern {
+	if len(argv) == 0 {
+		return lastv1alpha1.ArgvPattern{}
+	}
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		out[i] = literal(a)
+	}
+	return lastv1alpha1.ArgvPattern{Argv: out}
+}

@@ -1325,19 +1325,64 @@ display only.
 ### 9.4 Approving with "always allow"
 
 `kubectl last approve <intent> --always-allow` (and the interactive
-prompt) walks the uncovered commands. For each command, the approver
-picks one of:
+prompt's "a: approve and always allow") walks the uncovered entries: the
+plan's steps, then its probes and teardown commands (§8.3), or the one
+pending discovery command. The CLI works the entries out itself by
+reading the rules as the approver and running `rules.PlanCoverage` at the
+plan's stage. For each entry the approver picks one of:
 
-- **Exact:** a rule matching this command's argv literally.
-- **Generalized:** the LLM's suggested wildcard pattern (§9.5), shown
-  with the lint results and example commands it would match. The
-  approver can edit it before accepting.
-- **Just this once:** no rule.
+- **Exact (`e`):** a rule matching this command's argv literally. Glob
+  characters in the arguments are escaped, so they match only themselves.
+- **Generalized (`g`):** `status.plan.generalizations[entry]` (or
+  `status.pendingCommand.generalization`) when the operator wrote one
+  (§9.5), else the CLI's heuristic: `argv[0]` and the first non-flag
+  arguments, up to 3 in all, stay literal; flag names stay literal; a
+  flag's value becomes `*`; every later positional becomes `[!-]*`, so it
+  can't swallow a flag. The CLI shows the lint warnings and the commands
+  in this plan the pattern matches. The approver can type an edited
+  pattern as space-separated argv, which is linted again, or press Enter
+  to accept. A pattern that matches nothing is not accepted.
+- **Just this once (`o`):** no rule.
 
-The CLI creates the chosen `CommandRule` or `ClusterCommandRule`
-objects **as the approver**, so RBAC on rule creation applies naturally.
-Then it creates the `IntentApproval`. Each rule records
-`source.createdFrom: approval`.
+`--always-allow=exact` and `--always-allow=generalized` apply one choice
+to every uncovered entry without prompting. An entry no rule can hold (a
+script, a `${steps.` reference, or no provider, since a rule needs at
+least one) is approved just this once, and the CLI says so.
+
+A rule from `--always-allow` holds:
+
+- **stages:** the plan's stage for steps and probes, and `Delete` for
+  teardown commands. Create and Update are one class (§9.3). `--stages
+  S,…` replaces the stages of every rule; each is checked against the
+  Stage enum;
+- **providers and egress:** the entry's own;
+- **install:** one exact pattern for each `image.install` argv;
+- **scope:** a namespaced `CommandRule`, or a `ClusterCommandRule` with
+  `--cluster`;
+- **name:** `<intent>-<entry>-<hash8>`. The entry is lowercased, with `:`
+  and `.` as `-`, and `hash8` is the first 8 hex characters of the
+  SHA-256 of the spec's canonical JSON;
+- **metadata:** the label `last.moogie-labs.com/intent: <intent>` and
+  `source.createdFrom: approval`.
+
+The CLI creates the rules **as the approver**, so RBAC on rule creation
+applies naturally, and only after every choice is made. If a rule can't
+be created it stops, creates no `IntentApproval`, and says which rules it
+did create. A rule that already exists with an identical spec counts as
+done; one with a different spec is an error. Then it creates the
+`IntentApproval`, bound to the plan's UID, stage and hash like any other
+approval.
+
+`kubectl last rules lint <file|->` reads one or more `CommandRule` or
+`ClusterCommandRule` YAML documents and prints the lint warnings (§9.2)
+for each. It exits 0 when patterns are merely broad, and 1 when a pattern
+matches nothing: an invalid regex, a malformed glob, a non-literal
+`argv[0]`, or a misplaced `...`.
+
+`kubectl last plan` lists the uncovered entries, and, when the user can
+read rules, the rule that covers each of the others. A plan or discovery
+command that runs without approval says "(allow rules)" when rules
+covered it and "(Auto)" when its stage is Auto.
 
 ### 9.5 Operator suggestions
 

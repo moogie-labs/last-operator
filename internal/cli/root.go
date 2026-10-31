@@ -91,6 +91,6 @@ func NewRootCommand(d Deps) *cobra.Command {
 	root.Flags().StringVar(&cf.name, "name", "", "the Intent's name (default: from the request, with a random suffix)")
 	root.Flags().BoolVar(&cf.noFollow, "no-follow", false, "create the Intent and exit")
 	root.AddCommand(newAuditCommand(d), newPlanCommand(d, kf),
-		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny), newAnswerCommand(d, kf))
+		newDecisionCommand(d, kf, lastv1alpha1.DecisionApprove), newDecisionCommand(d, kf, lastv1alpha1.DecisionDeny), newAnswerCommand(d, kf), newRulesCommand(d))
 	return root
 }

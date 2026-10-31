@@ -86,14 +86,29 @@ func (p *prompter) askQuestion(ctx context.Context, q lastv1alpha1.Question) (st
 // files' contents before deciding. It never reaches an IntentApproval.
 const decisionShowFiles lastv1alpha1.Decision = "ShowFiles"
 
+// decisionAlwaysAllow is askDecision's answer when the user approves and wants
+// to choose allow rules for the commands none covers. It never reaches an IntentApproval.
+const decisionAlwaysAllow lastv1alpha1.Decision = "AlwaysAllow"
+
 // askDecision asks whether to approve what was just shown. It returns
 // DecisionApprove, DecisionDeny with a reason, "" to leave it pending, or, when
 // the subject has files, decisionShowFiles.
 func (p *prompter) askDecision(ctx context.Context, stage lastv1alpha1.Stage, files bool) (lastv1alpha1.Decision, string, error) {
-	prompt, help := "Approve? [y/N/d]: ", "Answer y to approve, n to leave it pending, or d to deny."
+	return p.askDecisionOrAllow(ctx, stage, files, false)
+}
+
+// askDecisionOrAllow is askDecision that also offers, when always, to approve
+// and always allow the commands no rule covers (decisionAlwaysAllow).
+func (p *prompter) askDecisionOrAllow(ctx context.Context, stage lastv1alpha1.Stage, files, always bool) (lastv1alpha1.Decision, string, error) {
+	letters, items := "y/N/d", []string{"y to approve", "n to leave it pending", "d to deny"}
 	if files {
-		prompt, help = "Approve? [y/N/d/f]: ", "Answer y to approve, n to leave it pending, d to deny, or f to show the files."
+		letters, items = letters+"/f", append(items, "f to show the files")
 	}
+	if always {
+		letters, items = letters+"/a", append(items, "a to approve and always allow")
+	}
+	prompt := "Approve? [" + letters + "]: "
+	help := "Answer " + strings.Join(items[:len(items)-1], ", ") + ", or " + items[len(items)-1] + "."
 	// The model reads why a discovery command was denied and plans on. A denied
 	// plan of any stage fails the Intent with ApprovalDenied; its reason is
 	// recorded on the Intent, and no model reads it.
@@ -114,6 +129,10 @@ func (p *prompter) askDecision(ctx context.Context, stage lastv1alpha1.Stage, fi
 		case "f", "files":
 			if files {
 				return decisionShowFiles, "", nil
+			}
+		case "a", "always":
+			if always {
+				return decisionAlwaysAllow, "", nil
 			}
 		case "d", "deny":
 			for {

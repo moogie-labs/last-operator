@@ -65,3 +65,19 @@ func TestGeneralize(t *testing.T) {
 		t.Errorf("a script has no argv to generalize, got %q", got.Argv)
 	}
 }
+
+func TestExactMatchesOnlyItsOwnArgv(t *testing.T) {
+	argv := []string{"kubectl", "get", "*", "re:x", "...", "a?b", "[c]", `d\e`, ""}
+	p := rules.Exact(argv)
+	if !rules.Match(p.Argv, argv) {
+		t.Fatalf("Exact(%q) = %q does not match its own argv", argv, p.Argv)
+	}
+	for _, other := range [][]string{{"kubectl", "get", "pods", "re:x", "...", "a?b", "[c]", `d\e`, ""}, {"kubectl", "get", "*", "re:x", "...", "axb", "[c]", `d\e`, ""}} {
+		if rules.Match(p.Argv, other) {
+			t.Errorf("Exact(%q) also matches %q", argv, other)
+		}
+	}
+	if got := rules.Exact(nil); len(got.Argv) != 0 {
+		t.Errorf("Exact(nil) = %q", got.Argv)
+	}
+}

@@ -83,3 +83,30 @@ func TestLintOrderAndInstall(t *testing.T) {
 		t.Errorf("Lint is not stable: %q vs %q", got, again)
 	}
 }
+
+func TestLintFindingsSeparateMatchesNothingFromBroad(t *testing.T) {
+	tests := []struct {
+		name    string
+		match   []string
+		nothing bool
+	}{
+		{"broad only", []string{"kubectl", "get", "..."}, false},
+		{"clean", []string{"kubectl", "get", "pods"}, false},
+		{"glob argv0", []string{"kube*", "get"}, true},
+		{"misplaced rest", []string{"kubectl", "...", "get"}, true},
+		{"invalid regex", []string{"kubectl", "get", "re:("}, true},
+		{"malformed glob", []string{"kubectl", "get", "[a"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := lastv1alpha1.CommandRuleSpec{Match: lastv1alpha1.ArgvPattern{Argv: tc.match}}
+			fs := rules.LintFindings(spec)
+			if got := rules.MatchesNothing(fs); got != tc.nothing {
+				t.Errorf("MatchesNothing = %v, want %v: %+v", got, tc.nothing, fs)
+			}
+			if !reflect.DeepEqual(len(fs), len(rules.Lint(spec))) {
+				t.Errorf("LintFindings and Lint disagree: %+v vs %v", fs, rules.Lint(spec))
+			}
+		})
+	}
+}
