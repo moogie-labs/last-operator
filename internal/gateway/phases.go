@@ -67,8 +67,9 @@ type phase struct {
 	// rule is whether allow rules opened the phase; the re-check passes each
 	// step that a current rule covers, whatever auth now names.
 	rule bool
-	// rules maps a rule phase's step IDs to the rule that last covered each:
-	// at BeginPhase, then at each step's re-check. Set under mu after BeginPhase.
+	// rules maps a rule phase's entry IDs (ruleCoverage) to the rule that last
+	// covered each: at BeginPhase, then, for steps, at each step's re-check.
+	// Set under mu after BeginPhase.
 	rules map[string]rules.Ref
 	// ruleSeen holds the rule versions (ruleObject.key) this phase's
 	// rule.observed entries name. Set under mu after BeginPhase.
@@ -123,7 +124,8 @@ type phaseBegin struct {
 	// recompute the subject, sha256(canonical {command, nonce}), from this entry alone.
 	Nonce string `json:"nonce,omitempty"`
 	// Rules names, for a phase allow rules authorized, the rule that covered each
-	// step: step ID to "<scope>/<namespace or ->/<name>" (rules.Ref.String).
+	// entry: its ID ("<stepID>", "probe:<probeID>", "teardown:<resource>.<i>")
+	// to "<scope>/<namespace or ->/<name>" (rules.Ref.String).
 	Rules map[string]string `json:"rules,omitempty"`
 }
 
@@ -678,15 +680,16 @@ func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval)
 //     gatewayv1.MsgDeniedPrefix;
 //  2. an Auto stage whose plan is within design D9's limits is authorized as
 //     {auto, <stage key>}, whatever Approve exists;
-//  3. allow rules that cover every step, in any stage and mode and outside
-//     D9's limits, authorize it as {rule}; an empty plan is never covered;
+//  3. allow rules that cover every step, probe and teardown command
+//     (ruleCoverage), in any stage and mode and outside D9's limits, authorize
+//     it as {rule}; an empty plan is never covered;
 //  4. an Approve, from neither the operator nor a gateway-namespace
 //     ServiceAccount, authorizes it as {approval, <namespace>/<name>};
 //  5. with no Approve, an Auto stage refuses with gatewayv1.MsgNeedsApproval,
 //     and a Manual stage with FailedPrecondition and gatewayv1.MsgNoApprovalPrefix.
 //
 // It also returns the approval that authorized the phase, nil otherwise, and,
-// for a rule phase, the rule covering each step by step ID. The caller has
+// for a rule phase, the rule covering each entry by entry ID. The caller has
 // read layers once, for the command policy too, and has checked the plan
 // against it: rules never widen policy (R1). Every refusal is audited through d.
 func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLayers, rec *LoadedRecord, intent *lastv1alpha1.Intent,
@@ -708,7 +711,7 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 			return autoBy(stage), nil, nil, nil
 		}
 	}
-	if covered, ok := ruleCoverage(layers.rules, stage, body.Steps); ok {
+	if covered, ok := ruleCoverage(layers.rules, stage, body); ok {
 		return ruleBy(), nil, covered, nil
 	}
 	if approval == nil {
@@ -723,13 +726,19 @@ func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLay
 	return approvedBy(intent.Namespace, approval), approval, nil, nil
 }
 
-// ruleCoverage returns the rule that covers each step, by ruleStepID, when
-// rules cover every step. An empty plan is never covered.
-func ruleCoverage(rs []rules.Rule, stage lastv1alpha1.Stage, steps []lastv1alpha1.Command) (map[string]rules.Ref, bool) {
-	if len(steps) == 0 {
+// ruleCoverage returns the rule that covers each entry of the plan, by entry
+// ID (steps by ruleStepID), when rules cover every entry: every step and probe
+// at stage and every teardown command at Delete (rules.PlanCoverage, M6 design
+// R14), since a succeeded Create or Update plan goes on to authorize its
+// probes and teardown. For every other stage only the steps count: a
+// Remediate plan carries the executed plan's resources unchanged (checked
+// before authorization) and never becomes the executed plan, and a Delete
+// plan has none. An empty plan is never covered.
+func ruleCoverage(rs []rules.Rule, stage lastv1alpha1.Stage, body plan.Body) (map[string]rules.Ref, bool) {
+	if len(body.Steps) == 0 {
 		return nil, false
 	}
-	covered, uncovered := rules.Coverage(rs, stage, steps)
+	covered, uncovered := rules.PlanCoverage(rs, stage, body)
 	if len(uncovered) > 0 {
 		return nil, false
 	}

