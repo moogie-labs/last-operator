@@ -115,6 +115,7 @@ Why: it bounds the resource that something reverts slowly, which the consecutive
 
 **e2e on kind:**
 - **`TestAllowRulesLetASimilarIntentRun`.** Intent A is approved with `--always-allow`, choosing Generalized for each step. Intent B, with the same request shape but a different name, runs without approval. Its audit shows `authorizedBy {rule}` and `rule.observed` entries, and the chain verifies.
+  *As built:* Intent A is approved with `--always-allow=generalized --hash H` (no stdin prompt), and the scripted argv put every differing name after the three literals Generalize keeps (`kubectl create deployment web-a --image=… -n …`), so B's steps, probe and teardown are all covered. The test asserts the `rules` map holds every entry, one `rule.observed` per distinct rule, no `approval.observed` and no IntentApproval for B.
 - **`TestDeletingAPartialCreateTearsItDown`.** A Create whose step 2 fails after step 1 made a ConfigMap is deleted. The Delete plan holds the partial plan's teardown, and after approval the ConfigMap is gone.
 
 ## 8. Main-spec amendments
@@ -141,3 +142,9 @@ Why: it bounds the resource that something reverts slowly, which the consecutive
 - The exact wording of the lint warnings and the CLI prompt.
 - The list of known destructive verbs, beyond the ones named in R12.
 - Event reasons, and log and metric names.
+
+## 10. Deviations recorded in Task 7
+
+- The e2e approval of Intent A uses `--always-allow=generalized` rather than driving the interactive prompt with stdin; the prompt is covered by CLI unit tests.
+- The partial-Create test fails the Intent by scripting the plan `MaxAttempts+1` times, so the replan cap ends it deterministically.
+- Main spec §9.2–§9.4 already held everything Tasks 1–6 changed; Task 7 edited nothing there.

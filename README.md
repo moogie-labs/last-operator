@@ -97,7 +97,7 @@ teardown completes:
   Delete.
 - **Approval.** A Delete needs your approval, unless the `delete` stage is Auto and the
   plan only orders the teardown commands the Intent executed (see Auto modes
-  below); no allow rule covers it. Approve it as usual, with `kubectl last plan web -n team-x` and
+  below), or allow rules cover every command (see Allow rules below). Approve it as usual, with `kubectl last plan web -n team-x` and
   `kubectl last approve web -n team-x --hash H`, or `y` at the prompt of a
   following `kubectl last`.
 - **Teardown.** The phase is `TearingDown` while the commands run. On success the
@@ -106,17 +106,82 @@ teardown completes:
 - **Failure.** The Intent is `Failed` with reason `TeardownFailed` and keeps its
   finalizer. Change the retry annotation to plan the teardown again:
   `kubectl annotate intent web -n team-x last.moogie-labs.com/retry=2 --overwrite`.
-- **Nothing to tear down.** An Intent that never executed, or whose plan has no
-  teardown commands, is released at once. The latter raises a Warning
-  `NoTeardown` event. So does an Intent whose Create plan ran some steps and then
-  failed: nothing executed, so nothing is torn down, and a Warning
-  `PartialCreateNotTornDown` event names the plan and how many steps ran.
+- **Partial plans.** A Create or Update that failed or was interrupted after
+  starting at least one step may have made things the executed plan does not
+  tear down. The Delete's teardown is the executed plan's teardown, then the
+  teardown of every such partial plan from oldest to newest, with duplicates
+  dropped. Because a plan can stop part way, ask the model for teardown commands
+  that succeed when the object is gone or was never made, such as
+  `kubectl delete … --ignore-not-found`; the system prompt does. An Intent whose
+  history holds a partial plan needs approval or rules to be deleted, even in
+  Auto.
+- **Nothing to tear down.** An Intent that never executed and never started a
+  step is released at once. If the union above has no teardown commands, the
+  Intent is released too, with a Warning `NoTeardown` event.
 - **Waiting.** While the audit log or the API server cannot say what the Intent
   executed, the deletion waits and retries, with a Warning `TeardownBlocked`
   event saying why.
 
 Removing the finalizer by hand lets the Intent go without a teardown. What it
 created stays in the world.
+
+## Allow rules
+
+Allow rules let commands run without approval. A `CommandRule` (namespaced) or
+`ClusterCommandRule` (cluster-wide) is written by a person; the operator and the
+gateway can read rules but not write them (a ValidatingAdmissionPolicy,
+`last-rules`, refuses it). A rule never widens policy: `CheckCommand` still
+applies to a covered command.
+
+A command is covered at a stage when some rule lists that stage (Create and
+Update are one class), lists all of the command's providers, covers its egress,
+matches its argv, and matches every `image.install` command. A script is never
+covered, and neither is an argv with a `${steps.` reference. Patterns are literals,
+globs within one argument (`*`, `?`, `[…]`), `re:<RE2>` (anchored), or `...` for
+the remaining arguments (last position only).
+
+**A rule must cover the whole plan.** For a Create or Update, that is every step,
+every probe (at the plan's stage) and every teardown command (at stage
+`Delete`). `status.plan.uncoveredSteps` lists what is not covered, as `<stepID>`,
+`probe:<probeID>` and `teardown:<resource>.<i>`. When nothing is uncovered the
+Intent skips `AwaitingApproval` ("Running plan H without approval (allow
+rules)"); the audit shows `authorizedBy {kind: rule}`, one `rule.observed` entry
+per rule used, and a `rules` map in `phase.begin`. A Deny still wins, and each
+step re-checks the current rules.
+
+Approve and make rules in one step:
+
+```bash
+kubectl last approve web -n team-x --always-allow            # prompt: Exact, Generalized or Just this once
+kubectl last approve web -n team-x --always-allow=generalized --hash H
+kubectl last approve web -n team-x --always-allow=exact --stages Create,Delete --cluster
+kubectl last approve web -n team-x --always-allow=generalized --providers prod
+```
+
+- **Exact** matches this argv only. **Generalized** keeps `argv[0]` and the first
+  two non-flag arguments literal, keeps flag names, turns flag values into `*`
+  and later positionals into `[!-]*` (so they cannot swallow a flag). You can edit
+  the pattern at the prompt.
+- Rules are created as you (so your RBAC applies), then the approval. They are
+  named `<intent>-<entry>-<hash8>` and labelled
+  `last.moogie-labs.com/intent: <intent>`.
+- Stages default to the plan's stage for steps and probes and `Delete` for
+  teardown. A command with no providers gets the union of the plan's providers;
+  if the plan names none, pass `--providers`.
+- A script or a `${steps.` reference cannot be covered; it is approved just this
+  once, and the CLI says so.
+
+`kubectl last rules lint rules.yaml` (or `-` for stdin) warns about rules that
+are too broad: `...` right after the binary, a glob or regex after a destructive
+verb (`delete`, `rm`, `destroy`, `terminate-*`, `drop`, `purge`), and a file flag
+(`-f`, `--filename`, `--from-file`) with `...` or a glob. It always reminds you
+that rules match argv only, not file contents or stdin, so a rule for
+`kubectl apply -f *` allows any manifest those credentials permit. It exits 1 only
+for a pattern that matches nothing. `kubectl last plan` shows which rule covers
+each entry.
+
+Related limits: at most 6 remediations in 24 hours (`status.remediationTimes`)
+before a drifting Intent fails `RemediationFailed`; a spec edit clears the count.
 
 ## Editing an Intent and drift
 
