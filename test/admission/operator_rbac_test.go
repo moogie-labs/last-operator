@@ -45,7 +45,7 @@ func TestOperatorRBAC(t *testing.T) {
 	const sa = "rbac-check"
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "operator-rbac-check"},
 		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: role.Name},
-		Subjects: []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: sa, Namespace: "last-system"}}}
+		Subjects: []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: sa, Namespace: systemNS}}}
 	for _, o := range []client.Object{&role, binding} {
 		if err := admin.Create(ctx, o); err != nil {
 			t.Fatal(err)
@@ -80,6 +80,8 @@ func TestOperatorRBAC(t *testing.T) {
 		attr(last, "", "operatorconfigs", "", "get"),
 		attr(last, "", "providers", "", "list"),
 		attr(last, "", "providers", "", "watch"),
+		attr(last, "team-x", "commandrules", "", "list"),
+		attr(last, "", "clustercommandrules", "", "watch"),
 		attr("events.k8s.io", "team-x", "events", "", "create"),
 	}
 	// The binding reaches the authorizer through an informer; wait until it applies.

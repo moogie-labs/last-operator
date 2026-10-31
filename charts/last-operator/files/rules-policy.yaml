@@ -1,0 +1,30 @@
+# Allow rules let a command run without approval, so only a human may write them
+# (spec §4.1, §9). The operator and the gateway only read CommandRules and
+# ClusterCommandRules. This policy refuses their writes even if RBAC were widened.
+# This file is static, so it names the default gateway namespace, last-gateway, as
+# intentapproval-policy.yaml does.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: last-rules
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["last.moogie-labs.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["commandrules", "clustercommandrules"]
+  validations:
+    - expression: "!(request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-operator'))"
+      message: "the operator may not write allow rules"
+    - expression: "!request.userInfo.username.startsWith('system:serviceaccount:last-gateway:')"
+      message: "ServiceAccounts in the gateway namespace may not write allow rules"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: last-rules
+spec:
+  policyName: last-rules
+  validationActions: [Deny]

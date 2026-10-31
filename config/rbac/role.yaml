@@ -14,6 +14,8 @@ rules:
 - apiGroups:
   - last.moogie-labs.com
   resources:
+  - clustercommandrules
+  - commandrules
   - intentapprovals
   - intentpolicies
   - operatorconfigs

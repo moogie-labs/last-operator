@@ -3,3 +3,5 @@
 {{ .Files.Get "files/intent-operator-policy.yaml" }}
 ---
 {{ .Files.Get "files/gateway-audit-guard-policy.yaml" }}
+---
+{{ .Files.Get "files/rules-policy.yaml" }}

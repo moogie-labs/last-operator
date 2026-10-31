@@ -152,7 +152,7 @@ metadata:
   labels: {{- include "last.labels" . | nindent 4 }}
 rules:
   - apiGroups: [last.moogie-labs.com]
-    resources: [intents, intentapprovals, managedresources, intentpolicies, operatorconfigs, providers, llmproviders]
+    resources: [intents, intentapprovals, managedresources, intentpolicies, operatorconfigs, providers, llmproviders, commandrules, clustercommandrules]
     verbs: [get, list, watch]
   - apiGroups: [last.moogie-labs.com]
     resources: [managedresources]

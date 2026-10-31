@@ -30,6 +30,9 @@ rules:
   - apiGroups: [last.moogie-labs.com]
     resources: [intentapprovals, intentpolicies, operatorconfigs, providers]
     verbs: [get, list, watch]
+  - apiGroups: [last.moogie-labs.com]
+    resources: [commandrules, clustercommandrules]
+    verbs: [get, list, watch]            # read-only: admission (files/rules-policy.yaml) refuses its writes too
   - apiGroups: [events.k8s.io]
     resources: [events]
     verbs: [create, patch]

@@ -26,6 +26,8 @@ import (
 )
 
 const (
+	operatorSA   = "last-operator"
+	systemNS     = "last-system"
 	operatorUser = "system:serviceaccount:last-system:last-operator"
 	approvalsNS  = "approvals"
 	approverName = "approver"
@@ -95,12 +97,12 @@ func grantApprovers(t *testing.T, admin client.Client) {
 	ctx := context.Background()
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: approverName}, Rules: []rbacv1.PolicyRule{{
 		APIGroups: []string{"last.moogie-labs.com"}, Resources: []string{"intentapprovals"},
-		Verbs: []string{verbCreate, "get", "update", "patch"}}}}
+		Verbs: []string{verbCreate, verbGet, verbUpdate, verbPatch}}}}
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: approverName},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: approverName},
 		Subjects: []rbacv1.Subject{
 			{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice"},
-			{Kind: rbacv1.ServiceAccountKind, Name: "last-operator", Namespace: "last-system"},
+			{Kind: rbacv1.ServiceAccountKind, Name: operatorSA, Namespace: systemNS},
 			{Kind: rbacv1.ServiceAccountKind, Name: "sneaky", Namespace: gatewayName},
 		}}
 	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: approvalsNS}}} {
@@ -377,5 +379,106 @@ func TestOperatorIntentPatches(t *testing.T) {
 	}
 	if got.Spec.Request != request || len(got.Finalizers) != 0 || len(got.Annotations) != 0 {
 		t.Fatalf("intent after the patches = %+v", got.ObjectMeta)
+	}
+}
+
+// TestRuleWritesNeedAHuman checks that allow rules are written only by humans (spec
+// §4.1): the operator and the gateway namespace's ServiceAccounts are refused on
+// create and update of both kinds, and a plain user is allowed.
+func TestRuleWritesNeedAHuman(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(adminCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// RBAC lets all three principals write, so only admission can refuse.
+	const name = "rule-writer"
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: []rbacv1.PolicyRule{{
+		APIGroups: []string{lastv1alpha1.GroupVersion.Group}, Resources: []string{"commandrules", "clustercommandrules"},
+		Verbs: []string{verbCreate, verbGet, verbUpdate}}}}
+	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: name},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice"},
+			{Kind: rbacv1.ServiceAccountKind, Name: operatorSA, Namespace: systemNS},
+			{Kind: rbacv1.ServiceAccountKind, Name: "sneaky", Namespace: gatewayName},
+		}}
+	const ns = "rules-ns"
+	for _, o := range []client.Object{role, binding, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}} {
+		if err := admin.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyChartPolicy(t, admin, "rules-policy.yaml")
+
+	spec := lastv1alpha1.CommandRuleSpec{
+		Stages:    []lastv1alpha1.Stage{lastv1alpha1.StageDiscovery},
+		Providers: []string{"aws-prod"},
+		Match:     lastv1alpha1.ArgvPattern{Argv: []string{"aws", "ec2", "..."}}}
+	newRule := func(kind, n string) client.Object {
+		if kind == "ClusterCommandRule" {
+			return &lastv1alpha1.ClusterCommandRule{ObjectMeta: metav1.ObjectMeta{Name: n}, Spec: spec}
+		}
+		return &lastv1alpha1.CommandRule{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}, Spec: spec}
+	}
+	touch := func(o client.Object) {
+		o.SetLabels(map[string]string{"touched": "true"})
+	}
+
+	alice := clientAs(t, "alice")
+	operator := clientAs(t, operatorUser, "system:serviceaccounts", "system:serviceaccounts:last-system")
+	gw := clientAs(t, gatewayNamespaceUser, "system:serviceaccounts", "system:serviceaccounts:last-gateway")
+	refused := []struct {
+		who, want string
+		c         client.Client
+	}{
+		{"operator", "operator may not write allow rules", operator},
+		{"gateway", "gateway namespace may not write allow rules", gw},
+	}
+
+	for _, kind := range []string{"CommandRule", "ClusterCommandRule"} {
+		// Admission policies take effect asynchronously; wait for enforcement.
+		deadline := time.Now().Add(30 * time.Second)
+		for i := 0; ; i++ {
+			err := operator.Create(ctx, newRule(kind, fmt.Sprintf("%s-warmup-%d", strings.ToLower(kind), i)))
+			if err != nil && strings.Contains(err.Error(), "may not write allow rules") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: the policy never took effect: %v", kind, err)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		base := strings.ToLower(kind)
+		for _, r := range refused {
+			err := r.c.Create(ctx, newRule(kind, base+"-"+r.who))
+			if err == nil || !strings.Contains(err.Error(), r.want) {
+				t.Errorf("%s create by %s = %v, want %q", kind, r.who, err, r.want)
+			}
+		}
+		mine := newRule(kind, base+"-alice")
+		if err := alice.Create(ctx, mine); err != nil {
+			t.Fatalf("%s create by a plain user: %v", kind, err)
+		}
+		for _, r := range refused {
+			cur := newRule(kind, base+"-alice")
+			if err := admin.Get(ctx, client.ObjectKeyFromObject(mine), cur); err != nil {
+				t.Fatal(err)
+			}
+			touch(cur)
+			err := r.c.Update(ctx, cur)
+			if err == nil || !strings.Contains(err.Error(), r.want) {
+				t.Errorf("%s update by %s = %v, want %q", kind, r.who, err, r.want)
+			}
+		}
+		cur := newRule(kind, base+"-alice")
+		if err := admin.Get(ctx, client.ObjectKeyFromObject(mine), cur); err != nil {
+			t.Fatal(err)
+		}
+		touch(cur)
+		if err := alice.Update(ctx, cur); err != nil {
+			t.Errorf("%s update by a plain user: %v", kind, err)
+		}
 	}
 }

@@ -172,11 +172,17 @@ leader election):
 - get/list/watch on `IntentApproval`, `IntentPolicy`, `OperatorConfig`,
   and `Provider`. The first message of a planning session lists the
   Providers the namespace may use (M3).
+- get/list/watch on `CommandRule` and `ClusterCommandRule` (M6), nothing
+  more. The `last-rules` ValidatingAdmissionPolicy
+  (`charts/last-operator/files/rules-policy.yaml`) also refuses any
+  CREATE or UPDATE of either kind by the operator's ServiceAccount or by
+  any ServiceAccount in the gateway namespace, so only humans write allow
+  rules. `make helm-lint` checks that the policy renders and that neither
+  role has a write verb on the rule kinds.
 - create/patch on `events.k8s.io` Events.
 - Later milestones add:
   - create on `CommandRuleSuggestion` (M7). The `spec.decision` field is
     excluded by admission (§9.5).
-  - get/list/watch on `CommandRule` and `ClusterCommandRule` (M6).
 - **No** create on `IntentApproval`, `CommandRule`, or
   `ClusterCommandRule`. **No** writes to `IntentPolicy`, `OperatorConfig`,
   `Provider`, `LLMProvider`, RBAC, or admission policies.
@@ -234,7 +240,9 @@ writer.
 for its work in Intent namespaces (cluster-wide):
 
 - get/list/watch on `Intent`, `IntentApproval`, `ManagedResource`,
-  `IntentPolicy`, `OperatorConfig`, `Provider`, and `LLMProvider`.
+  `IntentPolicy`, `OperatorConfig`, `Provider`, `LLMProvider`,
+  `CommandRule`, and `ClusterCommandRule` (M6; read-only, the `last-rules`
+  policy in §4.1 refuses its writes).
 - delete on `ManagedResource`, in a rule of its own. The gateway's one
   write to the CRDs: after an Update succeeds, it deletes the
   ManagedResources the new plan dropped, each audited as
