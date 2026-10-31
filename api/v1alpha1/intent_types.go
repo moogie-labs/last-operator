@@ -137,7 +137,8 @@ type IntentStatus struct {
 	// started in the last 24 hours, drift-started and retried alike; older ones
 	// are dropped. With 6 in the window, the next remediation fails the Intent
 	// with RemediationFailed instead of starting. A spec edit clears it; a
-	// passing scheduled probe run does not.
+	// passing scheduled probe run does not. A drift that clears before
+	// anything is remediated gives back the entry its start added.
 	// +optional
 	RemediationTimes []string `json:"remediationTimes,omitempty"`
 	// EffectiveModes is the Auto or Manual mode each stage key resolved to across

@@ -192,8 +192,7 @@ var _ = Describe("Intent remediation", func() {
 		Expect(countOf(gw.calls(key), callLLM)).To(Equal(1), "no Remediate is planned")
 		Expect(planHash(key)()).To(Equal(createHash))
 		Expect(remediations()).To(BeZero())
-		Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(1),
-			"the drift's start is counted in the window, and DriftCleared neither adds nor removes an entry")
+		Expect(getIntent(key).Status.RemediationTimes).To(BeEmpty(), "nothing was remediated, so the start's window entry is given back")
 		Expect(meta.IsStatusConditionTrue(getMR(key.Namespace, "web-0").Status.Conditions, CondInSync)).To(BeTrue())
 	})
 
@@ -595,6 +594,25 @@ var _ = Describe("Intent remediation", func() {
 		Expect(got.Status.Stage).To(Equal(lastv1alpha1.StageRemediate))
 		Expect(got.Status.RemediationTimes).To(Equal(append(slices.Clone(full[1:3]), windowNow.Format(time.RFC3339))))
 	})
+
+	DescribeTable("gives back a cleared drift's window entry only when the session had no replan",
+		func(ns, feedback string, wantRemediations int32, wantTimes []string) {
+			fc, stored, in := windowed(ns, func(st *lastv1alpha1.IntentStatus) {
+				st.Phase, st.Stage, st.Remediations, st.RemediationTimes = lastv1alpha1.PhasePlanning, lastv1alpha1.StageRemediate, 2, full[4:]
+				if feedback != "" {
+					st.Conditions = []metav1.Condition{{Type: CondPlanned, Status: metav1.ConditionFalse, Reason: ReasonReplanning,
+						Message: feedback, LastTransitionTime: metav1.NewTime(windowNow)}}
+				}
+			})
+			Expect(reconcilerOn(fc).driftCleared(ctx, in)).To(Succeed())
+			got := stored()
+			Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseReady))
+			Expect(got.Status.Remediations).To(Equal(wantRemediations))
+			Expect(got.Status.RemediationTimes).To(Equal(wantTimes))
+		},
+		Entry("the drift's first session: nothing ran", "cleared-first", "", int32(1), full[4:6]),
+		Entry("after a failed Remediate step: a Remediate ran", "cleared-replan", "step r1 exited 1: boom", int32(2), full[4:]),
+	)
 
 	It("fails at the window cap even when a conflict retry finds it newly full", func() {
 		base, stored, stale := windowed("window-conflict", func(st *lastv1alpha1.IntentStatus) {

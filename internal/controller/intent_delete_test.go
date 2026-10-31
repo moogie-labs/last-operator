@@ -253,7 +253,7 @@ var _ = Describe("Intent deletion", func() {
 		Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval), "a Delete with no executed plan needs approval")
 		Expect(readyCondition(key).Message).To(ContainSubstring("for stage Delete"))
 		Expect(eventNotes(key, ReasonPartialTeardown)).To(ConsistOf(
-			"The teardown includes the teardown commands of 1 plans that did not finish"))
+			"The teardown includes the teardown commands of 1 plan that did not finish"))
 		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM}), "nothing runs before the approval")
 
 		By("running the approved Delete plan, then releasing the Intent")
@@ -269,6 +269,104 @@ var _ = Describe("Intent deletion", func() {
 		Eventually(gone(key)).Should(BeTrue())
 		Expect(deleteRequests(key)).To(BeEmpty(), "no Delete planning")
 		Expect(eventReasons(key, "Warning")).To(ContainElement(ReasonNoTeardown))
+	})
+
+	// olderPartial runs a Create C1 whose step s1 ran before s2 failed, then
+	// the replanned C2, which succeeds; createApproved approves C1 and C2 when
+	// Create is Manual. C1 alone makes the ConfigMap foo-a, which only its
+	// teardown t4 removes. It returns t4.
+	olderPartial := func(createApproved bool, del llmFunc, create func()) lastv1alpha1.Command {
+		t4 := argvStep("t4", argKubectl, "delete", "configmap", "foo-a")
+		c1 := answer([]lastv1alpha1.Command{s1, argvStep("s2", "false")},
+			lastv1alpha1.ManagedResourceSpec{Description: "ConfigMap foo-a", Teardown: []lastv1alpha1.Command{t4}})
+		gw.setScript(key, &script{exit: map[string]int32{"s2": 1}, llm: lifecycle(turns(c1, createPlan), del)})
+		create()
+		if createApproved {
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			approve(key, lastv1alpha1.DecisionApprove)
+			Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{s1}, resources...)))
+			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+			approve(key, lastv1alpha1.DecisionApprove)
+		}
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady))
+		Expect(gw.executedOf(key)).To(Equal(hashOf([]lastv1alpha1.Command{s1}, resources...)))
+		return t4
+	}
+
+	It("tears down a partial Create older than the executed plan", func() {
+		olderUnion := []lastv1alpha1.Command{argvStep("t4", argKubectl, "delete", "configmap", "foo-a"), t2, t1}
+		t4 := olderPartial(true, turns(answer(olderUnion)), func() { createIntent(key, "run web") })
+		Expect(t4).To(Equal(olderUnion[0]))
+		creation := len(gw.calls(key))
+		awaitingDelete()
+
+		first := requestText(deleteRequests(key)[0])
+		deployment := strings.Index(first, `"argv":["kubectl","delete","deployment","web"]`)
+		service := strings.Index(first, `"argv":["kubectl","delete","service","web"]`)
+		fooA := strings.Index(first, `"argv":["kubectl","delete","configmap","foo-a"]`)
+		Expect(deployment).To(BeNumerically(">", 0))
+		Expect(service).To(BeNumerically(">", deployment))
+		Expect(fooA).To(BeNumerically(">", service), "the executed teardown first, then the older partial plan's")
+		Expect(first).To(ContainSubstring("come from plans that did not finish"))
+		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(olderUnion)))
+
+		approveDelete(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM, beginPhase, "RunCommand:t4", runT2, runT1, endSucceeded}))
+	})
+
+	It("an Auto Delete with a partial union waits for approval", func() {
+		allowAuto()
+		olderUnion := []lastv1alpha1.Command{argvStep("t4", argKubectl, "delete", "configmap", "foo-a"), t2, t1}
+		olderPartial(false, turns(answer(olderUnion)), func() {
+			in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+				Spec: lastv1alpha1.IntentSpec{Request: "run web",
+					Modes: &lastv1alpha1.StageModes{Create: lastv1alpha1.ModeAuto, Delete: lastv1alpha1.ModeAuto}}}
+			Expect(k8sClient.Create(ctx, in)).To(Succeed())
+		})
+		deleteIntent(key)
+		Eventually(func() lastv1alpha1.Stage { return getIntent(key).Status.Stage }).Should(Equal(lastv1alpha1.StageDelete))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval))
+		Consistently(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval), "not Failed")
+		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(olderUnion)))
+		Expect(gw.calls(key)).NotTo(ContainElement("RunCommand:t4"))
+
+		approveDelete(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(gw.authsOf(key)).To(HaveLen(3))
+		Expect(gw.authsOf(key)[2]).To(Equal(authApproval), "the union is not the executed teardown, so Auto does not cover it")
+	})
+
+	It("deleting while Executing after a step ran tears that plan down", func() {
+		two := []lastv1alpha1.Command{s1, argvStep("s2", argKubectl, "apply", "-f", "/work/svc.yaml")}
+		deleted := false
+		gw.setScript(key, &script{
+			runErr: map[string]error{"s2": status.Error(codes.Unavailable, "the gateway is restarting")},
+			onRun: func(step string) {
+				if step == "s2" && !deleted {
+					deleted = true
+					deleteIntent(key) // the deletion lands while the Create is mid-plan
+				}
+			},
+			llm: lifecycle(turns(answer(two, resources...)), turns(deletePlan)),
+		})
+		createIntent(key, "run web")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		approve(key, lastv1alpha1.DecisionApprove)
+
+		Eventually(func() lastv1alpha1.Stage { return getIntent(key).Status.Stage }).Should(Equal(lastv1alpha1.StageDelete))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		Expect(gw.openPhase(key)).To(BeEmpty(), "the Create phase was closed without succeeding")
+		Expect(gw.executedOf(key)).To(BeEmpty())
+		first := requestText(deleteRequests(key)[0])
+		Expect(first).To(ContainSubstring(`"argv":["kubectl","delete","deployment","web"]`))
+		Expect(first).To(ContainSubstring("come from plans that did not finish"))
+		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(teardown)))
+
+		approveDelete(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(countOf(gw.calls(key), runT1)).To(Equal(1))
 	})
 
 	It("unions the executed and partial teardowns, deduped, in order", func() {
@@ -312,7 +410,7 @@ var _ = Describe("Intent deletion", func() {
 		Expect(first).To(ContainSubstring("come from plans that did not finish"))
 		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(union)))
 		Expect(eventNotes(key, ReasonPartialTeardown)).To(ConsistOf(
-			"The teardown includes the teardown commands of 1 plans that did not finish"))
+			"The teardown includes the teardown commands of 1 plan that did not finish"))
 
 		approveDelete(key)
 		Eventually(gone(key)).Should(BeTrue())
@@ -367,7 +465,7 @@ var _ = Describe("Intent deletion", func() {
 		By("running the approved Delete plan, then releasing the Intent")
 		approveDelete(key)
 		Eventually(gone(key)).Should(BeTrue())
-		Expect(gw.calls(key)[creation:]).To(Equal([]string{callLLM, beginPhase, runT2, runT1, endSucceeded}))
+		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM, beginPhase, runT2, runT1, endSucceeded}))
 		Expect(eventReasons(key, "Normal")).To(ContainElement(string(lastv1alpha1.PhaseTearingDown)))
 		// The ManagedResources go by ownerReference garbage collection, which envtest does not run.
 		Expect(metav1.IsControlledBy(getMR(key.Namespace, "web-0"), &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{UID: uid}})).

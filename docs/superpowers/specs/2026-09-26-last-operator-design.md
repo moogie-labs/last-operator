@@ -355,8 +355,9 @@ remediations started in the last 24 hours, drift-started and retried
 alike; older ones are dropped, so it holds at most 6. With 6 in the
 window, the next remediation fails the Intent with `RemediationFailed`
 ("6 remediations in 24h") instead of starting. A spec edit clears it; a
-passing scheduled probe run does not, and neither does `DriftCleared`
-(§7).
+passing scheduled probe run does not. A drift that clears before
+anything is remediated (`DriftCleared`) gives back the entry its start
+added, as it gives back the count (§7).
 
 `status.replans` counts the consecutive replans that failed steps
 started. At 3, the next failed step fails the Intent with
@@ -772,17 +773,19 @@ Pending → Clarifying ⇄ (user answers)
     nothing. A retry checks the window too: with it still full, the retry
     fails at once and counts as a retry, so with `reconcile: Auto` the
     backoff keeps growing up to 1h. A spec edit clears the window; a
-    passing scheduled probe run does not, and a confirming run that
-    finds no drift neither adds nor removes an entry. This bounds a
+    passing scheduled probe run does not. A confirming run that finds no
+    drift gives back the start's entry when it gives back the count
+    (Confirming the drift, below). This bounds a
     resource that something reverts slowly, which the consecutive count
     never catches.
   - **Confirming the drift.** The session's first message is built only
     after the operator runs the probes once more (`RunProbes`) and
     records the outcomes on the ManagedResources. If every probe passes,
     the Intent returns to Ready with a Warning `DriftCleared` event: no
-    plan and no approval prompt. The count is given back when the session
-    is the drift's first, with no failure to address; after a failed
-    Remediate step it stands, since a Remediate ran. Otherwise the
+    plan and no approval prompt. The count, and the window entry the
+    start added, are given back when the session is the drift's first,
+    with no failure to address; after a failed Remediate step they stand,
+    since a Remediate ran. Otherwise the
     first message shows the executed plan, read from the audit log, and
     each failing probe's resource, assert and output, truncated. If the
     audit log no longer holds the executed plan, the Intent fails with
@@ -833,10 +836,17 @@ Pending → Clarifying ⇄ (user answers)
     stand in, with a Warning event.
   - **Partial plans (M6).** A partially applied Create or Update does not
     linger. A partial plan is that of a Create or Update phase that did
-    not succeed, is newer than the executed plan (or there is none), and
-    ran a step: the audit log holds a `command.result` for its subject
-    after its `phase.begin` and before its `phase.end`, if it has one. That
-    includes a phase closed as interrupted. The teardown commands are the
+    not succeed and ran a step, anywhere in the Intent's history, older
+    than the executed plan or newer: the audit log holds a
+    `command.start` or `command.result` for its subject after its
+    `phase.begin` and before its `phase.end`, if it has one. That includes
+    a phase closed as interrupted, and a step a crash cut short, since the
+    gateway writes `command.start` before the step runs. An older partial
+    plan counts because a Create that made something before failing and
+    being replanned may have made what the executed plan does not tear
+    down. A history holding a partial plan therefore makes the Delete
+    differ from the executed teardown, so in Auto it needs an approval or
+    rules. The teardown commands are the
     executed plan's (or the ManagedResources'), then those of each partial
     plan, read from its `phase.begin` with its hash checked, oldest first;
     a partial plan's command that is already there (`plan.CommandKey`) is

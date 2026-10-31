@@ -77,8 +77,12 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 			"The executed plan was not found in the audit log; the teardown comes from the ManagedResources' teardown commands")
 	}
 	if td.partials > 0 {
+		plans := "plans"
+		if td.partials == 1 {
+			plans = "plan"
+		}
 		r.Recorder.Eventf(in, nil, corev1.EventTypeNormal, ReasonPartialTeardown, "Teardown",
-			"The teardown includes the teardown commands of %d plans that did not finish", td.partials)
+			"The teardown includes the teardown commands of %d %s that did not finish", td.partials, plans)
 	}
 	return ctrl.Result{}, r.startDelete(ctx, in, feedback, cause)
 }
@@ -208,12 +212,13 @@ type teardownPlan struct {
 
 // teardown returns the commands that tear down what the Intent created (M6
 // design §5.1): the executed plan's teardown commands, in resource order, then
-// those of every partial plan newer than it, oldest first, leaving out each
-// command already there by plan.CommandKey. They come from the audit log,
+// those of every partial plan in the Intent's history, older than the executed
+// plan or newer, oldest first, leaving out each command already there by
+// plan.CommandKey. They come from the audit log,
 // never from status (design §7). When the audit log does not hold the executed
 // plan, the Intent's ManagedResources supply theirs.
 func (r *IntentReconciler) teardown(ctx context.Context, in *lastv1alpha1.Intent) (teardownPlan, error) {
-	executed, found, err := agent.ExecutedPhase(ctx, r.Gateway, intentRef(in))
+	executed, _, found, err := agent.ExecutedPlan(ctx, r.Gateway, intentRef(in))
 	if err != nil {
 		return teardownPlan{}, err
 	}
@@ -221,7 +226,7 @@ func (r *IntentReconciler) teardown(ctx context.Context, in *lastv1alpha1.Intent
 	switch {
 	case found:
 		td.source = teardownExecuted
-		for _, res := range executed.Plan.Resources {
+		for _, res := range executed.Resources {
 			td.commands = append(td.commands, res.Teardown...)
 		}
 	default:
@@ -236,7 +241,10 @@ func (r *IntentReconciler) teardown(ctx context.Context, in *lastv1alpha1.Intent
 			td.commands = append(td.commands, mr.Spec.Teardown...)
 		}
 	}
-	partials, err := agent.PartialPlans(ctx, r.Gateway, intentRef(in), executed.BeginSeq)
+	// Every partial plan, older than the executed plan too: a Create that made
+	// something before it failed and was replanned may have made what the
+	// executed plan does not tear down.
+	partials, err := agent.PartialPlans(ctx, r.Gateway, intentRef(in), 0)
 	if err != nil {
 		return teardownPlan{}, err
 	}

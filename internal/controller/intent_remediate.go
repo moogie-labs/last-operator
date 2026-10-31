@@ -241,9 +241,9 @@ func probeFailures(executed plan.Body, outcomes []*gatewayv1.ProbeOutcome) []age
 
 // driftCleared returns an Intent whose confirming probe run passed to Ready
 // with a DriftCleared event, planning nothing. The first session of a drift
-// episode gives back the count startRemediate took, since nothing was
-// remediated; a replan after a failed Remediate step does not, since that
-// Remediate ran.
+// episode gives back what startRemediate took, the count and the window entry
+// it appended last, since nothing was remediated; a replan after a failed
+// Remediate step does not, since that Remediate ran.
 //
 // The session may be a fresh one, or one that started over because its
 // conversation could not be reloaded: either way it is the session the
@@ -260,6 +260,9 @@ func (r *IntentReconciler) driftCleared(ctx context.Context, in *lastv1alpha1.In
 		}
 		if giveBack && in.Status.Remediations > 0 {
 			in.Status.Remediations--
+		}
+		if n := len(in.Status.RemediationTimes); giveBack && n > 0 {
+			in.Status.RemediationTimes = in.Status.RemediationTimes[:n-1]
 		}
 		// Back at Ready (D10). Retries stay until a scheduled probe run passes
 		// everywhere, so a drift that keeps coming back backs off (followProbes).

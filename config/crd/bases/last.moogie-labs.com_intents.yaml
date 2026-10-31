@@ -672,7 +672,8 @@ spec:
                   started in the last 24 hours, drift-started and retried alike; older ones
                   are dropped. With 6 in the window, the next remediation fails the Intent
                   with RemediationFailed instead of starting. A spec edit clears it; a
-                  passing scheduled probe run does not.
+                  passing scheduled probe run does not. A drift that clears before
+                  anything is remediated gives back the entry its start added.
                 items:
                   type: string
                 type: array

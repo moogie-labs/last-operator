@@ -337,6 +337,23 @@ func TestPartialPlansFindsFailedAndInterruptedPhasesThatRanSteps(t *testing.T) {
 	}
 }
 
+// A gateway that crashed mid-step leaves the command.start it wrote before the
+// step ran, and no command.result: the step may have changed something.
+func TestPartialPlansCountsAStepThatOnlyStarted(t *testing.T) {
+	a, aHash := begun(t, 1, "Create", planBody("a"))
+	b, bHash := begun(t, 4, "Create", planBody("b"))
+	entries := []*gatewayv1.AuditEntry{
+		a, entry(2, audit.TypeCommandStart, "Create", aHash, map[string]any{"runId": "r1"}),
+		ended(3, 1, "Create", aHash, "interrupted"),
+		b, ended(5, 4, "Create", bHash, "failed"),
+		entry(6, audit.TypeCommandStart, "Create", bHash, map[string]any{"runId": "r2"}), // after b's end
+	}
+	got, err := PartialPlans(context.Background(), &fakeAuditor{entries: entries}, ref, 0)
+	if err != nil || !reflect.DeepEqual(got, []plan.Body{planBody("a")}) {
+		t.Errorf("PartialPlans = %v, %v, want a", got, err)
+	}
+}
+
 func TestPartialPlansGivesWhatATruncatedIndexHolds(t *testing.T) {
 	a, aHash := begun(t, 5, "Create", planBody("a"))
 	entries := []*gatewayv1.AuditEntry{ran(4, "Create", "sha256:lost"), a, ran(6, "Create", aHash)}
@@ -362,15 +379,6 @@ func TestPartialPlansRejectsAHashMismatch(t *testing.T) {
 func TestPartialPlansReturnsGatewayErrors(t *testing.T) {
 	if _, err := PartialPlans(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref, 0); err == nil {
 		t.Error("PartialPlans hid a gateway error")
-	}
-}
-
-func TestExecutedPhaseGivesTheBeginSeq(t *testing.T) {
-	entries := append(executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded),
-		executedPhase(t, 3, "Update", planBody("p2"), "failed")...)
-	got, found, err := ExecutedPhase(context.Background(), &fakeAuditor{entries: entries}, ref)
-	if err != nil || !found || got.BeginSeq != 1 || !reflect.DeepEqual(got.Plan, planBody("p1")) || got.Hash != entries[0].GetSubjectHash() {
-		t.Errorf("ExecutedPhase = %+v, found %v, err %v; want p1 at 1", got, found, err)
 	}
 }
 

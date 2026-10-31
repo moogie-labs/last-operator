@@ -79,11 +79,11 @@ Allow rules let Manual mode scale. Once a person decides that a pattern of comma
 
 The user's decision: "I do not want partially applied creates to linger when they're deleted."
 
-- **What counts as partial.** A Create or Update phase that did not succeed, is newer than the executed plan (or there is none), and ran at least one step. "Ran a step" means the audit log holds a `command.result` for its subject after its `phase.begin`. That also catches phases closed as interrupted, which carry no `stepsRun`.
+- **What counts as partial.** A Create or Update phase anywhere in the Intent's history, older than the executed plan or newer, that did not succeed and ran at least one step. "Ran a step" means the audit log holds a `command.start` or `command.result` for its subject after its `phase.begin` and before its `phase.end`, if it has one. That also catches phases closed as interrupted, which carry no `stepsRun`, and a step a crash cut short, since `command.start` is written before the step runs. An older one counts because a Create that made something, failed and was replanned may have made what the executed plan does not tear down; a history with a partial plan therefore makes an Auto Delete need approval or rules.
 - **What tears it down.** The Delete's teardown commands are the union of the executed plan's teardown (if any) and the teardown commands of every partial phase's plan, read from its `phase.begin`. The union is deduplicated by `plan.CommandKey` and kept in order: executed first, then the partial phases from oldest to newest. The operator's permutation check runs against that union.
 - **Releasing.** An Intent with no executed plan, no partial phase and no ManagedResources is released at once, as today. One whose union has no teardown commands is released with the Warning `NoTeardown`. This replaces M5a's `PartialCreateNotTornDown` path.
 - **Gateway.** A Delete with no executed plan is already allowed by approval, and now by rules. In Auto it falls outside D9's limits, which require a permutation of the executed teardown, so it needs approval or rules.
-- **Prompt.** The teardown prompt asks for commands that tolerate objects that don't exist, such as `--ignore-not-found`, because a partial plan may not have created everything.
+- **Prompt.** The Delete plan can only reorder the recorded commands, so tolerance is asked for when they are written: the system prompt that Create and Update planning read asks for teardown commands that succeed when the object is already gone or was never created, such as `kubectl delete … --ignore-not-found`, because a plan can stop part way and its teardown still runs. The teardown prompt says when some commands come from plans that did not finish.
 - **Failure.** If teardown fails, the result is `TeardownFailed` with the retry annotation, as for any Delete.
 
 ### 5.2 The repair limit counts a rolling window too *(my call, as the user asked)*
@@ -91,7 +91,7 @@ The user's decision: "I do not want partially applied creates to linger when the
 The consecutive cap of 3 stays as it is, and a window cap is added on top:
 - **The rule.** No more than **6 remediations in 24 hours**. The operator keeps the start times of the last 6 remediations in `status.remediationTimes`, as RFC 3339 strings, and drops the ones older than 24 hours.
 - **When it applies.** Starting a remediation while 6 are left in the window fails the Intent with `RemediationFailed` and the message "6 remediations in 24h".
-- **Resets.** A passing scheduled run resets the consecutive count only. A spec edit clears both, because a new plan starts fresh.
+- **Resets.** A passing scheduled run resets the consecutive count only. A spec edit clears both, because a new plan starts fresh. A drift that clears before anything is remediated (`DriftCleared`) gives back the start's window entry together with the count.
 - **Auto.** Retry with backoff (D10) then applies: each retry finds the window still full and fails again, so the backoff grows from 1m up to 1h.
 
 Why: it bounds the resource that something reverts slowly, which the consecutive cap never catches (the M5c follow-up), without slowing the quick, one-off repair. The numbers are constants for now; making them OperatorConfig settings is a follow-up.
