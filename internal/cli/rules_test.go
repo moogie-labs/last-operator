@@ -341,6 +341,7 @@ func TestStagesFlagIsValidated(t *testing.T) {
 		{"--always-allow=exact", "--stages", "Create,Bogus"},
 		{"--stages", "Create"},
 		{"--cluster"},
+		{"--providers", "k8s"},
 		{"--always-allow=sometimes"},
 	} {
 		c := fakeClient(ruleIntent())
@@ -436,23 +437,79 @@ func TestAlwaysAllowSkipsCoveredEntries(t *testing.T) {
 	}
 }
 
-func TestAlwaysAllowSkipsAnEntryThatNoRuleCanHold(t *testing.T) {
-	in := ruleIntent()
-	in.Status.Plan.Steps[1].Providers = nil
+func providerless(in *lastv1alpha1.Intent, ids ...string) *lastv1alpha1.Intent {
+	p := in.Status.Plan
+	for _, id := range ids {
+		switch id {
+		case "s2":
+			p.Steps[1].Providers = nil
+		case "probe":
+			p.Resources[0].Probes[0].Command.Providers = nil
+		default: // all
+			p.Steps[0].Providers, p.Resources[0].Teardown[0].Providers = nil, nil
+		}
+	}
+	p.Hash = planHash(p)
+	return in
+}
+
+func TestAProviderlessProbeGetsThePlansProviders(t *testing.T) {
+	in := providerless(ruleIntent(), "probe")
+	in.Status.Plan.Steps[1].Providers = []string{"aws"}
 	in.Status.Plan.Hash = planHash(in.Status.Plan)
 	c := fakeClient(in)
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=exact", "--providers", "ignored"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	items := nsRules(t, c)
+	if got := ruleFor(t, items, "web-probe-up-").Spec.Providers; !reflect.DeepEqual(got, []string{"aws", k8sProv}) {
+		t.Errorf("probe providers = %v, want the sorted union", got)
+	}
+	if got := ruleFor(t, items, "web-s2-").Spec.Providers; !reflect.DeepEqual(got, []string{"aws"}) {
+		t.Errorf("s2 providers = %v, want its own", got)
+	}
+	if got := ruleFor(t, items, "web-s1-").Spec.Providers; !reflect.DeepEqual(got, []string{k8sProv}) {
+		t.Errorf("s1 providers = %v, want its own, not the flag", got)
+	}
+}
+
+func allProviderless() *lastv1alpha1.Intent {
+	in := providerless(ruleIntent(), "all", "s2", "probe")
+	return in
+}
+
+func TestAnAllProviderlessPlanSkipsWithoutTheFlag(t *testing.T) {
+	c := fakeClient(allProviderless())
 	d, out := depsFor(c, "")
 	if err := execute(d, verbApprove, webName, "--always-allow=exact"); err != nil {
 		t.Fatalf("approve = %v\n%s", err, out)
 	}
-	if got := nsRules(t, c); len(got) != 3 {
-		t.Errorf("rules = %d, want 3", len(got))
+	if got := nsRules(t, c); len(got) != 0 {
+		t.Errorf("rules = %v, want none", got)
 	}
-	if !strings.Contains(out.String(), "names no provider") {
-		t.Errorf("output does not say why s2 got no rule:\n%s", out)
+	if !strings.Contains(out.String(), "pass --providers") {
+		t.Errorf("output does not say to pass --providers:\n%s", out)
 	}
 	if a := approvalsIn(t, c); len(a) != 1 {
 		t.Errorf("approvals = %+v", a)
+	}
+}
+
+func TestProvidersFlagFillsAProviderlessPlan(t *testing.T) {
+	c := fakeClient(allProviderless())
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=exact", "--providers", "web, aws"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	items := nsRules(t, c)
+	if len(items) != 4 {
+		t.Fatalf("rules = %d, want 4", len(items))
+	}
+	for _, r := range items {
+		if !reflect.DeepEqual(r.Spec.Providers, []string{"web", "aws"}) {
+			t.Errorf("%s providers = %v", r.Name, r.Spec.Providers)
+		}
 	}
 }
 

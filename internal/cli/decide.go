@@ -148,7 +148,7 @@ func decide(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, 
 // newDecisionCommand builds approve or deny: both decide exactly what
 // kubectl last plan shows.
 func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *cobra.Command {
-	var hash, reason, always, stagesList string
+	var hash, reason, always, stagesList, providersList string
 	var cluster bool
 	cmd := &cobra.Command{
 		Use:   "approve NAME",
@@ -158,7 +158,7 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 			if decision == lastv1alpha1.DecisionDeny && strings.TrimSpace(reason) == "" {
 				return errors.New("--reason is required: the model reads it")
 			}
-			opts, err := allowOptsFrom(always, stagesList, cluster)
+			opts, err := allowOptsFrom(always, stagesList, providersList, cluster)
 			if err != nil {
 				return err
 			}
@@ -204,6 +204,8 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 		cmd.Flags().Lookup("always-allow").NoOptDefVal = allowPrompt
 		cmd.Flags().StringVar(&stagesList, "stages", "", "with --always-allow, the stages every rule applies to, comma-separated "+
 			"(default: the plan's stage, and Delete for teardown commands)")
+		cmd.Flags().StringVar(&providersList, "providers", "", "with --always-allow, the providers of a rule for a command that names none, "+
+			"when no command in the plan names any, comma-separated")
 		cmd.Flags().BoolVar(&cluster, "cluster", false, "with --always-allow, create ClusterCommandRules instead of CommandRules")
 	}
 	if decision == lastv1alpha1.DecisionDeny {
@@ -215,16 +217,21 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 }
 
 // allowOptsFrom checks the flags of approve --always-allow.
-func allowOptsFrom(always, stagesList string, cluster bool) (allowOpts, error) {
+func allowOptsFrom(always, stagesList, providersList string, cluster bool) (allowOpts, error) {
 	opts := allowOpts{mode: always, cluster: cluster}
 	if always == "" {
-		if stagesList != "" || cluster {
-			return opts, errors.New("--stages and --cluster need --always-allow")
+		if stagesList != "" || providersList != "" || cluster {
+			return opts, errors.New("--stages, --providers and --cluster need --always-allow")
 		}
 		return opts, nil
 	}
 	if !slices.Contains([]string{allowPrompt, allowExact, allowGeneralized}, always) {
 		return opts, fmt.Errorf("--always-allow=%s: want exact or generalized, or no value to be asked for each command", clean(always))
+	}
+	for p := range strings.SplitSeq(providersList, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			opts.providers = append(opts.providers, p)
+		}
 	}
 	if stagesList != "" {
 		stages, err := parseStages(stagesList)

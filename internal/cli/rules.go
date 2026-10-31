@@ -44,6 +44,8 @@ type allowOpts struct {
 	mode    string
 	stages  []lastv1alpha1.Stage // replaces every rule's stages when set
 	cluster bool
+	// providers are given to a command that names none, when the plan names none either.
+	providers []string
 }
 
 // entry is one command a plan or a discovery command asks to run, as
@@ -144,8 +146,6 @@ func unrulable(cmd lastv1alpha1.Command) string {
 	case slices.ContainsFunc(cmd.Run.Argv, hasStepRefArg) || cmd.Image != nil &&
 		slices.ContainsFunc(cmd.Image.Install, func(c lastv1alpha1.ArgvCommand) bool { return slices.ContainsFunc(c.Argv, hasStepRefArg) }):
 		return "it uses " + stepRefSyntax + "...} references, which no rule covers"
-	case len(cmd.Providers) == 0:
-		return "it names no provider, and a rule needs at least one"
 	}
 	return ""
 }
@@ -154,14 +154,15 @@ func hasStepRefArg(a string) bool { return strings.Contains(a, stepRefSyntax) }
 
 // ruleSpec is the rule for e matching pattern (M6 design R13): the stages given
 // or e's own, e's providers and egress, and one exact pattern per image.install argv.
-func ruleSpec(in *lastv1alpha1.Intent, e entry, pattern lastv1alpha1.ArgvPattern, stages []lastv1alpha1.Stage) lastv1alpha1.CommandRuleSpec {
+func ruleSpec(in *lastv1alpha1.Intent, e entry, pattern lastv1alpha1.ArgvPattern, stages []lastv1alpha1.Stage,
+	providers []string) lastv1alpha1.CommandRuleSpec {
 	if len(stages) == 0 {
 		stages = []lastv1alpha1.Stage{e.stage}
 	}
 	spec := lastv1alpha1.CommandRuleSpec{
 		Description: fmt.Sprintf("From the approval of Intent %s/%s (%s)", in.Namespace, in.Name, e.id),
 		Stages:      slices.Clone(stages),
-		Providers:   slices.Clone(e.cmd.Providers),
+		Providers:   providers,
 		Match:       pattern,
 		Egress:      slices.Clone(e.cmd.Egress),
 		Source:      &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval},
@@ -222,6 +223,12 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 		writef(w, "No rule for %s: %s; it is approved just this once.\n", clean(e.id), why)
 		return nil, nil //nolint:nilnil // nil means no rule
 	}
+	providers := providersFor(e, all, opts)
+	if len(providers) == 0 {
+		writef(w, "No rule for %s: no command in this plan names a provider, and a rule needs at least one; "+
+			"pass --providers p1,p2 to give it some. It is approved just this once.\n", clean(e.id))
+		return nil, nil //nolint:nilnil // nil means no rule
+	}
 	mode := opts.mode
 	if mode == allowPrompt {
 		for mode == allowPrompt {
@@ -248,7 +255,7 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 		pattern = proposal(e)
 	}
 	for {
-		spec := ruleSpec(in, e, pattern, opts.stages)
+		spec := ruleSpec(in, e, pattern, opts.stages, providers)
 		fs := showPattern(w, mode, all, spec)
 		nothing := rules.MatchesNothing(fs)
 		if p == nil || mode == allowExact {
@@ -270,6 +277,28 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 			pattern = lastv1alpha1.ArgvPattern{Argv: strings.Fields(line)}
 		}
 	}
+}
+
+// providersFor is the providers of e's rule: e's own; else, for a command that
+// names none, the sorted union of the providers of every command in the plan
+// (a rule needs at least one); else opts.providers.
+func providersFor(e entry, all []entry, opts allowOpts) []string {
+	if len(e.cmd.Providers) > 0 {
+		return slices.Clone(e.cmd.Providers)
+	}
+	var union []string
+	for _, o := range all {
+		for _, p := range o.cmd.Providers {
+			if !slices.Contains(union, p) {
+				union = append(union, p)
+			}
+		}
+	}
+	slices.Sort(union)
+	if len(union) == 0 {
+		return slices.Clone(opts.providers)
+	}
+	return union
 }
 
 // proposal is the generalized pattern for e: the operator's, when it wrote

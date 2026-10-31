@@ -1346,8 +1346,8 @@ plan's stage. For each entry the approver picks one of:
 
 `--always-allow=exact` and `--always-allow=generalized` apply one choice
 to every uncovered entry without prompting. An entry no rule can hold (a
-script, a `${steps.` reference, or no provider, since a rule needs at
-least one) is approved just this once, and the CLI says so.
+script, or a `${steps.` reference) is approved just this once, and the
+CLI says so.
 
 A rule from `--always-allow` holds:
 
@@ -1355,7 +1355,13 @@ A rule from `--always-allow` holds:
   teardown commands. Create and Update are one class (§9.3). `--stages
   S,…` replaces the stages of every rule; each is checked against the
   Stage enum;
-- **providers and egress:** the entry's own;
+- **providers and egress:** the entry's own. A command with no providers
+  is covered by any provider list, but a rule needs at least one, so its
+  rule gets the sorted union of the providers of every command in the
+  plan. If the plan names none, it gets `--providers p1,p2` when given;
+  otherwise the entry is skipped (approved just this once) with a message
+  to pass `--providers`. `--providers` never changes the providers of an
+  entry that has its own;
 - **install:** one exact pattern for each `image.install` argv;
 - **scope:** a namespaced `CommandRule`, or a `ClusterCommandRule` with
   `--cluster`;
