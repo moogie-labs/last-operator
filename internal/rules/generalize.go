@@ -9,10 +9,14 @@ import (
 // maxLiterals is how many positional arguments stay literal, argv[0] included.
 const maxLiterals = 3
 
+// positionalValue stands for a positional value slot: any argument that does not
+// start with "-", so a wildcard cannot swallow a flag such as --kubeconfig.
+const positionalValue = "[!-]*"
+
 // Generalize derives an editable pattern from a command's argv. argv[0] and the next
 // positionals up to three in all stay literal (flag values never count); flag names
 // stay literal; a flag's value (the next argument when it is not itself a flag, or the
-// part after "=") becomes "*"; every later positional becomes "*". Literals are escaped
+// part after "=") becomes "*"; every later positional becomes "[!-]*" (not flag-shaped). Literals are escaped
 // so they match only themselves. A script has no argv, so the result is empty.
 func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
 	argv := cmd.Run.Argv
@@ -27,7 +31,7 @@ func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
 		case strings.HasPrefix(a, "-"):
 			wantValue = false
 			if name, _, ok := strings.Cut(a, "="); ok {
-				out = append(out, literal(name)+"=*")
+				out = append(out, escapeGlob(name, "")+"=*")
 			} else {
 				out = append(out, literal(a))
 				wantValue = true
@@ -38,8 +42,10 @@ func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
 		case literals < maxLiterals:
 			literals++
 			out = append(out, literal(a))
-		default:
+		case a == "":
 			out = append(out, "*")
+		default:
+			out = append(out, positionalValue)
 		}
 	}
 	return lastv1alpha1.ArgvPattern{Argv: out}

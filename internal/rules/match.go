@@ -7,6 +7,7 @@ package rules
 import (
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,8 @@ var (
 // Match reports whether argv satisfies pattern, position by position. A pattern
 // argument is a literal (exact match); a glob when it contains *, ? or [ ("*" is any
 // run of characters, "/" included, "?" one character, "[a-z]" / "[!a-z]" a class,
-// "\\" escapes; it never spans arguments); or "re:<RE2>", anchored to the whole
+// "\\" escapes, only inside an argument that is a glob, i.e. contains *, ? or [;
+// it never spans arguments); or "re:<RE2>", anchored to the whole
 // argument. pattern[0] must be a literal, else nothing matches. "..." matches zero or more remaining arguments and is valid
 // only as the last element; anywhere else the whole pattern matches nothing. A
 // malformed glob or regex matches nothing.
@@ -54,7 +56,7 @@ func Match(pattern, argv []string) bool {
 
 func matchArg(p, arg string) bool {
 	if expr, ok := strings.CutPrefix(p, regexPrefix); ok {
-		re := compile("r:"+expr, func() (string, bool) { return "^(?:" + expr + ")$", true })
+		re := compile("r:"+expr, func() (string, bool) { return anchoredRegex(expr) })
 		return re != nil && re.MatchString(arg)
 	}
 	if isGlob(p) {
@@ -62,6 +64,16 @@ func matchArg(p, arg string) bool {
 		return re != nil && re.MatchString(arg)
 	}
 	return p == arg
+}
+
+// anchoredRegex wraps expr as ^(?:expr)$, but only after expr parses on its own: an
+// unbalanced expression such as "a)|(b" would otherwise close the group early and
+// escape the anchors.
+func anchoredRegex(expr string) (string, bool) {
+	if _, err := syntax.Parse(expr, syntax.Perl); err != nil {
+		return "", false
+	}
+	return "^(?:" + expr + ")$", true
 }
 
 func isGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
