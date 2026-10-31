@@ -59,4 +59,4 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
 
 ## Carried
 
-The M5a and M5b follow-ups still apply. Before the next real-model demo, run `ANTHROPIC_API_KEY=… go run ./hack/schemaprobe`.
+The M5a and M5b follow-ups still apply. The schema probe was run on 2026-10-30 against the final code: `ACCEPTED (2157-byte schema); the answer parses as a turn`, so the real-model demo is unblocked.
