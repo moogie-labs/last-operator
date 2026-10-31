@@ -142,3 +142,11 @@ func (e Effective) CheckCommand(c lastv1alpha1.Command) error {
 	}
 	return nil
 }
+
+// ParseEgress parses egress patterns the way policy layers do: host patterns are
+// skipped (they allow nothing until Cilium), malformed ones are an error.
+func ParseEgress(patterns []string) ([]sandbox.EgressRule, error) { return parseAllowed(patterns) }
+
+// EgressCovers reports whether allowed covers r: same port, and r's prefix lies
+// inside allowed's.
+func EgressCovers(allowed, r sandbox.EgressRule) bool { return covers(allowed, r) }

@@ -133,3 +133,19 @@ func TestEgressListsEachLayersRules(t *testing.T) {
 		t.Errorf("shipped defaults: Egress = %v, want one layer that allows nothing", got)
 	}
 }
+
+func TestParseEgressAndEgressCoversWrapUnexported(t *testing.T) {
+	allowed, err := policy.ParseEgress([]string{narrowEgress, "example.com:443"})
+	if err != nil || len(allowed) != 1 {
+		t.Fatalf("ParseEgress = %v, %v; want one rule (host patterns allow nothing)", allowed, err)
+	}
+	if !policy.EgressCovers(allowed[0], rule(t, "10.1.2.3:443")) {
+		t.Error("10.1.0.0/16:443 should cover 10.1.2.3:443")
+	}
+	if policy.EgressCovers(allowed[0], rule(t, "10.2.0.1:443")) {
+		t.Error("10.1.0.0/16:443 must not cover 10.2.0.1:443")
+	}
+	if _, err := policy.ParseEgress([]string{"nonsense"}); err == nil {
+		t.Error("ParseEgress should reject a malformed pattern")
+	}
+}

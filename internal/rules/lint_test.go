@@ -1,0 +1,74 @@
+//nolint:goconst // table-driven test data repeats argv words
+package rules_test
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/rules"
+)
+
+func TestLintWarnings(t *testing.T) {
+	const fileNote = "rules match argv only, not files or stdin"
+	tests := []struct {
+		name  string
+		match []string
+		want  []string // substrings, one per expected warning, in order
+	}{
+		{"clean", []string{"kubectl", "get", "pods"}, nil},
+		{"clean with trailing rest after a safe verb", []string{"kubectl", "get", "..."}, nil},
+		{"rest at position 1", []string{"kubectl", "..."}, []string{"'...' at position 1"}},
+		{"glob after delete", []string{"kubectl", "delete", "*"}, []string{"after destructive verb \"delete\""}},
+		{"regex after rm", []string{"aws", "s3", "rm", "re:.*"}, []string{"after destructive verb \"rm\""}},
+		{"glob after terminate-*", []string{"aws", "ec2", "terminate-instances", "i-*"}, []string{"terminate-instances"}},
+		{"glob after destroy", []string{"terraform", "destroy", "-target=*"}, []string{"destroy"}},
+		{"glob after drop", []string{"psql", "drop", "t?"}, []string{"drop"}},
+		{"glob after purge", []string{"x", "purge", "[ab]"}, []string{"purge"}},
+		{"verb itself is not flagged", []string{"kubectl", "delete", "pod", "web"}, nil},
+		{"glob before the verb is fine", []string{"kubectl", "*", "delete"}, nil},
+		{"file flag alone", []string{"kubectl", "apply", "-f", "deploy.yaml"}, []string{fileNote}},
+		{"file flag with rest", []string{"kubectl", "apply", "-f", "deploy.yaml", "..."}, []string{"file flag", fileNote}},
+		{"file flag with glob", []string{"kubectl", "apply", "--filename", "*.yaml"}, []string{"file flag", fileNote}},
+		{"from-file=value with glob", []string{"kubectl", "create", "secret", "--from-file=*"}, []string{"file flag", fileNote}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rules.Lint(lastv1alpha1.CommandRuleSpec{Match: lastv1alpha1.ArgvPattern{Argv: tt.match}})
+			if len(got) != len(tt.want) {
+				t.Fatalf("Lint = %q, want %d warning(s) %q", got, len(tt.want), tt.want)
+			}
+			for i, sub := range tt.want {
+				if !strings.Contains(got[i], sub) {
+					t.Errorf("warning %d = %q, want it to contain %q", i, got[i], sub)
+				}
+			}
+		})
+	}
+}
+
+func TestLintOrderAndInstall(t *testing.T) {
+	spec := lastv1alpha1.CommandRuleSpec{
+		Match: lastv1alpha1.ArgvPattern{Argv: []string{"kubectl", "delete", "*", "-f", "..."}},
+		Install: []lastv1alpha1.ArgvPattern{
+			{Argv: []string{"pip", "install", "boto3"}},
+			{Argv: []string{"curl", "..."}},
+		},
+	}
+	got := rules.Lint(spec)
+	if len(got) != 4 {
+		t.Fatalf("Lint = %q, want 4 warnings", got)
+	}
+	for i, prefix := range []string{"match: ", "match: ", "match: ", "install[1]: "} {
+		if !strings.HasPrefix(got[i], prefix) {
+			t.Errorf("warning %d = %q, want prefix %q", i, got[i], prefix)
+		}
+	}
+	if !strings.Contains(got[0], "destructive") || !strings.Contains(got[1], "file flag") || !strings.Contains(got[2], "argv only") {
+		t.Errorf("warnings out of order: %q", got)
+	}
+	if again := rules.Lint(spec); !reflect.DeepEqual(got, again) {
+		t.Errorf("Lint is not stable: %q vs %q", got, again)
+	}
+}
