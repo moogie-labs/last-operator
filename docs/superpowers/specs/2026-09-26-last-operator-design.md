@@ -337,6 +337,7 @@ status:
       s2: { argv: ["kubectl", "apply", "-n", "team-x", "-f", "..."], lint: ["file argument"] }
   suggestedRules: [ … names of CommandRuleSuggestions created for this plan … ]
   remediations: 1                # consecutive remediations drift started (§7)
+  remediationTimes: ["2026-10-31T09:12:00Z"]  # starts of the remediations in the last 24h (§7)
   replans: 0                     # consecutive replans after failed steps (§7)
   retries: 1                     # retries of the Failed Intent; sets the Auto backoff (§7)
   observedRetry: "2"             # the retry annotation's value the operator last acted on (§7)
@@ -348,6 +349,14 @@ started. At 3, the next drift fails the Intent with `RemediationFailed`
 instead of planning. A scheduled probe run in which every probe passes,
 after the Intent last became Ready, resets it to 0, and so does a spec
 edit that starts a new planning session (§7).
+
+`status.remediationTimes` holds the start times, in RFC 3339, of the
+remediations started in the last 24 hours, drift-started and retried
+alike; older ones are dropped, so it holds at most 6. With 6 in the
+window, the next remediation fails the Intent with `RemediationFailed`
+("6 remediations in 24h") instead of starting. A spec edit clears it; a
+passing scheduled probe run does not, and neither does `DriftCleared`
+(§7).
 
 `status.replans` counts the consecutive replans that failed steps
 started. At 3, the next failed step fails the Intent with
@@ -755,6 +764,18 @@ Pending → Clarifying ⇄ (user answers)
     after a failed step does not. A retry of a failed Remediate, or of a
     `RemediationFailed`, restarts the count at 0, and the retried
     remediation counts as the first (Failures, below).
+  - **Window (M6).** On top of the consecutive count, no more than 6
+    remediations start in 24 hours. Every start, drift's or a retry's,
+    is recorded in `status.remediationTimes`, which drops entries older
+    than 24 hours. Starting one with 6 left in the window fails the
+    Intent with `RemediationFailed` ("6 remediations in 24h") and plans
+    nothing. A retry checks the window too: with it still full, the retry
+    fails at once and counts as a retry, so with `reconcile: Auto` the
+    backoff keeps growing up to 1h. A spec edit clears the window; a
+    passing scheduled probe run does not, and a confirming run that
+    finds no drift neither adds nor removes an entry. This bounds a
+    resource that something reverts slowly, which the consecutive count
+    never catches.
   - **Confirming the drift.** The session's first message is built only
     after the operator runs the probes once more (`RunProbes`) and
     records the outcomes on the ManagedResources. If every probe passes,
@@ -810,12 +831,27 @@ Pending → Clarifying ⇄ (user answers)
     with its hash checked. It is never read from status. If the audit
     log no longer holds it, the ManagedResources' `teardown` commands
     stand in, with a Warning event.
-  - **Nothing to do.** An Intent that never executed is released at
-    once. One whose plan has no teardown commands is released with a
-    Warning `NoTeardown` event; nothing is torn down.
+  - **Partial plans (M6).** A partially applied Create or Update does not
+    linger. A partial plan is that of a Create or Update phase that did
+    not succeed, is newer than the executed plan (or there is none), and
+    ran a step: the audit log holds a `command.result` for its subject
+    after its `phase.begin` and before its `phase.end`, if it has one. That
+    includes a phase closed as interrupted. The teardown commands are the
+    executed plan's (or the ManagedResources'), then those of each partial
+    plan, read from its `phase.begin` with its hash checked, oldest first;
+    a partial plan's command that is already there (`plan.CommandKey`) is
+    left out. A Normal `PartialTeardown` event says how many partial
+    plans added commands, and the model is told that some commands come
+    from plans that did not finish. Every teardown prompt asks for a
+    teardown that tolerates missing objects, as `--ignore-not-found`
+    does. This replaces M5a's `PartialCreateNotTornDown` warning.
+  - **Nothing to do.** An Intent with no executed plan, no partial plan
+    and no ManagedResources is released at once. One whose teardown
+    commands are none is released with a Warning `NoTeardown` event;
+    nothing is torn down.
   - **Plan.** Stage `Delete` planning is one exchange. The model must
     answer with a plan whose `resources` is `[]` and whose steps are a
-    permutation of the executed plan's teardown commands. The operator
+    permutation of the teardown commands. The operator
     checks this before recording it, and sends a correction for a
     reordered-wrongly, added or dropped step. The model orders the
     commands; it cannot change them.
@@ -847,7 +883,8 @@ Pending → Clarifying ⇄ (user answers)
   - `ExecutionFailed`
   - `ExecutionInterrupted`
   - `VerificationFailed`
-  - `RemediationFailed` (drift returned after 3 consecutive remediations)
+  - `RemediationFailed` (drift returned after 3 consecutive remediations,
+    or 6 remediations started in 24h)
   - `TeardownFailed` (a Delete)
 
   - **Replans (D10).** A step that exits non-zero replans at most 3

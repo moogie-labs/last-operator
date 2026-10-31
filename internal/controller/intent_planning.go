@@ -90,6 +90,7 @@ func beginSession(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, feedback st
 	if stage != lastv1alpha1.StageRemediate {
 		if in.Generation != in.Status.ObservedGeneration {
 			in.Status.Remediations, in.Status.Replans, in.Status.Retries = 0, 0, 0
+			in.Status.RemediationTimes = nil // a new plan starts fresh (M6 design §5.2)
 			if cause == causeRetry {
 				cause, feedback = causePlan, ""
 			}

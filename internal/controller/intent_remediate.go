@@ -25,6 +25,30 @@ import (
 // next drift fails the Intent with RemediationFailed (D11).
 const maxRemediations = 3
 
+// maxWindowRemediations is how many remediations may start within
+// remediationWindow, drift-started and retried alike; the next fails the
+// Intent with RemediationFailed (M6 design §5.2).
+const (
+	maxWindowRemediations = 6
+	remediationWindow     = 24 * time.Hour
+)
+
+// msgWindowFull is why a remediation fails at the window cap.
+var msgWindowFull = fmt.Sprintf("The Intent reached %d remediations in 24h", maxWindowRemediations)
+
+// recentRemediations returns the start times in times that are within
+// remediationWindow of now, in order. A time that does not parse is dropped.
+func recentRemediations(times []string, now time.Time) []string {
+	var recent []string
+	for _, s := range times {
+		t, err := time.Parse(time.RFC3339, s)
+		if err == nil && now.Sub(t) < remediationWindow {
+			recent = append(recent, s)
+		}
+	}
+	return recent
+}
+
 // msgSpecChanged ends a phase that a spec edit abandons.
 const msgSpecChanged = "Aborted: the spec changed"
 
@@ -46,6 +70,12 @@ func (r *IntentReconciler) startRemediate(ctx context.Context, in *lastv1alpha1.
 // remediations starts over at 0, the retried remediation is counted as the
 // first, and feedback is the failure the plan must address (D10, D11). New
 // drift (causePlan) starts with no replans.
+//
+// Either way the start is recorded in status.remediationTimes, which keeps
+// the last 24 hours' (M6 design §5.2). With maxWindowRemediations already
+// there, the remediation does not start: the write fails the Intent with
+// RemediationFailed instead, counting a retry as a retry, so that an Auto
+// stage's backoff keeps growing while the window stays full (D10).
 func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.Intent, feedback string,
 	cause sessionCause) (ctrl.Result, error) {
 	from := lastv1alpha1.PhaseDrifted
@@ -60,14 +90,27 @@ func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.
 		return ctrl.Result{}, err
 	}
 	r.sessions.drop(client.ObjectKeyFromObject(in))
-	gen, capped := in.Generation, false
+	gen, capped, full, now := in.Generation, false, false, r.now()
 	if err := r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		// A conflict retry re-reads the Intent: start only from the drift or
-		// failure that was seen, and never past the cap. Each attempt decides afresh.
-		capped = false
+		// failure that was seen, and never past either cap. Each attempt decides afresh.
+		capped, full = false, false
 		if in.Status.Phase != from || in.Generation != gen || in.Generation != in.Status.ObservedGeneration {
 			return
 		}
+		if capped = cause == causePlan && in.Status.Remediations >= maxRemediations; capped {
+			return
+		}
+		recent := recentRemediations(in.Status.RemediationTimes, now)
+		if full = len(recent) >= maxWindowRemediations; full {
+			in.Status.RemediationTimes = recent
+			cause.count(in)
+			setPhase(in, lastv1alpha1.PhaseFailed, ReasonRemediationFailed, msgWindowFull+specEditHint(in))
+			// The backoff counts from this failure, a retry's included (fail).
+			meta.FindStatusCondition(in.Status.Conditions, CondReady).LastTransitionTime = metav1.NewTime(now)
+			return
+		}
+		in.Status.RemediationTimes = append(recent, now.UTC().Format(time.RFC3339))
 		switch cause {
 		case causeRetry:
 			in.Status.Remediations = 0
@@ -77,16 +120,17 @@ func (r *IntentReconciler) beginRemediate(ctx context.Context, in *lastv1alpha1.
 			// count against it (D10).
 			in.Status.Replans = 0
 		}
-		if capped = in.Status.Remediations >= maxRemediations; capped {
-			return
-		}
 		in.Status.Remediations++
 		in.Status.EffectiveModes = l.modes(in).Status()
 		cause.count(in)
 		resetSession(in, lastv1alpha1.StageRemediate, feedback)
 		setPhase(in, lastv1alpha1.PhasePlanning, ReasonPlanning, "Confirming the drift before asking the LLM for a Remediate plan")
-	}); err != nil || !capped {
+	}); err != nil || !capped && !full {
 		return ctrl.Result{}, err
+	}
+	if full {
+		logf.FromContext(ctx).Info("Intent failed", "reason", ReasonRemediationFailed, "message", msgWindowFull)
+		return ctrl.Result{}, nil
 	}
 	return r.beginRemediate(ctx, in, feedback, cause) // in holds the Intent as stored: it fails at the cap
 }

@@ -289,41 +289,88 @@ func TestExecutedPlanReturnsGatewayErrors(t *testing.T) {
 	}
 }
 
-// endedPhase returns a phase.end of stage for subject that ran stepsRun steps.
-func endedPhase(seq uint64, stage, subject, outcome string, stepsRun int) *gatewayv1.AuditEntry {
-	return entry(seq, audit.TypePhaseEnd, stage, subject, struct {
-		BeginSeq uint64 `json:"beginSeq"`
-		Outcome  string `json:"outcome"`
-		StepsRun int    `json:"stepsRun"`
-	}{seq - 1, outcome, stepsRun})
+// begun returns the phase.begin of stage for body at seq, and body's hash.
+func begun(t *testing.T, seq uint64, stage string, body plan.Body) (*gatewayv1.AuditEntry, string) {
+	t.Helper()
+	e := executedPhase(t, seq, stage, body, "")[0]
+	return e, e.GetSubjectHash()
 }
 
-func TestPartialCreateIsTheNewestCreateThatRanStepsAndFailed(t *testing.T) {
-	a := &fakeAuditor{pageSize: 1, entries: []*gatewayv1.AuditEntry{
-		endedPhase(2, "Create", "sha256:one", "failed", 2),
-		endedPhase(4, "Create", "sha256:two", "interrupted", 1),
-		endedPhase(6, "Create", "sha256:three", "failed", 0),
-		endedPhase(8, "Discovery", "sha256:d", "failed", 1),
-		endedPhase(10, "Delete", "sha256:del", "failed", 1),
-	}}
-	subject, steps, found, err := PartialCreate(context.Background(), a, ref)
-	if err != nil || !found || subject != "sha256:two" || steps != 1 {
-		t.Errorf("PartialCreate = %q, %d, found %v, err %v; want sha256:two after 1 step", subject, steps, found, err)
+// ran returns a command.result of stage for subject at seq.
+func ran(seq uint64, stage, subject string) *gatewayv1.AuditEntry {
+	return entry(seq, audit.TypeCommandResult, stage, subject, commandResult{})
+}
+
+// ended returns the phase.end at seq of the phase.begin at beginSeq.
+func ended(seq, beginSeq uint64, stage, subject, outcome string) *gatewayv1.AuditEntry {
+	return entry(seq, audit.TypePhaseEnd, stage, subject, phaseEnd{BeginSeq: beginSeq, Outcome: outcome})
+}
+
+func TestPartialPlansFindsFailedAndInterruptedPhasesThatRanSteps(t *testing.T) {
+	var entries []*gatewayv1.AuditEntry
+	add := func(e ...*gatewayv1.AuditEntry) { entries = append(entries, e...) }
+	old, oldHash := begun(t, 1, "Create", planBody("old"))
+	add(old, ran(2, "Create", oldHash), ended(3, 1, "Create", oldHash, "failed")) // not after 3
+	a, aHash := begun(t, 4, "Create", planBody("a"))
+	add(a, ran(5, "Create", aHash), ended(6, 4, "Create", aHash, "failed")) // failed after a step
+	b, bHash := begun(t, 7, "Create", planBody("b"))
+	add(b, ended(8, 7, "Create", bHash, "failed")) // failed before any step
+	c, cHash := begun(t, 9, "Update", planBody("c"))
+	add(c, ran(10, "Update", cHash), ended(11, 9, "Update", cHash, "interrupted")) // interrupted after a step
+	d, dHash := begun(t, 12, "Create", planBody("d"))
+	add(d, ran(13, "Create", dHash), ended(14, 12, "Create", dHash, outcomeSucceeded)) // succeeded
+	e, eHash := begun(t, 15, "Remediate", planBody("e"))
+	add(e, ran(16, "Remediate", eHash), ended(17, 15, "Remediate", eHash, "failed")) // not a Create or Update
+	f, fHash := begun(t, 18, "Update", planBody("f"))
+	add(f, ran(19, "Update", "sha256:another"), ended(20, 18, "Update", fHash, "failed")) // another subject's result
+	add(ran(21, "Create", bHash))                                                         // after b's phase.end: not b's step
+	g, gHash := begun(t, 22, "Update", planBody("g"))
+	add(g, ran(23, "Update", gHash)) // still open, or its end lost
+
+	got, err := PartialPlans(context.Background(), &fakeAuditor{pageSize: 2, entries: entries}, ref, 3)
+	if err != nil {
+		t.Fatalf("PartialPlans = %v", err)
+	}
+	want := []plan.Body{planBody("a"), planBody("c"), planBody("g")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PartialPlans = %v, want %v", got, want)
 	}
 }
 
-func TestPartialCreateNotFound(t *testing.T) {
-	for name, a := range map[string]*fakeAuditor{
-		"none":        {},
-		"no step ran": {entries: []*gatewayv1.AuditEntry{endedPhase(2, "Create", "sha256:one", "failed", 0)}},
-		"succeeded":   {entries: []*gatewayv1.AuditEntry{endedPhase(2, "Create", "sha256:one", outcomeSucceeded, 1)}},
-	} {
-		if _, _, found, err := PartialCreate(context.Background(), a, ref); found || err != nil {
-			t.Errorf("%s: PartialCreate = found %v, err %v, want not found", name, found, err)
-		}
+func TestPartialPlansGivesWhatATruncatedIndexHolds(t *testing.T) {
+	a, aHash := begun(t, 5, "Create", planBody("a"))
+	entries := []*gatewayv1.AuditEntry{ran(4, "Create", "sha256:lost"), a, ran(6, "Create", aHash)}
+	got, err := PartialPlans(context.Background(), &fakeAuditor{truncated: true, entries: entries}, ref, 0)
+	if err != nil || !reflect.DeepEqual(got, []plan.Body{planBody("a")}) {
+		t.Errorf("PartialPlans = %v, %v, want a", got, err)
 	}
-	if _, _, _, err := PartialCreate(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref); err == nil {
-		t.Error("PartialCreate hid a gateway error")
+	got, err = PartialPlans(context.Background(), &fakeAuditor{}, ref, 0)
+	if err != nil || len(got) != 0 {
+		t.Errorf("PartialPlans of no entries = %v, %v", got, err)
+	}
+}
+
+func TestPartialPlansRejectsAHashMismatch(t *testing.T) {
+	a, _ := begun(t, 1, "Create", planBody("a"))
+	a.SubjectHash = "sha256:other"
+	entries := []*gatewayv1.AuditEntry{a, ran(2, "Create", "sha256:other")}
+	if got, err := PartialPlans(context.Background(), &fakeAuditor{entries: entries}, ref, 0); err == nil {
+		t.Errorf("PartialPlans = %v, want an error", got)
+	}
+}
+
+func TestPartialPlansReturnsGatewayErrors(t *testing.T) {
+	if _, err := PartialPlans(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref, 0); err == nil {
+		t.Error("PartialPlans hid a gateway error")
+	}
+}
+
+func TestExecutedPhaseGivesTheBeginSeq(t *testing.T) {
+	entries := append(executedPhase(t, 1, "Create", planBody("p1"), outcomeSucceeded),
+		executedPhase(t, 3, "Update", planBody("p2"), "failed")...)
+	got, found, err := ExecutedPhase(context.Background(), &fakeAuditor{entries: entries}, ref)
+	if err != nil || !found || got.BeginSeq != 1 || !reflect.DeepEqual(got.Plan, planBody("p1")) || got.Hash != entries[0].GetSubjectHash() {
+		t.Errorf("ExecutedPhase = %+v, found %v, err %v; want p1 at 1", got, found, err)
 	}
 }
 

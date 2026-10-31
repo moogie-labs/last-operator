@@ -64,6 +64,29 @@ func TestTeardownMessageListsTheCommandsInOrder(t *testing.T) {
 	}
 }
 
+func TestTeardownMessageAsksForTeardownThatToleratesMissingObjects(t *testing.T) {
+	cmds := []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{"helm", "uninstall", webName}}}}
+	msg, err := TeardownMessage(Teardown{Namespace: teamNamespace, Name: webName, Text: runWeb, Commands: cmds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "--ignore-not-found") || !strings.Contains(msg, "tolerate") {
+		t.Errorf("teardown message does not ask for teardown that tolerates missing objects:\n%s", msg)
+	}
+	if strings.Contains(msg, "did not finish") {
+		t.Errorf("teardown message names unfinished plans when none contributed:\n%s", msg)
+	}
+	partial, err := TeardownMessage(Teardown{Namespace: teamNamespace, Name: webName, Text: runWeb, Commands: cmds, Partial: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Some of these commands come from plans that did not finish", "each exactly once", `"resources" are []`} {
+		if !strings.Contains(partial, want) {
+			t.Errorf("teardown message with partial plans lacks %q:\n%s", want, partial)
+		}
+	}
+}
+
 func updateBody() plan.Body {
 	return plan.Body{
 		Steps: []lastv1alpha1.Command{{ID: "s1", Run: lastv1alpha1.CommandRun{Argv: []string{kubectlBin, applyVerb, "-f", manifestPath}}}},

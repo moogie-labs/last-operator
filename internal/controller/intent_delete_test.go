@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -116,6 +117,12 @@ func eventNotes(key types.NamespacedName, reason string) []string {
 	return out
 }
 
+// withoutQueries drops the QueryAudit calls from a call log: the partial-plan
+// read scans command.result entries, which the fake logs.
+func withoutQueries(calls []string) []string {
+	return slices.DeleteFunc(slices.Clone(calls), func(c string) bool { return c == queryAudit })
+}
+
 func countOf(calls []string, call string) int {
 	n := 0
 	for _, c := range calls {
@@ -195,50 +202,135 @@ var _ = Describe("Intent deletion", func() {
 			deleteIntent(key)
 			Eventually(gone(key)).Should(BeTrue())
 			Expect(gw.calls(key)).To(Equal([]string{callLLM}))
-			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonPartialCreateNotTornDown))
+			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonNoTeardown))
 		})
 
 		It("when its failed Create ran no step, without a warning", func() {
-			failing := []lastv1alpha1.Command{argvStep("s1", "false")}
-			gw.setScript(key, &script{exit: map[string]int32{"s1": 1}, llm: turns(answer(failing), answer([]lastv1alpha1.Command{s1}))})
+			// A failed image build runs nothing, so the audit log holds no command.result.
+			gw.setScript(key, &script{buildLog: map[string]string{"s1": "E: boom"},
+				llm: turns(answer([]lastv1alpha1.Command{s1}, resources...), answer([]lastv1alpha1.Command{t1}))})
 			createIntent(key, "run web")
 			Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 			approve(key, lastv1alpha1.DecisionApprove)
-			Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{s1})))
+			Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{t1})))
 
 			deleteIntent(key)
 			Eventually(gone(key)).Should(BeTrue())
-			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonPartialCreateNotTornDown))
+			Expect(deleteRequests(key)).To(BeEmpty(), "no step ran, so there is nothing to tear down")
+			Expect(eventReasons(key, "Warning")).NotTo(ContainElement(ReasonNoTeardown))
 		})
 	})
 
-	It("warns when it releases an Intent whose failed Create ran steps", func() {
+	// partialCreate runs a Create whose second step fails after its first ran,
+	// and waits for the replanned Create to await approval; del answers Delete planning.
+	partialCreate := func(res []lastv1alpha1.ManagedResourceSpec, del llmFunc) string {
 		partial := []lastv1alpha1.Command{s1, argvStep("s2", "false")}
-		gw.setScript(key, &script{exit: map[string]int32{"s2": 1}, llm: turns(answer(partial), answer([]lastv1alpha1.Command{t1}))})
+		replanned := []lastv1alpha1.Command{argvStep("s3", argKubectl, "apply", "-f", "/work/fixed.yaml")}
+		gw.setScript(key, &script{exit: map[string]int32{"s2": 1},
+			llm: lifecycle(turns(answer(partial, res...), answer(replanned, res...)), del)})
 		createIntent(key, "run web")
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
 		approve(key, lastv1alpha1.DecisionApprove)
-		Eventually(planHash(key)).Should(Equal(hashOf([]lastv1alpha1.Command{t1})))
+		Eventually(planHash(key)).Should(Equal(hashOf(replanned, res...)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		return hashOf(partial, res...)
+	}
 
+	It("tears down a partial Create when deleted", func() {
+		partialCreate(resources, turns(deletePlan))
+		creation := len(gw.calls(key))
+		awaitingDelete()
+
+		By("asking the model to order the partial plan's teardown commands")
+		reqs := deleteRequests(key)
+		Expect(reqs).To(HaveLen(1))
+		first := requestText(reqs[0])
+		Expect(first).To(ContainSubstring(`"argv":["kubectl","delete","deployment","web"]`))
+		Expect(first).To(ContainSubstring(`"argv":["kubectl","delete","service","web"]`))
+		Expect(first).To(ContainSubstring("come from plans that did not finish"))
+		Expect(first).To(ContainSubstring("--ignore-not-found"))
+		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(teardown)))
+		Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval), "a Delete with no executed plan needs approval")
+		Expect(readyCondition(key).Message).To(ContainSubstring("for stage Delete"))
+		Expect(eventNotes(key, ReasonPartialTeardown)).To(ConsistOf(
+			"The teardown includes the teardown commands of 1 plans that did not finish"))
+		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM}), "nothing runs before the approval")
+
+		By("running the approved Delete plan, then releasing the Intent")
+		approveDelete(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM, beginPhase, runT2, runT1, endSucceeded}))
+		Expect(gw.authsOf(key)).To(Equal([]string{authApproval, authApproval}))
+	})
+
+	It("releases with NoTeardown when the partial plan has no teardown", func() {
+		partialCreate(nil, turns(deletePlan))
 		deleteIntent(key)
 		Eventually(gone(key)).Should(BeTrue())
-		Expect(deleteRequests(key)).To(BeEmpty(), "nothing executed, so there is nothing to order")
-		Eventually(func() []string { return eventNotes(key, ReasonPartialCreateNotTornDown) }).Should(ConsistOf(
-			"Create plan " + hashOf(partial) + " ran 1 steps and did not succeed; nothing was torn down"))
+		Expect(deleteRequests(key)).To(BeEmpty(), "no Delete planning")
+		Expect(eventReasons(key, "Warning")).To(ContainElement(ReasonNoTeardown))
+	})
+
+	It("unions the executed and partial teardowns, deduped, in order", func() {
+		t3 := argvStep("t3", argKubectl, "delete", "configmap", "web")
+		// The partial Update lists its resources in another order, and repeats two of the executed teardown commands.
+		updateResources := []lastv1alpha1.ManagedResourceSpec{
+			{Description: "ConfigMap web", Teardown: []lastv1alpha1.Command{t3}}, resources[1], resources[0],
+		}
+		partial := []lastv1alpha1.Command{argvStep("u1", argKubectl, "apply", "-f", "/work/cm.yaml"), argvStep("u2", "false")}
+		replanned := []lastv1alpha1.Command{argvStep("u3", argKubectl, "apply", "-f", "/work/cm-fixed.yaml")}
+		union := []lastv1alpha1.Command{t3, t2, t1}
+		executed(&script{exit: map[string]int32{"u2": 1}}, turns(answer(union)))
+		gw.updateScript(key, func(s *script) {
+			create := s.llm
+			update := turns(answer(partial, updateResources...), answer(replanned, updateResources...))
+			s.llm = func(req *gatewayv1.CallLLMRequest) (string, error) {
+				if revised(req) && !deleting(req) {
+					return update(req)
+				}
+				return create(req)
+			}
+		})
+		editRequest(key, "run web v2")
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		approveAs(key, lastv1alpha1.StageUpdate, lastv1alpha1.DecisionApprove)
+		Eventually(planHash(key)).Should(Equal(hashOf(replanned, updateResources...)))
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
+		creation := len(gw.calls(key))
+		awaitingDelete()
+
+		By("listing the executed plan's teardown first, in its order, then the partial plan's new command")
+		first := requestText(deleteRequests(key)[0])
+		deployment := strings.Index(first, `"argv":["kubectl","delete","deployment","web"]`)
+		service := strings.Index(first, `"argv":["kubectl","delete","service","web"]`)
+		configMap := strings.Index(first, `"argv":["kubectl","delete","configmap","web"]`)
+		Expect(deployment).To(BeNumerically(">", 0))
+		Expect(service).To(BeNumerically(">", deployment))
+		Expect(configMap).To(BeNumerically(">", service))
+		Expect(strings.Count(first, `"argv":["kubectl","delete","service","web"]`)).To(Equal(1), "deduped")
+		Expect(strings.Count(first, `"argv":["kubectl","delete","deployment","web"]`)).To(Equal(1), "deduped")
+		Expect(first).To(ContainSubstring("come from plans that did not finish"))
+		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(union)))
+		Expect(eventNotes(key, ReasonPartialTeardown)).To(ConsistOf(
+			"The teardown includes the teardown commands of 1 plans that did not finish"))
+
+		approveDelete(key)
+		Eventually(gone(key)).Should(BeTrue())
+		Expect(withoutQueries(gw.calls(key)[creation:])).To(Equal([]string{callLLM, beginPhase, "RunCommand:t3", runT2, runT1, endSucceeded}))
 	})
 
 	It("holds the release of an Intent that never executed while the audit log cannot be read", func() {
 		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{s1}))})
 		createIntent(key, "run web")
 		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseAwaitingApproval))
-		// The executed-plan read scans phase.begin, then phase.end; the partial-Create
-		// read scans phase.end again: fail only that second phase.end read.
+		// The executed-plan read scans phase.begin, then phase.end; the partial-plan
+		// read scans phase.begin again: fail only that second phase.begin read.
 		previous := ""
 		gw.updateScript(key, func(s *script) {
 			s.queryHook = func(types []string) error {
 				typ := strings.Join(types, ",")
 				defer func() { previous = typ }()
-				if typ == audit.TypePhaseEnd && previous == audit.TypePhaseEnd {
+				if typ == audit.TypePhaseBegin && previous == audit.TypePhaseEnd {
 					return status.Error(codes.Unavailable, "audit log unavailable")
 				}
 				return nil

@@ -133,6 +133,13 @@ type IntentStatus struct {
 	// Intent last became Ready, resets it to 0.
 	// +optional
 	Remediations int32 `json:"remediations,omitempty"`
+	// RemediationTimes holds the start times, in RFC 3339, of the remediations
+	// started in the last 24 hours, drift-started and retried alike; older ones
+	// are dropped. With 6 in the window, the next remediation fails the Intent
+	// with RemediationFailed instead of starting. A spec edit clears it; a
+	// passing scheduled probe run does not.
+	// +optional
+	RemediationTimes []string `json:"remediationTimes,omitempty"`
 	// EffectiveModes is the Auto or Manual mode each stage key resolved to across
 	// the policy layers and spec.modes.
 	// +optional

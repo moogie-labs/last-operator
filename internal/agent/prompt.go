@@ -138,13 +138,16 @@ func FirstMessage(r Request) string {
 	return b.String()
 }
 
-// Teardown is what a Delete planning session starts from (design D6): the
-// teardown commands of what the Intent's executed plan created, in resource order.
+// Teardown is what a Delete planning session starts from (design D6, M6
+// design §5.1): the teardown commands of what the Intent's executed plan
+// created, in resource order, then those of the plans that ran steps and did
+// not finish.
 type Teardown struct {
 	Namespace, Name string
 	Text            string // spec.request
 	Commands        []lastv1alpha1.Command
 	Feedback        string // why the previous teardown failed, if it did
+	Partial         bool   // some commands come from plans that did not finish
 }
 
 // TeardownMessage is a Delete planning session's first user message: the
@@ -152,7 +155,12 @@ type Teardown struct {
 func TeardownMessage(t Teardown) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Intent %s/%s, in namespace %s, is being deleted.\n\nIts request was:\n%s\n\n", t.Namespace, t.Name, t.Namespace, t.Text)
-	b.WriteString("Tear down what its executed plan created. These are the teardown commands of its resources, in resource order:\n")
+	if t.Partial {
+		b.WriteString("Tear down what its plans created. These are the teardown commands of their resources, in resource order. " +
+			"Some of these commands come from plans that did not finish, which may not have created everything:\n")
+	} else {
+		b.WriteString("Tear down what its executed plan created. These are the teardown commands of its resources, in resource order:\n")
+	}
 	for i, c := range t.Commands {
 		raw, err := json.Marshal(commandToWire(c))
 		if err != nil {
@@ -163,7 +171,9 @@ func TeardownMessage(t Teardown) (string, error) {
 	b.WriteString("\nAnswer with a plan turn whose \"steps\" are these commands, each exactly once, in the order that " +
 		"tears things down safely, and whose \"resources\" are []. Copy every command as given; you may change only an " +
 		"id, and the ids must be unique among the steps. Add, drop or change no command: a human approves the plan, and " +
-		"any other plan is refused. The summary says what the teardown removes.\n")
+		"any other plan is refused. The summary says what the teardown removes.\n" +
+		"Some objects may already be gone, or may never have been created by a plan that stopped part way, so the " +
+		"teardown must tolerate missing objects, as commands with --ignore-not-found do.\n")
 	if t.Feedback != "" {
 		fmt.Fprintf(&b, "\nThe previous teardown failed and was not completed:\n%s\n"+
 			"Order the commands again; the teardown must succeed from the cluster's current state.\n", t.Feedback)

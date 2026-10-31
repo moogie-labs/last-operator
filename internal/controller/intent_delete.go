@@ -67,7 +67,7 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 	}
 	switch {
 	case td.source == teardownNone:
-		return ctrl.Result{}, r.releaseUnexecuted(ctx, in, "Nothing ever executed")
+		return ctrl.Result{}, r.release(ctx, in, "Nothing ever executed")
 	case len(td.commands) == 0:
 		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonNoTeardown, "Teardown", "%s",
 			"What the Intent created has no teardown commands; nothing was torn down")
@@ -75,6 +75,10 @@ func (r *IntentReconciler) beginDelete(ctx context.Context, in *lastv1alpha1.Int
 	case td.source == teardownManaged:
 		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonExecutedPlanNotFound, "Teardown", "%s",
 			"The executed plan was not found in the audit log; the teardown comes from the ManagedResources' teardown commands")
+	}
+	if td.partials > 0 {
+		r.Recorder.Eventf(in, nil, corev1.EventTypeNormal, ReasonPartialTeardown, "Teardown",
+			"The teardown includes the teardown commands of %d plans that did not finish", td.partials)
 	}
 	return ctrl.Result{}, r.startDelete(ctx, in, feedback, cause)
 }
@@ -162,14 +166,11 @@ func (r *IntentReconciler) planTeardown(ctx context.Context, in *lastv1alpha1.In
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	switch {
-	case td.source == teardownNone:
-		return ctrl.Result{}, r.releaseUnexecuted(ctx, in, "Nothing left to tear down")
-	case len(td.commands) == 0:
+	if len(td.commands) == 0 {
 		return ctrl.Result{}, r.release(ctx, in, "Nothing left to tear down")
 	}
 	first, err := agent.TeardownMessage(agent.Teardown{Namespace: in.Namespace, Name: in.Name, Text: in.Spec.Request,
-		Commands: td.commands, Feedback: replanFeedback(in)})
+		Commands: td.commands, Feedback: replanFeedback(in), Partial: td.partials > 0})
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, in, ReasonPlanningFailed, err.Error()+"; "+retryTeardownHint)
 	}
@@ -190,39 +191,83 @@ func (r *IntentReconciler) planTeardown(ctx context.Context, in *lastv1alpha1.In
 type teardownSource int
 
 const (
-	teardownNone     teardownSource = iota // nothing executed, and no ManagedResource exists
+	teardownNone     teardownSource = iota // nothing executed or partly ran, and no ManagedResource exists
 	teardownExecuted                       // the executed plan, from the audit log (D3)
 	teardownManaged                        // the ManagedResources, the audit log no longer holding the executed plan (§3.3)
+	teardownPartial                        // only plans that ran steps and did not finish (M6 design §5.1)
 )
 
+// teardownPlan is what a Delete tears down: source says where its first
+// commands come from, and partials how many unfinished plans added commands
+// after them.
 type teardownPlan struct {
 	source   teardownSource
+	partials int
 	commands []lastv1alpha1.Command
 }
 
-// teardown returns the commands that tear down what the Intent created, in
-// resource order. They come from the executed plan the audit log holds, never
-// from status (design §7). When the audit log does not hold it, the Intent's
-// ManagedResources supply theirs.
+// teardown returns the commands that tear down what the Intent created (M6
+// design §5.1): the executed plan's teardown commands, in resource order, then
+// those of every partial plan newer than it, oldest first, leaving out each
+// command already there by plan.CommandKey. They come from the audit log,
+// never from status (design §7). When the audit log does not hold the executed
+// plan, the Intent's ManagedResources supply theirs.
 func (r *IntentReconciler) teardown(ctx context.Context, in *lastv1alpha1.Intent) (teardownPlan, error) {
-	body, _, found, err := agent.ExecutedPlan(ctx, r.Gateway, intentRef(in))
+	executed, found, err := agent.ExecutedPhase(ctx, r.Gateway, intentRef(in))
 	if err != nil {
 		return teardownPlan{}, err
 	}
-	if found {
-		td := teardownPlan{source: teardownExecuted}
-		for _, res := range body.Resources {
+	var td teardownPlan
+	switch {
+	case found:
+		td.source = teardownExecuted
+		for _, res := range executed.Plan.Resources {
 			td.commands = append(td.commands, res.Teardown...)
 		}
-		return td, nil
+	default:
+		mrs, err := r.ownedManagedResources(ctx, in)
+		if err != nil {
+			return teardownPlan{}, err
+		}
+		if len(mrs) > 0 {
+			td.source = teardownManaged
+		}
+		for _, mr := range mrs {
+			td.commands = append(td.commands, mr.Spec.Teardown...)
+		}
 	}
-	mrs, err := r.ownedManagedResources(ctx, in)
-	if err != nil || len(mrs) == 0 {
+	partials, err := agent.PartialPlans(ctx, r.Gateway, intentRef(in), executed.BeginSeq)
+	if err != nil {
 		return teardownPlan{}, err
 	}
-	td := teardownPlan{source: teardownManaged}
-	for _, mr := range mrs {
-		td.commands = append(td.commands, mr.Spec.Teardown...)
+	if td.source == teardownNone && len(partials) > 0 {
+		td.source = teardownPartial
+	}
+	// The executed teardown stays as it is, so that a Delete of it alone is
+	// still the permutation D9 checks; partial plans add only what is new.
+	seen := map[string]bool{}
+	for _, c := range td.commands {
+		if k, err := plan.CommandKey(c); err == nil {
+			seen[k] = true
+		}
+	}
+	for _, p := range partials {
+		added := false
+		for _, res := range p.Resources {
+			for _, c := range res.Teardown {
+				// A command that cannot be encoded is kept, and teardownCheck reports it.
+				if k, err := plan.CommandKey(c); err == nil {
+					if seen[k] {
+						continue
+					}
+					seen[k] = true
+				}
+				td.commands, added = append(td.commands, c), true
+			}
+		}
+		if added {
+			td.partials++
+		}
 	}
 	return td, nil
 }
@@ -360,25 +405,6 @@ func (r *IntentReconciler) release(ctx context.Context, in *lastv1alpha1.Intent,
 func (r *IntentReconciler) teardownBlocked(in *lastv1alpha1.Intent, err error) {
 	r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonTeardownBlocked, "Teardown",
 		"Could not read what the Intent executed, so the deletion waits and is retried: %s", describe(err))
-}
-
-// releaseUnexecuted releases an Intent with no executed plan and no
-// ManagedResources (D6). A Create phase that ran steps and then failed may still
-// have created something no teardown covers, so the release warns about it. An
-// audit read error is returned, so the release is retried, never skipped.
-func (r *IntentReconciler) releaseUnexecuted(ctx context.Context, in *lastv1alpha1.Intent, why string) error {
-	subject, steps, found, err := agent.PartialCreate(ctx, r.Gateway, intentRef(in))
-	if err != nil {
-		r.teardownBlocked(in, err)
-		return err
-	}
-	if found {
-		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonPartialCreateNotTornDown, "Teardown",
-			"Create plan %s ran %d steps and did not succeed; nothing was torn down", subject, steps)
-		logf.FromContext(ctx).Info("Found a failed Create plan that ran steps; nothing was torn down",
-			"plan", subject, "stepsRun", steps)
-	}
-	return r.release(ctx, in, why)
 }
 
 // ensureFinalizer adds the teardown finalizer before the Intent's first Create

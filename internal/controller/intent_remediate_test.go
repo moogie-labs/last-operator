@@ -192,6 +192,8 @@ var _ = Describe("Intent remediation", func() {
 		Expect(countOf(gw.calls(key), callLLM)).To(Equal(1), "no Remediate is planned")
 		Expect(planHash(key)()).To(Equal(createHash))
 		Expect(remediations()).To(BeZero())
+		Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(1),
+			"the drift's start is counted in the window, and DriftCleared neither adds nor removes an entry")
 		Expect(meta.IsStatusConditionTrue(getMR(key.Namespace, "web-0").Status.Conditions, CondInSync)).To(BeTrue())
 	})
 
@@ -235,6 +237,46 @@ var _ = Describe("Intent remediation", func() {
 		Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
 		Expect(readyCondition(key).Message).To(ContainSubstring("3 consecutive remediations"))
 		Expect(countOf(gw.calls(key), callLLM)).To(Equal(calls), "nothing is planned")
+	})
+
+	// passingRun runs a scheduled probe run in which every probe passes, at
+	// hours past the real clock, and waits for it to reset status.remediations.
+	passingRun := func(hours int) {
+		mr := &ManagedResourceReconciler{Client: k8sClient, Reader: k8sClient, Scheme: scheme.Scheme, Gateway: gw,
+			Now:    func() time.Time { return time.Now().Add(time.Duration(hours) * time.Hour) },
+			Jitter: func() float64 { return -0.1 }} // the overdue first run is due at once
+		_, err := mr.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(remediations).Should(BeZero())
+	}
+
+	It("fails RemediationFailed at the seventh remediation in 24h, even with passing runs between them", func() {
+		ready(&script{})
+		subject := ""
+		for i := 1; i <= 6; i++ {
+			subject = remediate(subject)
+			Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(i))
+			passingRun(i)
+			Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(i), "a passing scheduled run keeps the window")
+		}
+		calls := countOf(gw.calls(key), callLLM)
+		drift()
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseFailed))
+		Expect(readyReason(key)).To(Equal(ReasonRemediationFailed))
+		Expect(readyCondition(key).Message).To(ContainSubstring("6 remediations in 24h"))
+		Expect(countOf(gw.calls(key), callLLM)).To(Equal(calls), "nothing is planned")
+		Expect(remediateBegins(key)).To(Equal(6))
+		Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(6))
+	})
+
+	It("clears remediationTimes on a spec edit", func() {
+		ready(&script{})
+		remediate("")
+		Expect(getIntent(key).Status.RemediationTimes).To(HaveLen(1))
+
+		editRequest(key, "provision v2")
+		Eventually(planHash(key)).Should(Equal(updateHash))
+		Expect(getIntent(key).Status.RemediationTimes).To(BeEmpty())
 	})
 
 	// unrepaired approves the Remediate plan other than previous without
@@ -457,6 +499,126 @@ var _ = Describe("Intent remediation", func() {
 		got := stored()
 		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseReady), "a Ready Intent is never failed at the cap")
 		Expect(got.Status.Remediations).To(Equal(int32(3)))
+	})
+
+	// windowNow is the fixed clock of the window specs below, which run the
+	// reconciler against a fake client.
+	windowNow := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	stamps := func(ages ...time.Duration) []string {
+		out := make([]string, 0, len(ages))
+		for _, a := range ages {
+			out = append(out, windowNow.Add(-a).Format(time.RFC3339))
+		}
+		return out
+	}
+	// full holds six starts within 24h, after one that is older.
+	full := stamps(25*time.Hour, 23*time.Hour, 20*time.Hour, 10*time.Hour, 5*time.Hour, 2*time.Hour, time.Hour)
+	// windowed stores an Intent whose status change sets in a fake client, and
+	// returns the client, a reader of the stored Intent, and the Intent as stored.
+	windowed := func(ns string, change func(*lastv1alpha1.IntentStatus)) (client.WithWatch, func() *lastv1alpha1.Intent, *lastv1alpha1.Intent) {
+		in := &lastv1alpha1.Intent{ObjectMeta: metav1.ObjectMeta{Name: intentName, Namespace: ns, Generation: 1},
+			Spec: lastv1alpha1.IntentSpec{Request: "provision web"}}
+		fc := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(in).WithStatusSubresource(in).Build()
+		stored := func() *lastv1alpha1.Intent {
+			var got lastv1alpha1.Intent
+			Expect(fc.Get(ctx, client.ObjectKeyFromObject(in), &got)).To(Succeed())
+			return &got
+		}
+		cur := stored()
+		cur.Status = lastv1alpha1.IntentStatus{ObservedGeneration: cur.Generation, Stage: lastv1alpha1.StageCreate}
+		change(&cur.Status)
+		Expect(fc.Status().Update(ctx, cur)).To(Succeed())
+		return fc, stored, stored()
+	}
+	// reconcilerOn is an IntentReconciler on c and the fixed clock.
+	reconcilerOn := func(c client.Client) *IntentReconciler {
+		return &IntentReconciler{Client: c, Reader: c, Scheme: scheme.Scheme, Gateway: gw,
+			Recorder: events.NewFakeRecorder(10), RetryDelay: time.Millisecond, Now: func() time.Time { return windowNow }}
+	}
+
+	It("starts a remediation with five in the window and records its start, dropping the old ones", func() {
+		fc, stored, in := windowed("window-five", func(st *lastv1alpha1.IntentStatus) {
+			st.Phase, st.RemediationTimes = lastv1alpha1.PhaseDrifted, full[:6]
+		})
+		_, err := reconcilerOn(fc).startRemediate(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhasePlanning))
+		Expect(got.Status.RemediationTimes).To(Equal(append(slices.Clone(full[1:6]), windowNow.Format(time.RFC3339))))
+	})
+
+	It("fails a drift with six in the window without starting", func() {
+		fc, stored, in := windowed("window-drift", func(st *lastv1alpha1.IntentStatus) {
+			st.Phase, st.RemediationTimes = lastv1alpha1.PhaseDrifted, full
+		})
+		_, err := reconcilerOn(fc).startRemediate(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseFailed))
+		c := meta.FindStatusCondition(got.Status.Conditions, CondReady)
+		Expect(c.Reason).To(Equal(ReasonRemediationFailed))
+		Expect(c.Message).To(ContainSubstring("6 remediations in 24h"))
+		Expect(got.Status.Remediations).To(BeZero())
+		Expect(got.Status.RemediationTimes).To(Equal(full[1:]), "pruned, and nothing appended")
+	})
+
+	It("fails a retry that finds the window full without starting, and counts the retry so the backoff grows", func() {
+		failedAt := metav1.NewTime(windowNow.Add(-2 * time.Hour))
+		fc, stored, in := windowed("window-retry", func(st *lastv1alpha1.IntentStatus) {
+			st.Phase, st.RemediationTimes, st.Retries = lastv1alpha1.PhaseFailed, full, 2
+			st.Conditions = []metav1.Condition{{Type: CondReady, Status: metav1.ConditionFalse, Reason: ReasonRemediationFailed,
+				Message: "6 remediations in 24h", LastTransitionTime: failedAt}}
+		})
+		_, err := reconcilerOn(fc).retry(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseFailed))
+		Expect(got.Status.Stage).To(Equal(lastv1alpha1.StageCreate), "no Remediate session started")
+		c := meta.FindStatusCondition(got.Status.Conditions, CondReady)
+		Expect(c.Reason).To(Equal(ReasonRemediationFailed))
+		Expect(c.Message).To(ContainSubstring("6 remediations in 24h"))
+		Expect(c.LastTransitionTime.Time).To(BeTemporally("==", windowNow), "the backoff counts from this failure")
+		Expect(got.Status.Retries).To(Equal(int32(3)), "the next automatic retry waits longer")
+		Expect(got.Status.RemediationTimes).To(Equal(full[1:]))
+	})
+
+	It("counts a retried remediation in the window", func() {
+		fc, stored, in := windowed("window-retry-starts", func(st *lastv1alpha1.IntentStatus) {
+			st.Phase, st.RemediationTimes = lastv1alpha1.PhaseFailed, full[:3]
+			st.Conditions = []metav1.Condition{{Type: CondReady, Status: metav1.ConditionFalse, Reason: ReasonRemediationFailed,
+				Message: "step r1 exited 1", LastTransitionTime: metav1.NewTime(windowNow.Add(-time.Hour))}}
+		})
+		_, err := reconcilerOn(fc).retry(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhasePlanning))
+		Expect(got.Status.Stage).To(Equal(lastv1alpha1.StageRemediate))
+		Expect(got.Status.RemediationTimes).To(Equal(append(slices.Clone(full[1:3]), windowNow.Format(time.RFC3339))))
+	})
+
+	It("fails at the window cap even when a conflict retry finds it newly full", func() {
+		base, stored, stale := windowed("window-conflict", func(st *lastv1alpha1.IntentStatus) {
+			st.Phase, st.RemediationTimes = lastv1alpha1.PhaseDrifted, full[1:6] // five: the stale read starts one
+		})
+		// Another remediation's start was recorded meanwhile.
+		changes := []func(*lastv1alpha1.Intent){func(in *lastv1alpha1.Intent) { in.Status.RemediationTimes = full[1:] }}
+		fc := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if len(changes) > 0 {
+					cur := stored()
+					changes[0](cur)
+					changes = changes[1:]
+					Expect(c.Status().Update(ctx, cur)).To(Succeed())
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		})
+		_, err := reconcilerOn(fc).startRemediate(ctx, stale)
+		Expect(err).NotTo(HaveOccurred())
+		got := stored()
+		Expect(got.Status.Phase).To(Equal(lastv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, CondReady).Reason).To(Equal(ReasonRemediationFailed))
+		Expect(got.Status.RemediationTimes).To(Equal(full[1:]), "never seven")
 	})
 
 	It("resets remediations after a fully passing scheduled probe run", func() {

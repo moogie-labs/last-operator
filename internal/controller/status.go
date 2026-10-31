@@ -63,9 +63,9 @@ const (
 	ReasonExecutedPlanNotFound = "ExecutedPlanNotFound"
 	// ReasonNoTeardown warns that what the Intent created has no teardown commands.
 	ReasonNoTeardown = "NoTeardown"
-	// ReasonPartialCreateNotTornDown warns that a Create plan that ran steps and
-	// failed left no executed plan, so the Intent is released with nothing torn down.
-	ReasonPartialCreateNotTornDown = "PartialCreateNotTornDown"
+	// ReasonPartialTeardown notes that the teardown includes the teardown
+	// commands of Create or Update plans that ran steps and did not finish.
+	ReasonPartialTeardown = "PartialTeardown"
 	// ReasonTeardownBlocked warns that what the Intent executed could not be read,
 	// so its deletion waits and is retried.
 	ReasonTeardownBlocked = "TeardownBlocked"

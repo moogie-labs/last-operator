@@ -666,6 +666,16 @@ spec:
                   - text
                   type: object
                 type: array
+              remediationTimes:
+                description: |-
+                  RemediationTimes holds the start times, in RFC 3339, of the remediations
+                  started in the last 24 hours, drift-started and retried alike; older ones
+                  are dropped. With 6 in the window, the next remediation fails the Intent
+                  with RemediationFailed instead of starting. A spec edit clears it; a
+                  passing scheduled probe run does not.
+                items:
+                  type: string
+                type: array
               remediations:
                 description: |-
                   Remediations counts the consecutive remediations drift started. At 3,

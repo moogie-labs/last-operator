@@ -103,32 +103,44 @@ func UsedPlans(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (map[st
 	return used, nil
 }
 
+// Executed is the plan an Intent last executed successfully: its body and
+// hash, and the sequence number of its phase.begin.
+type Executed struct {
+	Plan     plan.Body
+	Hash     string
+	BeginSeq uint64
+}
+
 // ExecutedPlan returns the plan the Intent last executed successfully, and its
-// hash: the plan in the newest phase.begin with stage Create or Update whose
-// phase.end, paired by beginSeq, has outcome succeeded. Remediate, Discovery
-// and Delete phases never count. found is false when no such phase is visible.
+// hash (ExecutedPhase).
+func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (plan.Body, string, bool, error) {
+	e, found, err := ExecutedPhase(ctx, a, ref)
+	return e.Plan, e.Hash, found, err
+}
+
+// ExecutedPhase returns the plan the Intent last executed successfully: the
+// plan in the newest phase.begin with stage Create or Update whose phase.end,
+// paired by beginSeq, has outcome succeeded. Remediate, Discovery and Delete
+// phases never count. found is false when no such phase is visible.
 // Truncation does not hide a visible one: the index drops the oldest entries
 // first and the phases of one Intent never overlap, so a visible succeeded pair
 // is newer than any dropped one, and the gateway keeps the executed plan's pair
 // in the index. A plan that does not hash to its entry's subject is an error.
 // Gateway errors are returned unchanged.
-func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (plan.Body, string, bool, error) {
+func ExecutedPhase(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (Executed, bool, error) {
 	begins := map[uint64]*gatewayv1.AuditEntry{}
 	_, err := scan(ctx, a, ref, audit.TypePhaseBegin, 0, func(e *gatewayv1.AuditEntry) {
-		if stage := e.GetStage(); stage == string(lastv1alpha1.StageCreate) || stage == string(lastv1alpha1.StageUpdate) {
+		if changesWhatIsManaged(e) {
 			begins[e.GetSeq()] = e
 		}
 	})
 	if err != nil {
-		return plan.Body{}, "", false, err
+		return Executed{}, false, err
 	}
 	var newest *gatewayv1.AuditEntry
 	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
-		var end struct {
-			BeginSeq uint64 `json:"beginSeq"`
-			Outcome  string `json:"outcome"`
-		}
-		if json.Unmarshal(e.GetPayload(), &end) != nil || end.Outcome != outcomeSucceeded {
+		end, ok := readEnd(e)
+		if !ok || end.Outcome != outcomeSucceeded {
 			return
 		}
 		// An end whose begin is not in the scan, lost to truncation, is skipped.
@@ -137,51 +149,119 @@ func ExecutedPlan(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (pla
 		}
 	})
 	if err != nil {
-		return plan.Body{}, "", false, err
+		return Executed{}, false, err
 	}
 	if newest == nil {
-		return plan.Body{}, "", false, nil
+		return Executed{}, false, nil
 	}
+	body, err := beginPlan(newest)
+	if err != nil {
+		return Executed{}, false, err
+	}
+	return Executed{Plan: body, Hash: newest.GetSubjectHash(), BeginSeq: newest.GetSeq()}, true, nil
+}
+
+// PartialPlans returns the plans of the Intent's partial phases, oldest first
+// (M6 design §5.1): Create or Update phases whose phase.begin is after
+// sequence number after, that have no phase.end with outcome succeeded, and
+// that ran a step, which is a command.result for the phase's subject after its
+// phase.begin and before its phase.end, if it has one. That also catches a
+// phase closed as interrupted, or one whose end is not in the log. Each plan is
+// read from its phase.begin; one that does not hash to its entry's subject is
+// an error. A truncated index gives what it still holds. Gateway errors are
+// returned unchanged.
+func PartialPlans(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, after uint64) ([]plan.Body, error) {
+	var begins []*gatewayv1.AuditEntry
+	_, err := scan(ctx, a, ref, audit.TypePhaseBegin, after, func(e *gatewayv1.AuditEntry) {
+		if changesWhatIsManaged(e) {
+			begins = append(begins, e)
+		}
+	})
+	if err != nil || len(begins) == 0 {
+		return nil, err
+	}
+	type closed struct {
+		seq       uint64
+		succeeded bool
+	}
+	ends := map[uint64]closed{} // beginSeq → its phase.end
+	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, after, func(e *gatewayv1.AuditEntry) {
+		if end, ok := readEnd(e); ok {
+			ends[end.BeginSeq] = closed{seq: e.GetSeq(), succeeded: end.Outcome == outcomeSucceeded}
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	results := map[string][]uint64{} // subject → sequence numbers of its command.result entries
+	_, err = scan(ctx, a, ref, audit.TypeCommandResult, after, func(e *gatewayv1.AuditEntry) {
+		results[e.GetSubjectHash()] = append(results[e.GetSubjectHash()], e.GetSeq())
+	})
+	if err != nil {
+		return nil, err
+	}
+	var plans []plan.Body
+	for _, b := range begins {
+		end, ended := ends[b.GetSeq()]
+		if end.succeeded {
+			continue
+		}
+		ran := slices.ContainsFunc(results[b.GetSubjectHash()], func(seq uint64) bool {
+			return seq > b.GetSeq() && (!ended || seq < end.seq)
+		})
+		if !ran {
+			continue
+		}
+		body, err := beginPlan(b)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, body)
+	}
+	return plans, nil
+}
+
+// changesWhatIsManaged reports whether a phase.begin opens a Create or an
+// Update, the phases whose plans change what the Intent manages.
+func changesWhatIsManaged(e *gatewayv1.AuditEntry) bool {
+	stage := e.GetStage()
+	return stage == string(lastv1alpha1.StageCreate) || stage == string(lastv1alpha1.StageUpdate)
+}
+
+// phaseEnd is the part of a phase.end payload that pairs it with its
+// phase.begin and says how the phase ended.
+type phaseEnd struct {
+	BeginSeq uint64 `json:"beginSeq"`
+	Outcome  string `json:"outcome"`
+}
+
+// readEnd decodes a phase.end entry's payload.
+func readEnd(e *gatewayv1.AuditEntry) (phaseEnd, bool) {
+	var end phaseEnd
+	return end, json.Unmarshal(e.GetPayload(), &end) == nil
+}
+
+// beginPlan returns the plan a phase.begin entry holds, which must hash to the
+// entry's subject.
+func beginPlan(e *gatewayv1.AuditEntry) (plan.Body, error) {
 	var p struct {
 		Plan string `json:"plan"`
 	}
 	var body plan.Body
-	if err := json.Unmarshal(newest.GetPayload(), &p); err != nil {
-		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d: %w", newest.GetSeq(), err)
+	if err := json.Unmarshal(e.GetPayload(), &p); err != nil {
+		return plan.Body{}, fmt.Errorf("agent: phase.begin %d: %w", e.GetSeq(), err)
 	}
 	if err := json.Unmarshal([]byte(p.Plan), &body); err != nil {
-		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d holds an unreadable plan: %w", newest.GetSeq(), err)
+		return plan.Body{}, fmt.Errorf("agent: phase.begin %d holds an unreadable plan: %w", e.GetSeq(), err)
 	}
 	hash, err := plan.Hash(body)
 	if err != nil {
-		return plan.Body{}, "", false, fmt.Errorf("agent: phase.begin %d: %w", newest.GetSeq(), err)
+		return plan.Body{}, fmt.Errorf("agent: phase.begin %d: %w", e.GetSeq(), err)
 	}
-	if hash != newest.GetSubjectHash() {
-		return plan.Body{}, "", false, fmt.Errorf("agent: the plan in phase.begin %d hashes to %s, not its subject %s", newest.GetSeq(), hash, newest.GetSubjectHash())
+	if hash != e.GetSubjectHash() {
+		return plan.Body{}, fmt.Errorf("agent: the plan in phase.begin %d hashes to %s, not its subject %s", e.GetSeq(), hash, e.GetSubjectHash())
 	}
-	return body, hash, true, nil
-}
-
-// PartialCreate reports the newest Create phase that did not succeed but ran
-// steps, which may have created something: the subject of its phase.end and the
-// stepsRun it records. A truncated index gives what it still holds. Gateway
-// errors are returned unchanged.
-func PartialCreate(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef) (subject string, stepsRun int, found bool, err error) {
-	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
-		var end struct {
-			Outcome  string `json:"outcome"`
-			StepsRun int    `json:"stepsRun"`
-		}
-		if e.GetStage() != string(lastv1alpha1.StageCreate) || json.Unmarshal(e.GetPayload(), &end) != nil ||
-			end.Outcome == outcomeSucceeded || end.StepsRun <= 0 {
-			return
-		}
-		subject, stepsRun, found = e.GetSubjectHash(), end.StepsRun, true
-	})
-	if err != nil {
-		return "", 0, false, err
-	}
-	return subject, stepsRun, found, nil
+	return body, nil
 }
 
 // ErrNoReload means the audit log no longer holds the whole planning session,
@@ -283,11 +363,7 @@ func PhaseSucceeded(ctx context.Context, a Auditor, ref *gatewayv1.IntentRef, st
 	}
 	found := false
 	_, err = scan(ctx, a, ref, audit.TypePhaseEnd, 0, func(e *gatewayv1.AuditEntry) {
-		var end struct {
-			BeginSeq uint64 `json:"beginSeq"`
-			Outcome  string `json:"outcome"`
-		}
-		if json.Unmarshal(e.GetPayload(), &end) == nil && end.Outcome == outcomeSucceeded && begins[end.BeginSeq] {
+		if end, ok := readEnd(e); ok && end.Outcome == outcomeSucceeded && begins[end.BeginSeq] {
 			found = true
 		}
 	})
