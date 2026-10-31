@@ -57,6 +57,8 @@
   - when recording a plan, the operator writes `status.plan.uncoveredSteps` (step IDs, in plan order) from an uncached read of the rules;
   - a fully covered plan, or a covered discovery command, skips the wait with the message suffix `" without approval (allow rules)"`;
   - `autoRun` recognizes both suffixes.
+- **R14 (added after Task 3's review): plan coverage includes probes and teardown.** Rules authorize a Create or Update plan only when every step, every `resources[].probes[].command` (matched at the plan's stage) and every `resources[].teardown` command (matched at stage `Delete`) is covered. `uncoveredSteps` entries are `<stepID>`, `probe:<probeID>` and `teardown:<resourceIndex>.<i>`. `internal/rules.PlanCoverage(rules []Rule, stage Stage, body plan.Body) (covered map[string]Ref, uncovered []string)` computes it, and the gateway, operator and CLI all use it.
+- **R15 (added after Task 3's review): Create and Update are one class for rule stages.** A rule listing Create or Update covers both.
 - **R10–R13, the CLI:**
   - `kubectl last approve <intent> --always-allow [--stages S,…] [--cluster]` and the interactive prompt offer, for each uncovered step, Exact, Generalized (editable) or Just this once;
   - rules are created as the approver, then the `IntentApproval` is created;
