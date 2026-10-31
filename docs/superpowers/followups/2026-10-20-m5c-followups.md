@@ -55,7 +55,6 @@ Deferred items from the task reviews and final review of `docs/superpowers/plans
   - `checkAutoAudit` asserting the initial Create's `auto/create`.
 - **The gauge-deletion test** re-creates the series it checks.
 - **e2e audit reads:** scope them by key range, and pass the object version to `Get` to halve the requests.
-- **`bin/golangci-lint` can't load Go 1.27.3 export data** on this machine (a "typecheck" error). Rebuild it with the current toolchain.
 
 ## Carried
 

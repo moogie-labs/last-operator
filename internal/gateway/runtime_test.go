@@ -187,7 +187,10 @@ func TestRunWaitsForLeadDrainBeforeReturning(t *testing.T) {
 	}
 	release()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return after the in-flight RPC finished")
 	}
