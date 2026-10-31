@@ -27,6 +27,7 @@ func TestGeneralize(t *testing.T) {
 			[]string{"kubectl", "get", "pods", "--namespace=*", "-o=*"}},
 		{"flag followed by flag has no value", []string{"git", "commit", "-a", "-m", "msg"},
 			[]string{"git", "commit", "-a", "-m", "*"}},
+		{"path value", []string{"kubectl", "apply", "-f", "/tmp/x"}, []string{"kubectl", "apply", "-f", "*"}},
 		{"argv0 only", []string{"ls"}, []string{"ls"}},
 		{"trailing flag", []string{"ls", "-l"}, []string{"ls", "-l"}},
 		{"later positionals", []string{"cp", "a", "b", "c", "d"}, []string{"cp", "a", "b", "*", "*"}},
