@@ -185,15 +185,15 @@ type choice struct {
 // approver chooses, as the user. It creates nothing until every choice is made,
 // and stops at the first rule it cannot create. p is nil unless opts.mode prompts.
 func alwaysAllow(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *lastv1alpha1.Intent,
-	stage lastv1alpha1.Stage, opts allowOpts) error {
+	stage lastv1alpha1.Stage, opts allowOpts) (made []string, err error) {
 	rs, err := readRules(ctx, k, in.Namespace)
 	if err != nil {
-		return fmt.Errorf("compute what the rules cover: %w", err)
+		return nil, fmt.Errorf("compute what the rules cover: %w", err)
 	}
 	_, uncovered := coverageOf(in, stage, rs)
 	if len(uncovered) == 0 {
 		writeln(w, "Every command is already covered by an allow rule; there is nothing to add.")
-		return nil
+		return nil, nil
 	}
 	all := entriesOf(in, stage)
 	var chosen []choice
@@ -204,9 +204,12 @@ func alwaysAllow(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *las
 		}
 		c, err := chooseRule(ctx, p, w, in, all, all[i], opts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if c != nil {
+			if strings.HasPrefix(c.id, "teardown:") && !slices.Contains(c.spec.Stages, lastv1alpha1.StageDelete) {
+				writef(w, "Note: the rule for %s does not list stage Delete, so it will not cover that teardown command.\n", clean(c.id))
+			}
 			chosen = append(chosen, *c)
 		}
 	}
@@ -374,14 +377,13 @@ func dnsLabel(s string) string {
 // createRules creates the chosen rules as the user, in order, and stops at the
 // first it cannot create. A rule that already exists with the same spec counts
 // as done; one with another spec is an error.
-func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, chosen []choice, cluster bool) error {
-	var made []string
-	fail := func(format string, a ...any) error {
+func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Intent, chosen []choice, cluster bool) (made []string, _ error) {
+	fail := func(format string, a ...any) ([]string, error) {
 		msg := fmt.Sprintf(format, a...)
 		if len(made) == 0 {
-			return fmt.Errorf("%s; no rule was created and the Intent was not approved", msg)
+			return nil, fmt.Errorf("%s; no rule was created and the Intent was not approved", msg)
 		}
-		return fmt.Errorf("%s; created before that: %s; the Intent was not approved", msg, strings.Join(made, ", "))
+		return made, fmt.Errorf("%s; created before that: %s; the Intent was not approved", msg, strings.Join(made, ", "))
 	}
 	for _, c := range chosen {
 		name, err := ruleName(in.Name, c.id, c.spec)
@@ -416,7 +418,7 @@ func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Int
 			return fail("create %s %s: %v", kind, name, err)
 		}
 	}
-	return nil
+	return made, nil
 }
 
 // sameSpec reports whether the object that already has obj's name holds spec.

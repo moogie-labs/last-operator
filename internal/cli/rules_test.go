@@ -700,3 +700,80 @@ func TestAllowRulesAndAutoAreNamedApart(t *testing.T) {
 		t.Errorf("noteAuto for a covered discovery command = %q", b.String())
 	}
 }
+
+func TestAlwaysAllowSkipsEntriesNoRuleCanCover(t *testing.T) {
+	ref := "${steps.x.stdout}"
+	for _, tc := range []struct {
+		name   string
+		change func(*lastv1alpha1.Command)
+		why    string
+	}{
+		{"a script", func(c *lastv1alpha1.Command) { c.Run = lastv1alpha1.CommandRun{Script: "echo hi"} }, "runs a script"},
+		{"a step reference in argv", func(c *lastv1alpha1.Command) { c.Run.Argv = []string{"echo", ref} }, "references"},
+		{"a step reference in image.install", func(c *lastv1alpha1.Command) {
+			c.Image = &lastv1alpha1.ImageSpec{Install: []lastv1alpha1.ArgvCommand{{Argv: []string{"pip", wordInstall, ref}}}}
+		}, "references"},
+	} {
+		for _, mode := range []string{"--always-allow=exact", "--always-allow=generalized"} {
+			t.Run(tc.name+" "+mode, func(t *testing.T) {
+				step := argvCommand("echo", "hi")
+				step.ID, step.Providers = "s1", []string{k8sProv}
+				tc.change(&step)
+				p := &lastv1alpha1.Plan{Steps: []lastv1alpha1.Command{step}, UncoveredSteps: []string{"s1"}}
+				p.Hash = planHash(p)
+				in := testIntent(webName, func(in *lastv1alpha1.Intent) {
+					in.Status.Phase, in.Status.Stage, in.Status.Plan = lastv1alpha1.PhaseAwaitingApproval, lastv1alpha1.StageCreate, p
+				})
+				c := fakeClient(in)
+				d, out := depsFor(c, "")
+				if err := execute(d, verbApprove, webName, mode); err != nil {
+					t.Fatalf("approve = %v\n%s", err, out)
+				}
+				if got := nsRules(t, c); len(got) != 0 {
+					t.Errorf("rules = %v, want none", got)
+				}
+				if !strings.Contains(out.String(), "No rule for s1: ") || !strings.Contains(out.String(), tc.why) ||
+					!strings.Contains(out.String(), "just this once") {
+					t.Errorf("output lacks the reason (%q):\n%s", tc.why, out)
+				}
+				if a := approvalsIn(t, c); len(a) != 1 {
+					t.Errorf("approvals = %+v, want 1", a)
+				}
+			})
+		}
+	}
+}
+
+func TestStagesWithoutDeleteNoteThatTeardownIsNotCovered(t *testing.T) {
+	c := fakeClient(ruleIntent())
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=exact", "--stages", "Create"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "the rule for teardown:0.0 does not list stage Delete") {
+		t.Errorf("no note about the teardown rule:\n%s", out)
+	}
+}
+
+func TestAFailedApprovalNamesTheRulesLeftBehind(t *testing.T) {
+	c := interceptCreates(ruleIntent(), func(obj client.Object) error {
+		if _, ok := obj.(*lastv1alpha1.IntentApproval); ok {
+			return errors.New("the Intent changed")
+		}
+		return nil
+	})
+	d, out := depsFor(c, "")
+	err := execute(d, verbApprove, webName, "--always-allow=exact")
+	if err == nil {
+		t.Fatalf("approve succeeded\n%s", out)
+	}
+	items := nsRules(t, c)
+	if len(items) != 4 {
+		t.Fatalf("rules = %d", len(items))
+	}
+	for _, r := range items {
+		if !strings.Contains(err.Error(), r.Name) {
+			t.Errorf("error %q does not name %s", err, r.Name)
+		}
+	}
+}

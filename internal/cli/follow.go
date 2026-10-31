@@ -129,14 +129,18 @@ func putToUser(ctx context.Context, k *Kube, p *prompter, in *lastv1alpha1.Inten
 		case err != nil:
 			return err
 		case decision == decisionAlwaysAllow:
-			if err := alwaysAllow(ctx, k, p, p.w, in, stage, allowOpts{mode: allowPrompt}); err != nil {
+			made, err := alwaysAllow(ctx, k, p, p.w, in, stage, allowOpts{mode: allowPrompt})
+			if err != nil {
 				if errors.Is(err, errNoInput) || ctx.Err() != nil {
 					return err
 				}
 				writef(p.w, "%v\n", err)
 				continue
 			}
-			return decide(ctx, k, p.w, in, stage, subject, lastv1alpha1.DecisionApprove, "")
+			if err := decide(ctx, k, p.w, in, stage, subject, lastv1alpha1.DecisionApprove, ""); err != nil {
+				return leftBehind(err, made)
+			}
+			return nil
 		case decision == decisionShowFiles:
 			writeln(p.w)
 			renderSubject(p.w, in, stage, subject, true)

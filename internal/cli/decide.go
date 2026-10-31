@@ -190,9 +190,14 @@ func newDecisionCommand(d Deps, kf *KubeFlags, decision lastv1alpha1.Decision) *
 				if opts.mode == allowPrompt {
 					p = newPrompter(d.In, d.Out)
 				}
-				if err := alwaysAllow(cmd.Context(), k, p, d.Out, in, stage, opts); err != nil {
+				made, err := alwaysAllow(cmd.Context(), k, p, d.Out, in, stage, opts)
+				if err != nil {
 					return err
 				}
+				if err := decide(cmd.Context(), k, d.Out, in, stage, subject, decision, reason); err != nil {
+					return leftBehind(err, made)
+				}
+				return nil
 			}
 			return decide(cmd.Context(), k, d.Out, in, stage, subject, decision, reason)
 		},
@@ -241,4 +246,12 @@ func allowOptsFrom(always, stagesList, providersList string, cluster bool) (allo
 		opts.stages = stages
 	}
 	return opts, nil
+}
+
+// leftBehind adds the rules an approval that failed left in place to its error.
+func leftBehind(err error, made []string) error {
+	if len(made) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; the rules created before it are still in place: %s", err, strings.Join(made, ", "))
 }
