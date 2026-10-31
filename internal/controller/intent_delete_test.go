@@ -248,7 +248,7 @@ var _ = Describe("Intent deletion", func() {
 		Expect(first).To(ContainSubstring(`"argv":["kubectl","delete","deployment","web"]`))
 		Expect(first).To(ContainSubstring(`"argv":["kubectl","delete","service","web"]`))
 		Expect(first).To(ContainSubstring("come from plans that did not finish"))
-		Expect(first).To(ContainSubstring("--ignore-not-found"))
+		Expect(first).NotTo(ContainSubstring("--ignore-not-found"), "the commands can only be reordered here")
 		Expect(getIntent(key).Status.Plan.Hash).To(Equal(hashOf(teardown)))
 		Expect(readyReason(key)).To(Equal(ReasonAwaitingApproval), "a Delete with no executed plan needs approval")
 		Expect(readyCondition(key).Message).To(ContainSubstring("for stage Delete"))

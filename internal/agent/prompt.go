@@ -85,7 +85,9 @@ run again on a schedule to detect drift. Sensitive values go in outputs, never i
 files, or the summary. "teardown" lists the commands that remove what the resource
 created, or [] when nothing needs removing. They run only when the Intent is deleted,
 long after the plan's steps, in an order you are asked for then and a human approves,
-so they never use ${steps…} references.
+so they never use ${steps…} references. Teardown commands must succeed when the object is
+already gone or was never created, as "kubectl delete … --ignore-not-found" does, because
+a plan can stop part way and its teardown still runs.
 
 A later message may ask for an Update or a Remediate of a plan that already ran, and a Remediate answer always has "resources": [].`
 
@@ -171,9 +173,7 @@ func TeardownMessage(t Teardown) (string, error) {
 	b.WriteString("\nAnswer with a plan turn whose \"steps\" are these commands, each exactly once, in the order that " +
 		"tears things down safely, and whose \"resources\" are []. Copy every command as given; you may change only an " +
 		"id, and the ids must be unique among the steps. Add, drop or change no command: a human approves the plan, and " +
-		"any other plan is refused. The summary says what the teardown removes.\n" +
-		"Some objects may already be gone, or may never have been created by a plan that stopped part way, so the " +
-		"teardown must tolerate missing objects, as commands with --ignore-not-found do.\n")
+		"any other plan is refused. The summary says what the teardown removes.\n")
 	if t.Feedback != "" {
 		fmt.Fprintf(&b, "\nThe previous teardown failed and was not completed:\n%s\n"+
 			"Order the commands again; the teardown must succeed from the cluster's current state.\n", t.Feedback)

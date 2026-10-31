@@ -33,7 +33,9 @@ func TestPromptAsksForTeardown(t *testing.T) {
 	if strings.Contains(prompt, `Leave "teardown" empty`) {
 		t.Error("the system prompt still asks for an empty teardown")
 	}
-	for _, want := range []string{`"teardown" lists the commands that remove what the resource created`, "when the Intent is deleted"} {
+	for _, want := range []string{`"teardown" lists the commands that remove what the resource created`, "when the Intent is deleted",
+		"Teardown commands must succeed when the object is already gone or was never created",
+		"--ignore-not-found", "a plan can stop part way and its teardown still runs"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt lacks %q", want)
 		}
@@ -64,14 +66,11 @@ func TestTeardownMessageListsTheCommandsInOrder(t *testing.T) {
 	}
 }
 
-func TestTeardownMessageAsksForTeardownThatToleratesMissingObjects(t *testing.T) {
+func TestTeardownMessageNamesPlansThatDidNotFinish(t *testing.T) {
 	cmds := []lastv1alpha1.Command{{ID: "t1", Run: lastv1alpha1.CommandRun{Argv: []string{"helm", "uninstall", webName}}}}
 	msg, err := TeardownMessage(Teardown{Namespace: teamNamespace, Name: webName, Text: runWeb, Commands: cmds})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !strings.Contains(msg, "--ignore-not-found") || !strings.Contains(msg, "tolerate") {
-		t.Errorf("teardown message does not ask for teardown that tolerates missing objects:\n%s", msg)
 	}
 	if strings.Contains(msg, "did not finish") {
 		t.Errorf("teardown message names unfinished plans when none contributed:\n%s", msg)
@@ -83,6 +82,12 @@ func TestTeardownMessageAsksForTeardownThatToleratesMissingObjects(t *testing.T)
 	for _, want := range []string{"Some of these commands come from plans that did not finish", "each exactly once", `"resources" are []`} {
 		if !strings.Contains(partial, want) {
 			t.Errorf("teardown message with partial plans lacks %q:\n%s", want, partial)
+		}
+	}
+	// The commands cannot change here, so asking for tolerant ones is the system prompt's job.
+	for _, m := range []string{msg, partial} {
+		if strings.Contains(m, "--ignore-not-found") {
+			t.Errorf("teardown message asks for a change to commands it may only reorder:\n%s", m)
 		}
 	}
 }

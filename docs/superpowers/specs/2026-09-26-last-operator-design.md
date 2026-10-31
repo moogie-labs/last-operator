@@ -842,9 +842,12 @@ Pending → Clarifying ⇄ (user answers)
     a partial plan's command that is already there (`plan.CommandKey`) is
     left out. A Normal `PartialTeardown` event says how many partial
     plans added commands, and the model is told that some commands come
-    from plans that did not finish. Every teardown prompt asks for a
-    teardown that tolerates missing objects, as `--ignore-not-found`
-    does. This replaces M5a's `PartialCreateNotTornDown` warning.
+    from plans that did not finish. The Delete plan can only reorder the
+    recorded commands, so tolerance is asked for when they are written:
+    the system prompt that Create and Update planning read asks for
+    teardown commands that succeed when the object is already gone or
+    was never created, as `--ignore-not-found` does. This replaces M5a's
+    `PartialCreateNotTornDown` warning.
   - **Nothing to do.** An Intent with no executed plan, no partial plan
     and no ManagedResources is released at once. One whose teardown
     commands are none is released with a Warning `NoTeardown` event;
