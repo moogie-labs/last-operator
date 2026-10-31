@@ -73,7 +73,13 @@ func anchoredRegex(expr string) (string, bool) {
 	if _, err := syntax.Parse(expr, syntax.Perl); err != nil {
 		return "", false
 	}
-	return "^(?:" + expr + ")$", true
+	wrapped := "^(?:" + expr + ")$"
+	// Some inputs (such as \Q without \E) parse alone but not once wrapped; Match
+	// and Lint must agree that those match nothing.
+	if _, err := syntax.Parse(wrapped, syntax.Perl); err != nil {
+		return "", false
+	}
+	return wrapped, true
 }
 
 func isGlob(s string) bool { return strings.ContainsAny(s, "*?[") }

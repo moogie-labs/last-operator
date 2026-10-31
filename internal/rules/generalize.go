@@ -43,7 +43,7 @@ func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
 			literals++
 			out = append(out, literal(a))
 		case a == "":
-			out = append(out, "*")
+			out = append(out, "") // the empty literal matches only itself
 		default:
 			out = append(out, positionalValue)
 		}

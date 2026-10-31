@@ -29,7 +29,7 @@ func TestGeneralize(t *testing.T) {
 			[]string{"git", "commit", "-a", "-m", "*"}},
 		{"path value", []string{"kubectl", "apply", "-f", "/tmp/x"}, []string{"kubectl", "apply", "-f", "*"}},
 		{"flag name with a backslash", []string{"tool", "--a\\b=v"}, []string{"tool", `--a\\b=*`}},
-		{"empty positional", []string{"cp", "a", "b", ""}, []string{"cp", "a", "b", "*"}},
+		{"empty positional", []string{"cp", "a", "b", ""}, []string{"cp", "a", "b", ""}},
 		{"argv0 only", []string{"ls"}, []string{"ls"}},
 		{"trailing flag", []string{"ls", "-l"}, []string{"ls", "-l"}},
 		{"later positionals", []string{"cp", "a", "b", "c", "d"}, []string{"cp", "a", "b", "[!-]*", "[!-]*"}},
@@ -53,6 +53,10 @@ func TestGeneralize(t *testing.T) {
 	gen := rules.Generalize(lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"kubectl", "-n", "x", "get", "deployment", "web"}}}).Argv
 	if rules.Match(gen, []string{"kubectl", "-n", "x", "get", "deployment", "--kubeconfig=/work/kc"}) {
 		t.Errorf("%q matches a flag-shaped positional", gen)
+	}
+	if rules.Match(rules.Generalize(lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: []string{"cp", "a", "b", ""}}}).Argv,
+		[]string{"cp", "a", "b", "--kubeconfig=x"}) {
+		t.Error("an empty positional generalizes to a pattern that matches a flag")
 	}
 	if rules.Match([]string{"tool", `--a\\b=*`}, []string{"tool", "--ab=v"}) {
 		t.Error("escaped flag name matches --ab=v")

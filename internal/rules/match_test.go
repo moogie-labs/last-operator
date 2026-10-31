@@ -55,6 +55,7 @@ func TestMatchLiteralsGlobsRegexAndRest(t *testing.T) {
 		{"regex break out matches nothing at all", []string{"x", `re:a)|.*|(b`}, []string{"x", "a"}, false},
 		{"regex alternation a", []string{"x", "re:a|b"}, []string{"x", "a"}, true},
 		{"regex alternation b", []string{"x", "re:a|b"}, []string{"x", "b"}, true},
+		{"regex that only fails once wrapped matches nothing", []string{"x", `re:\Qa)|(b`}, []string{"x", `a)|(b`}, false},
 		{"invalid regex matches nothing", []string{"x", "re:("}, []string{"x", "("}, false},
 		{"rest matches zero", []string{"kubectl", "get", "..."}, []string{"kubectl", "get"}, true},
 		{"rest matches many", []string{"kubectl", "get", "..."}, []string{"kubectl", "get", "pods", "-A"}, true},

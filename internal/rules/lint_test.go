@@ -32,6 +32,7 @@ func TestLintWarnings(t *testing.T) {
 		{"rm as argv[0]", []string{"rm", "-rf", "re:.*"}, []string{"destructive verb \"rm\""}},
 		{"rest after a destructive verb", []string{"kubectl", "delete", "..."}, []string{"destructive verb \"delete\"", "position 2"}},
 		{"invalid regex", []string{"git", "re:("}, []string{"invalid regex"}},
+		{"regex that only fails once wrapped", []string{"git", `re:\Qa)|(b`}, []string{"invalid regex"}},
 		{"malformed glob class", []string{"ls", "[a"}, []string{"malformed glob"}},
 		{"rest not last", []string{"kubectl", "...", "pods"}, []string{"'...' is only valid", "'...' at position 1"}},
 		{"non-literal argv[0]", []string{"k*", "get", "pods"}, []string{"argv[0] must be a literal"}},
