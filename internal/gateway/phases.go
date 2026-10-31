@@ -28,6 +28,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/policy"
+	"github.com/moogie-labs/last-operator/internal/rules"
 	"github.com/moogie-labs/last-operator/internal/sandbox"
 )
 
@@ -57,11 +58,21 @@ type phase struct {
 	body    plan.Body
 	// auth is what authorizes the phase's steps now, as its entries record it:
 	// what BeginPhase found, or the Approve a later step's re-check fell back
-	// to (recheckAuthorization). Set under mu after BeginPhase.
+	// to (recheckAuthorization). For a rule phase it is {rule}, and each step's
+	// entries carry {rule, <its rule>} instead. Set under mu after BeginPhase.
 	auth *audit.Authorization
 	// auto is whether Auto opened the phase; the re-check keeps passing it
 	// while the stage is still Auto, whatever auth now names.
-	auto     bool
+	auto bool
+	// rule is whether allow rules opened the phase; the re-check passes each
+	// step that a current rule covers, whatever auth now names.
+	rule bool
+	// rules maps a rule phase's step IDs to the rule that last covered each:
+	// at BeginPhase, then at each step's re-check. Set under mu after BeginPhase.
+	rules map[string]rules.Ref
+	// ruleSeen holds the rule versions (ruleObject.key) this phase's
+	// rule.observed entries name. Set under mu after BeginPhase.
+	ruleSeen map[string]bool
 	beginSeq uint64
 	began    time.Time    // the gateway clock at BeginPhase; the executed plan's Began
 	next     int          // index of the next step to run; also the count of steps that succeeded
@@ -111,7 +122,30 @@ type phaseBegin struct {
 	// Nonce is a Discovery phase's pending-command nonce, so an auditor can
 	// recompute the subject, sha256(canonical {command, nonce}), from this entry alone.
 	Nonce string `json:"nonce,omitempty"`
+	// Rules names, for a phase allow rules authorized, the rule that covered each
+	// step: step ID to "<scope>/<namespace or ->/<name>" (rules.Ref.String).
+	Rules map[string]string `json:"rules,omitempty"`
 }
+
+// ruleObserved is the rule.observed payload: the allow rule object, and the
+// version of it, that let a phase or a step run without an approval.
+type ruleObserved struct {
+	Scope           string `json:"scope"`
+	Namespace       string `json:"namespace"`
+	Name            string `json:"name"`
+	UID             string `json:"uid"`
+	ResourceVersion string `json:"resourceVersion"`
+	Generation      int64  `json:"generation"`
+}
+
+// ruleObject is the identity and version of the object a rules.Rule was read from.
+type ruleObject struct {
+	uid, resourceVersion string
+	generation           int64
+}
+
+// key names this version of the rule object.
+func (o ruleObject) key() string { return o.uid + "@" + o.resourceVersion }
 
 type phaseEnd struct {
 	BeginSeq uint64 `json:"beginSeq"`
@@ -216,16 +250,32 @@ func (e errInvalidPolicy) GRPCStatus() *status.Status {
 	return status.New(codes.FailedPrecondition, e.Error())
 }
 
+// effectivePolicy resolves the command policy for namespace ns; it reads no
+// allow rules, which only authorize phases and steps.
 func (g *Gateway) effectivePolicy(ctx context.Context, ns string) (policy.Effective, error) {
-	eff, _, err := g.readPolicy(ctx, ns)
+	eff, _, err := g.readPolicyLayers(ctx, ns)
 	return eff, err
 }
 
 // policyLayers are the policy objects one read returned: the OperatorConfig, or
-// nil, and the namespace's IntentPolicies.
+// nil, the namespace's IntentPolicies and the allow rules that apply to it.
 type policyLayers struct {
 	op       *lastv1alpha1.OperatorConfig
 	policies []lastv1alpha1.IntentPolicy
+	// rules are every ClusterCommandRule, then the namespace's CommandRules,
+	// each sorted by name: rules.Coverage and covering pick the first that covers.
+	rules []rules.Rule
+	// ruleObjects identifies the object each rule was read from, for rule.observed.
+	ruleObjects map[rules.Ref]ruleObject
+}
+
+// covering returns the first rule, in order, that covers cmd at stage, and its object.
+func (l policyLayers) covering(stage lastv1alpha1.Stage, cmd lastv1alpha1.Command) (rules.Rule, ruleObject, bool) {
+	i := slices.IndexFunc(l.rules, func(r rules.Rule) bool { return rules.Covers(r.Spec, stage, cmd) })
+	if i < 0 {
+		return rules.Rule{}, ruleObject{}, false
+	}
+	return l.rules[i], l.ruleObjects[l.rules[i].Ref], true
 }
 
 // mode is the stage's effective Auto/Manual mode for the Intent (design D8).
@@ -233,9 +283,81 @@ func (l policyLayers) mode(intent *lastv1alpha1.Intent, stage lastv1alpha1.Stage
 	return policy.Modes(l.op, l.policies, intent.Spec.Modes).For(stage)
 }
 
-// readPolicy reads the policy layers once and resolves them, so the command
-// policy and the modes always come from the same objects.
+// readPolicy reads the policy layers and the allow rules once, uncached, and
+// resolves them, so the command policy, the modes and the rules always come
+// from the same read. A rule list that fails refuses as Unavailable: nothing is
+// authorized by rules that could not be read.
 func (g *Gateway) readPolicy(ctx context.Context, ns string) (policy.Effective, policyLayers, error) {
+	eff, layers, err := g.readPolicyLayers(ctx, ns)
+	if err != nil {
+		return policy.Effective{}, policyLayers{}, err
+	}
+	layers.rules, layers.ruleObjects, err = g.readRules(ctx, ns)
+	if err != nil {
+		return policy.Effective{}, policyLayers{}, err
+	}
+	return eff, layers, nil
+}
+
+// readRules lists every ClusterCommandRule and namespace ns's CommandRules
+// through the uncached client, and returns them as rules sorted cluster first,
+// then by name, with the object each came from. A CommandRule of any other
+// namespace never applies.
+func (g *Gateway) readRules(ctx context.Context, ns string) ([]rules.Rule, map[rules.Ref]ruleObject, error) {
+	var cluster lastv1alpha1.ClusterCommandRuleList
+	if err := g.crd.List(ctx, &cluster); err != nil {
+		return nil, nil, status.Errorf(codes.Unavailable, "list ClusterCommandRules: %v", err)
+	}
+	var local lastv1alpha1.CommandRuleList
+	if err := g.crd.List(ctx, &local, client.InNamespace(ns)); err != nil {
+		return nil, nil, status.Errorf(codes.Unavailable, "list CommandRules: %v", err)
+	}
+	slices.SortFunc(cluster.Items, func(a, b lastv1alpha1.ClusterCommandRule) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(local.Items, func(a, b lastv1alpha1.CommandRule) int { return strings.Compare(a.Name, b.Name) })
+	out := make([]rules.Rule, 0, len(cluster.Items)+len(local.Items))
+	objects := make(map[rules.Ref]ruleObject, cap(out))
+	add := func(ref rules.Ref, meta metav1.ObjectMeta, spec lastv1alpha1.CommandRuleSpec) {
+		r := rules.Rule{Ref: ref, Spec: spec}
+		obj := ruleObject{uid: string(meta.UID), resourceVersion: meta.ResourceVersion, generation: meta.Generation}
+		g.warnInvalidRegex(r, obj)
+		out = append(out, r)
+		objects[ref] = obj
+	}
+	for _, c := range cluster.Items {
+		add(rules.Ref{Scope: "cluster", Name: c.Name}, c.ObjectMeta, c.Spec)
+	}
+	for _, c := range local.Items {
+		if c.Namespace != ns {
+			continue
+		}
+		add(rules.Ref{Scope: "namespace", Namespace: ns, Name: c.Name}, c.ObjectMeta, c.Spec)
+	}
+	return out, objects, nil
+}
+
+// warnInvalidRegex logs a rule whose re: patterns do not compile, and so match
+// nothing, once for each rule object and resourceVersion. It reports whether it logged.
+func (g *Gateway) warnInvalidRegex(r rules.Rule, obj ruleObject) bool {
+	var invalid []string
+	for _, w := range rules.Lint(r.Spec) {
+		if strings.Contains(w, "invalid regex") {
+			invalid = append(invalid, w)
+		}
+	}
+	if len(invalid) == 0 {
+		return false
+	}
+	if _, seen := g.ruleRegexWarned.LoadOrStore(obj.key(), true); seen {
+		return false
+	}
+	slog.Warn("Allow rule has an invalid regex that matches nothing", "rule", r.Ref.String(), "uid", obj.uid,
+		"resourceVersion", obj.resourceVersion, "findings", invalid)
+	return true
+}
+
+// readPolicyLayers reads the policy layers once and resolves them, so the
+// command policy and the modes always come from the same objects.
+func (g *Gateway) readPolicyLayers(ctx context.Context, ns string) (policy.Effective, policyLayers, error) {
 	op, err := g.operatorConfig(ctx)
 	if err != nil {
 		return policy.Effective{}, policyLayers{}, err
@@ -533,6 +655,7 @@ func (g *Gateway) noOpenPhase(ctx context.Context, d denial, ns, name, key strin
 const (
 	authApproval = "approval"
 	authAuto     = "auto"
+	authRule     = "rule"
 )
 
 // checkApprover refuses an Approve that the operator or a gateway-namespace
@@ -550,48 +673,137 @@ func (g *Gateway) checkApprover(d denial, approval *lastv1alpha1.IntentApproval)
 }
 
 // authorizePhase decides what authorizes opening a phase for the subject, in
-// this order (main spec §8.3):
+// this order (main spec §8.3, M6 design R4):
 //  1. a Deny for the subject refuses, whatever the mode, with
 //     gatewayv1.MsgDeniedPrefix;
 //  2. an Auto stage whose plan is within design D9's limits is authorized as
 //     {auto, <stage key>}, whatever Approve exists;
-//  3. an Approve, from neither the operator nor a gateway-namespace
+//  3. allow rules that cover every step, in any stage and mode and outside
+//     D9's limits, authorize it as {rule}; an empty plan is never covered;
+//  4. an Approve, from neither the operator nor a gateway-namespace
 //     ServiceAccount, authorizes it as {approval, <namespace>/<name>};
-//  4. with no Approve, an Auto stage refuses with gatewayv1.MsgNeedsApproval,
+//  5. with no Approve, an Auto stage refuses with gatewayv1.MsgNeedsApproval,
 //     and a Manual stage with FailedPrecondition and gatewayv1.MsgNoApprovalPrefix.
 //
-// It also returns the approval that authorized the phase, nil for Auto. The
-// caller has read layers once, for the command policy too. Every refusal is
-// audited through d.
+// It also returns the approval that authorized the phase, nil otherwise, and,
+// for a rule phase, the rule covering each step by step ID. The caller has
+// read layers once, for the command policy too, and has checked the plan
+// against it: rules never widen policy (R1). Every refusal is audited through d.
 func (g *Gateway) authorizePhase(ctx context.Context, d denial, layers policyLayers, rec *LoadedRecord, intent *lastv1alpha1.Intent,
-	stage lastv1alpha1.Stage, subject string, body plan.Body) (*audit.Authorization, *lastv1alpha1.IntentApproval, error) {
+	stage lastv1alpha1.Stage, subject string, body plan.Body) (*audit.Authorization, *lastv1alpha1.IntentApproval, map[string]rules.Ref, error) {
 	approval, err := g.findApproval(ctx, intent, stage, subject, "")
 	switch {
 	case errors.Is(err, errApprovalDenied):
-		return nil, nil, d.deny(codes.PermissionDenied, "%sapproval %s denies this %s", gatewayv1.MsgDeniedPrefix, approval.Name, subjectNoun(stage))
+		return nil, nil, nil, d.deny(codes.PermissionDenied, "%sapproval %s denies this %s", gatewayv1.MsgDeniedPrefix, approval.Name, subjectNoun(stage))
 	case err != nil:
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	auto := layers.mode(intent, stage) == lastv1alpha1.ModeAuto
 	if auto {
 		within, err := withinAutoLimits(d, rec, stage, body)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if within {
-			return autoBy(stage), nil, nil
+			return autoBy(stage), nil, nil, nil
 		}
+	}
+	if covered, ok := ruleCoverage(layers.rules, stage, body.Steps); ok {
+		return ruleBy(), nil, covered, nil
 	}
 	if approval == nil {
 		if auto {
-			return nil, nil, d.deny(codes.PermissionDenied, "%s", gatewayv1.MsgNeedsApproval)
+			return nil, nil, nil, d.deny(codes.PermissionDenied, "%s", gatewayv1.MsgNeedsApproval)
 		}
-		return nil, nil, d.deny(codes.FailedPrecondition, "%s%s", gatewayv1.MsgNoApprovalPrefix, subjectNoun(stage))
+		return nil, nil, nil, d.deny(codes.FailedPrecondition, "%s%s", gatewayv1.MsgNoApprovalPrefix, subjectNoun(stage))
 	}
 	if err := g.checkApprover(d, approval); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return approvedBy(intent.Namespace, approval), approval, nil
+	return approvedBy(intent.Namespace, approval), approval, nil, nil
+}
+
+// ruleCoverage returns the rule that covers each step, by ruleStepID, when
+// rules cover every step. An empty plan is never covered.
+func ruleCoverage(rs []rules.Rule, stage lastv1alpha1.Stage, steps []lastv1alpha1.Command) (map[string]rules.Ref, bool) {
+	if len(steps) == 0 {
+		return nil, false
+	}
+	covered, uncovered := rules.Coverage(rs, stage, steps)
+	if len(uncovered) > 0 {
+		return nil, false
+	}
+	out := make(map[string]rules.Ref, len(covered))
+	for id, ref := range covered {
+		out[ruleStepID(id)] = ref
+	}
+	return out, true
+}
+
+// ruleStepID is the key of a step in phase.begin's rules map: its ID, or "cmd"
+// for a command without one.
+func ruleStepID(id string) string {
+	if id == "" {
+		return "cmd"
+	}
+	return id
+}
+
+// ruleBy is the audit.Authorization of a phase allow rules opened; each of its
+// steps is stamped with its own rule (ruleStep).
+func ruleBy() *audit.Authorization { return &audit.Authorization{Kind: authRule} }
+
+// ruleStep is the audit.Authorization of a step a rule covers.
+func ruleStep(ref rules.Ref) *audit.Authorization {
+	return &audit.Authorization{Kind: authRule, Name: ref.String()}
+}
+
+// observeRule writes rule.observed for the rule object obj that ref names.
+func observeRule(d denial, ref rules.Ref, obj ruleObject) error {
+	if _, err := d.w.Append(d.ctx, audit.Draft{Type: audit.TypeRuleObserved, Actor: d.actor, Intent: d.intent, Stage: d.stage,
+		SubjectHash: d.subject, Payload: ruleObserved{Scope: ref.Scope, Namespace: ref.Namespace, Name: ref.Name, UID: obj.uid,
+			ResourceVersion: obj.resourceVersion, Generation: obj.generation}}); err != nil {
+		return status.Errorf(codes.Unavailable, "record rule.observed: %v", err)
+	}
+	return nil
+}
+
+// observeAuthorization writes what authorizePhase found, before phase.begin:
+// approval.observed for the approval, or for a rule phase one rule.observed
+// per rule (observeRules), whose results it returns. An Auto phase observes nothing.
+func observeAuthorization(d denial, layers policyLayers, approval *lastv1alpha1.IntentApproval,
+	covered map[string]rules.Ref) (map[string]bool, map[string]string, error) {
+	if approval != nil {
+		return nil, nil, observeApproval(d, approval)
+	}
+	if covered != nil {
+		return observeRules(d, layers, covered)
+	}
+	return nil, nil, nil
+}
+
+// observeRules writes one rule.observed for each distinct rule in covered, in
+// layers' order, and returns the rule versions it named (ruleObject.key) and
+// phase.begin's rules map.
+func observeRules(d denial, layers policyLayers, covered map[string]rules.Ref) (map[string]bool, map[string]string, error) {
+	used := map[rules.Ref]bool{}
+	names := make(map[string]string, len(covered))
+	for id, ref := range covered {
+		used[ref] = true
+		names[id] = ref.String()
+	}
+	seen := map[string]bool{}
+	for _, r := range layers.rules {
+		if !used[r.Ref] {
+			continue
+		}
+		obj := layers.ruleObjects[r.Ref]
+		if err := observeRule(d, r.Ref, obj); err != nil {
+			return nil, nil, err
+		}
+		seen[obj.key()] = true
+	}
+	return seen, names, nil
 }
 
 // autoBy is the audit.Authorization of an Auto phase, or step, of stage.
@@ -788,18 +1000,18 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 	if err := checkPlanPolicy(eff, body); err != nil {
 		return nil, d.deny(codes.PermissionDenied, "%v", err)
 	}
-	auth, approval, err := g.authorizePhase(ctx, d, layers, rec, &intent, stage, subject, body)
+	auth, approval, covered, err := g.authorizePhase(ctx, d, layers, rec, &intent, stage, subject, body)
 	if err != nil {
 		return nil, err
 	}
 
-	if approval != nil { // an Auto phase observed no approval
-		if err := observeApproval(d, approval); err != nil {
-			return nil, err
-		}
+	ruleSeen, ruleNames, err := observeAuthorization(d, layers, approval, covered)
+	if err != nil {
+		return nil, err
 	}
 	begin, err := w.Append(ctx, audit.Draft{Type: audit.TypePhaseBegin, Actor: actor, Intent: key, Stage: string(stage),
-		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps), Nonce: nonce}})
+		SubjectHash: subject, AuthorizedBy: auth, Payload: phaseBegin{Plan: string(canonical), Steps: len(body.Steps), Nonce: nonce,
+			Rules: ruleNames}})
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "record phase.begin: %v", err)
 	}
@@ -813,7 +1025,7 @@ func (g *Gateway) beginPhase(ctx context.Context, req *gatewayv1.BeginPhaseReque
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	g.phases.put(key, &phase{stage: stage, subject: subject, uid: string(intent.UID), body: body, auth: auth, auto: auth.Kind == authAuto,
-		beginSeq: begin.Seq, began: began, results: plan.Results{}})
+		rule: auth.Kind == authRule, rules: covered, ruleSeen: ruleSeen, beginSeq: begin.Seq, began: began, results: plan.Results{}})
 	return &gatewayv1.BeginPhaseResponse{BeginSeq: begin.Seq, Steps: int32(len(body.Steps))}, nil //nolint:gosec // bounded by MaxPlanBytes
 }
 

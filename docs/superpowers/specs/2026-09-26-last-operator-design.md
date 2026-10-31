@@ -1076,7 +1076,11 @@ their ManagedResources and go with them.
 (§6; stage keys `discovery`, `create` for Create and Update, `reconcile`
 for Remediate, `delete` for Delete) from the same `OperatorConfig` and
 `IntentPolicy` reads that give the command policy, and the Intent's
-`spec.modes`. It then authorizes in this order:
+`spec.modes`. The same read lists every `ClusterCommandRule` and the
+Intent namespace's `CommandRule`s, uncached, sorted cluster rules first and
+then by name; a list that fails refuses with `Unavailable`, and nothing is
+authorized by rules that could not be read. The command policy is checked
+first, so a rule never widens it. It then authorizes in this order:
 
 1. A `Deny` for the subject (bound to the Intent's UID and within
    `approvals.maxAge`) refuses with `PermissionDenied`, whatever the mode,
@@ -1104,9 +1108,14 @@ for Remediate, `delete` for Delete) from the same `OperatorConfig` and
      the limits.
    - An executed plan that fails its integrity check refuses the phase
      with `Internal`.
-3. Otherwise a valid `Approve` authorizes it, unless it names the
+3. Otherwise, when allow rules cover every step (§9.3: the first covering
+   rule in that order, for each step), the phase opens as
+   `{kind: rule}`, in any stage and mode, including a Remediate or Delete
+   outside Auto's limits. A step with a `${steps…}` reference is never
+   covered, and an empty plan never is.
+4. Otherwise a valid `Approve` authorizes it, unless it names the
    operator or a gateway-namespace ServiceAccount as approver.
-4. With no `Approve`, an Auto stage (a Remediate or Delete outside the
+5. With no `Approve`, an Auto stage (a Remediate or Delete outside the
    limits) is refused with `PermissionDenied` and exactly the message
    `gatewayv1.MsgNeedsApproval`, which the operator reads as a cue to wait
    for approval; a Manual stage is refused with `FailedPrecondition`.
@@ -1117,6 +1126,17 @@ credential and egress grants), and its `phase.end` carry
 `authorizedBy: {kind: auto, name: <stage key>}`, and the record's open
 phase keeps the same authorization; an approved phase carries
 `{kind: approval, name: <namespace>/<IntentApproval>}`.
+
+**The audit of rules.** A rule phase writes no `approval.observed`. Before
+its `phase.begin` it writes one `rule.observed` for each distinct rule it
+uses, in the order above, with payload `{scope: "namespace"|"cluster",
+namespace, name, uid, resourceVersion, generation}`. Its `phase.begin`
+carries `authorizedBy: {kind: rule}` and a `rules` map from each step ID to
+the rule that covers it, as `<scope>/<namespace or ->/<name>` (a Discovery
+phase's key is the command's ID, `discovery`). The record's open phase and
+its `phase.end` carry `{kind: rule}`; the entries of each step carry
+`{kind: rule, name: <that step's rule>}`. An invalid `re:` pattern matches
+nothing, and the gateway logs it once for each rule and `resourceVersion`.
 
 **`RunCommand` re-checks authorization before every step**, with fresh
 reads of the policy layers, the Intent and its `IntentApproval`s. A `Deny`
@@ -1137,6 +1157,15 @@ name yet (an Auto phase whose stage turned Manual, or an approved phase
 whose `Approve` was replaced), the gateway writes `approval.observed` for
 it, once, and that step's entries and every later entry of the phase carry
 `authorizedBy: {kind: approval, name: <namespace>/<IntentApproval>}`.
+A rule phase re-reads the rules, uncached, and re-matches the step's
+resolved command against them, in the order above, while the Intent has the
+same UID: if a rule covers it, the step passes as `{kind: rule, name: <that
+rule>}`, and a rule version the phase's entries do not name yet (a
+different rule, or the same one at a new `resourceVersion`) is audited as
+`rule.observed` first. A deleted or narrowed rule falls back to a standing
+`Approve`, exactly as an Auto phase does; with none, the step is refused
+with `PermissionDenied` ("rule authorization withdrawn: no rule covers step
+X and no IntentApproval approves this plan"). A Deny still wins.
 Every refusal fails the phase: only `EndPhase(failed)` remains.
 
 ## 9. Allow rules and suggestions

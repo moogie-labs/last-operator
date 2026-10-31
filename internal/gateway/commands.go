@@ -119,7 +119,9 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		p.failed = true
 		return nil, d.deny(codes.PermissionDenied, "policy: %v", err)
 	}
-	if err := g.recheckAuthorization(ctx, d, layers, p, ns, name); err != nil {
+	// The resolved command is the one re-checked against the rules: it is what runs.
+	stamp, err := g.recheckAuthorization(ctx, d, layers, p, ns, name, expected)
+	if err != nil {
 		return nil, err
 	}
 	var install []lastv1alpha1.ArgvCommand
@@ -150,7 +152,7 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 		return nil, out
 	}
 	res, err := ex.Run(ctx, sandbox.RunRequest{Actor: actor, Intent: key, Stage: string(p.stage),
-		SubjectHash: p.subject, AuthorizedBy: p.auth, Command: expected, Priority: priorityFor(p.stage)})
+		SubjectHash: p.subject, AuthorizedBy: stamp, Command: expected, Priority: priorityFor(p.stage)})
 	if err != nil {
 		// The outcome may not be recorded: withhold any output, and stop the phase.
 		p.failed = true
@@ -172,28 +174,34 @@ func (g *Gateway) runCommand(ctx context.Context, req *gatewayv1.RunCommandReque
 }
 
 // recheckAuthorization refuses the step, failing the phase, when what
-// authorized the phase no longer stands. A Deny for the subject always refuses,
-// with gatewayv1.MsgDeniedPrefix.
+// authorized the phase no longer stands, and otherwise returns what authorizes
+// the step: the authorization its entries carry. A Deny for the subject always
+// refuses, with gatewayv1.MsgDeniedPrefix.
 // An Auto phase passes while its stage is still Auto for the same Intent, from
 // layers, which the caller read for this step; D9's limits held at BeginPhase
-// and do not change within the phase. An approval phase, and an Auto phase
-// whose stage is no longer Auto, need an Approve that passes checkApprover, as
-// at BeginPhase: from neither the operator nor a gateway-namespace
+// and do not change within the phase. A rule phase passes while a rule in
+// layers, in their order, covers cmd, the resolved command the step runs, for
+// the same Intent; the step is authorized as {rule, <that rule>}, and a rule
+// version the phase's entries do not name yet is audited as rule.observed
+// first (M6 design R6). An approval phase, and an Auto or rule phase that no
+// longer passes so, need an Approve that passes checkApprover, as at
+// BeginPhase: from neither the operator nor a gateway-namespace
 // ServiceAccount. The Approve that authorized the previous step is preferred
 // while it stands. When the step is authorized by another Approve than the
-// phase's entries name so far, or by an Approve in an Auto phase, it writes
-// approval.observed for it and the step, and every later entry of the phase,
-// carries {approval, <namespace>/<name>}, until the stage is Auto again. The
-// caller holds p.mu.
-func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers policyLayers, p *phase, ns, name string) error {
+// phase's entries name so far, or by an Approve in an Auto or rule phase, it
+// writes approval.observed for it and the step, and every later entry of the
+// phase, carries {approval, <namespace>/<name>}, until the stage is Auto
+// again or a rule covers a step again. The caller holds p.mu.
+func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers policyLayers, p *phase, ns, name string,
+	cmd lastv1alpha1.Command) (*audit.Authorization, error) {
 	var intent lastv1alpha1.Intent
 	if err := g.crd.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &intent); err != nil {
 		err = notFoundOr(err, "intent")
 		if status.Code(err) != codes.NotFound {
-			return err
+			return nil, err
 		}
 		p.failed = true
-		return d.deny(codes.NotFound, "%s: %s", withdrawn(p), status.Convert(err).Message())
+		return nil, d.deny(codes.NotFound, "%s: %s", withdrawn(p), status.Convert(err).Message())
 	}
 	prefer := ""
 	if p.auth != nil && p.auth.Kind == authApproval {
@@ -203,35 +211,53 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 	switch {
 	case errors.Is(err, errApprovalDenied):
 		p.failed = true
-		return d.deny(codes.PermissionDenied, "%s%s: %s denies this %s", gatewayv1.MsgDeniedPrefix, withdrawn(p), approval.Name, subjectNoun(p.stage))
+		return nil, d.deny(codes.PermissionDenied, "%s%s: %s denies this %s", gatewayv1.MsgDeniedPrefix, withdrawn(p), approval.Name, subjectNoun(p.stage))
 	case err != nil:
-		return err
+		return nil, err
 	}
+	sameIntent := string(intent.UID) == p.uid
 	auto := p.autoAuthorized()
-	if auto && string(intent.UID) == p.uid && layers.mode(&intent, p.stage) == lastv1alpha1.ModeAuto {
+	if auto && sameIntent && layers.mode(&intent, p.stage) == lastv1alpha1.ModeAuto {
 		p.auth = autoBy(p.stage) // Auto again, after a fallback to an Approve
-		return nil
+		return p.auth, nil
+	}
+	if p.rule && sameIntent {
+		if r, obj, ok := layers.covering(p.stage, cmd); ok {
+			if !p.ruleSeen[obj.key()] {
+				if err := observeRule(d, r.Ref, obj); err != nil {
+					return nil, err // nothing ran; the step can be retried
+				}
+				p.ruleSeen[obj.key()] = true
+			}
+			p.auth = ruleBy() // a rule again, after a fallback to an Approve
+			p.rules[ruleStepID(cmd.ID)] = r.Ref
+			return ruleStep(r.Ref), nil
+		}
 	}
 	if approval == nil {
 		p.failed = true
-		if auto {
-			return d.deny(codes.PermissionDenied, "%s: the %s stage is no longer Auto for this Intent, "+
+		switch {
+		case auto:
+			return nil, d.deny(codes.PermissionDenied, "%s: the %s stage is no longer Auto for this Intent, "+
 				"and no IntentApproval approves this %s", withdrawn(p), p.stage, subjectNoun(p.stage))
+		case p.rule:
+			return nil, d.deny(codes.PermissionDenied, "%s: no rule covers step %s and no IntentApproval approves this %s",
+				withdrawn(p), cmd.ID, subjectNoun(p.stage))
 		}
-		return d.deny(codes.PermissionDenied, "%s: no IntentApproval approves this %s", withdrawn(p), subjectNoun(p.stage))
+		return nil, d.deny(codes.PermissionDenied, "%s: no IntentApproval approves this %s", withdrawn(p), subjectNoun(p.stage))
 	}
 	// The same approver refusals as BeginPhase, for either kind of phase.
 	if err := g.checkApprover(d, approval); err != nil {
 		p.failed = true
-		return err
+		return nil, err
 	}
 	if auth := approvedBy(ns, approval); p.auth == nil || *p.auth != *auth {
 		if err := observeApproval(d, approval); err != nil {
-			return err // nothing ran; the step can be retried
+			return nil, err // nothing ran; the step can be retried
 		}
 		p.auth = auth
 	}
-	return nil
+	return p.auth, nil
 }
 
 // autoAuthorized reports whether Auto opened the phase, not an approval.
@@ -239,16 +265,22 @@ func (p *phase) autoAuthorized() bool { return p.auto }
 
 // authorizedAs names how the phase's steps were authorized, for refusals.
 func authorizedAs(p *phase) string {
-	if p.autoAuthorized() {
+	switch {
+	case p.autoAuthorized():
 		return "Auto-authorized"
+	case p.rule:
+		return "rule-authorized"
 	}
 	return "approved"
 }
 
 // withdrawn prefixes a refusal of a step whose phase's authorization no longer stands.
 func withdrawn(p *phase) string {
-	if p.autoAuthorized() {
+	switch {
+	case p.autoAuthorized():
 		return "auto authorization withdrawn"
+	case p.rule:
+		return "rule authorization withdrawn"
 	}
 	return "approval withdrawn"
 }
