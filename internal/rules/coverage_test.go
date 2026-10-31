@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/rules"
@@ -233,5 +235,41 @@ func TestPlanCoverageCoversStepsProbesAndTeardown(t *testing.T) {
 	covered, uncovered = rules.PlanCoverage([]rules.Rule{apply}, lastv1alpha1.StageUpdate, plan.Body{Steps: body.Steps})
 	if len(uncovered) != 0 || len(covered) != 2 {
 		t.Errorf("steps only, no resources: covered = %v, uncovered = %v", covered, uncovered)
+	}
+}
+
+func TestFromObjectsSortsClusterFirstThenByName(t *testing.T) {
+	spec := func(bin string) lastv1alpha1.CommandRuleSpec {
+		return lastv1alpha1.CommandRuleSpec{Stages: []lastv1alpha1.Stage{lastv1alpha1.StageCreate},
+			Match: lastv1alpha1.ArgvPattern{Argv: []string{bin}}}
+	}
+	cluster := []lastv1alpha1.ClusterCommandRule{
+		{ObjectMeta: metav1.ObjectMeta{Name: "zeta", UID: "u-zeta"}, Spec: spec("z")},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", UID: "u-alpha"}, Spec: spec("a")},
+	}
+	local := []lastv1alpha1.CommandRule{
+		{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "team-x", UID: "u-b"}, Spec: spec("b")},
+		{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "team-y", UID: "u-other"}, Spec: spec("o")},
+		{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "team-x", UID: "u-a"}, Spec: spec("x")},
+	}
+	got, objects := rules.FromObjects("team-x", cluster, local)
+	want := []rules.Rule{
+		{Ref: rules.Ref{Scope: "cluster", Name: "alpha"}, Spec: spec("a")},
+		{Ref: rules.Ref{Scope: "cluster", Name: "zeta"}, Spec: spec("z")},
+		{Ref: rules.Ref{Scope: "namespace", Namespace: "team-x", Name: "a"}, Spec: spec("x")},
+		{Ref: rules.Ref{Scope: "namespace", Namespace: "team-x", Name: "b"}, Spec: spec("b")},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rules = %v, want %v", got, want)
+	}
+	uids := make([]string, 0, len(objects))
+	for _, o := range objects {
+		uids = append(uids, string(o.UID))
+	}
+	if want := []string{"u-alpha", "u-zeta", "u-a", "u-b"}; !reflect.DeepEqual(uids, want) {
+		t.Errorf("object UIDs = %v, want %v", uids, want)
+	}
+	if cluster[0].Name != "zeta" || local[0].Name != "b" {
+		t.Error("FromObjects reordered its inputs")
 	}
 }

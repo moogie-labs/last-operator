@@ -332,7 +332,7 @@ status:
     summary: "Deployment (2 replicas nginx), Service (ClusterIP)"
     steps: [ … §8.1 … ]
     resources: [ … ManagedResource specs incl. probes … ]
-    uncoveredSteps: [s2]         # steps not matched by any allow rule
+    uncoveredSteps: [s2, "probe:p1"]  # entries no allow rule covers: steps, probes, teardown (§9.3)
     generalizations:             # LLM-proposed wildcard pattern per uncovered command (§9.4)
       s2: { argv: ["kubectl", "apply", "-n", "team-x", "-f", "..."], lint: ["file argument"] }
   suggestedRules: [ … names of CommandRuleSuggestions created for this plan … ]
@@ -649,6 +649,31 @@ Pending → Clarifying ⇄ (user answers)
     included, to re-run it: any other step needs an approval, even in
     Auto mode.
 
+- **Allow rules (M6).** When the operator records a plan, it reads the
+  `ClusterCommandRule`s and the namespace's `CommandRule`s uncached,
+  ordered as the gateway orders them (cluster first, then by name), and
+  writes `status.plan.uncoveredSteps`: every entry of the plan no rule
+  covers at its stage (§9.3). The entries are the steps (`<stepID>`) and,
+  for a Create or Update plan, every probe command (`probe:<probeID>`,
+  matched at the plan's stage) and every teardown command
+  (`teardown:<resourceIndex>.<i>`, matched at stage `Delete`), in that
+  order. A rule listing Create or Update covers both. A rule list that
+  fails is retried, never read as no rules.
+  - **Skipped waits.** A stage that is Auto keeps the Auto skip above.
+    Otherwise, a non-empty plan with nothing uncovered skips
+    `AwaitingApproval` and moves straight to the phase that runs it, with
+    the message "Running plan <hash> without approval (allow rules)". A
+    discovery command that a rule covers at stage `Discovery` runs at
+    once, with reason `RunningDiscovery` and a message ending "without
+    approval (allow rules)". The operator's coverage is display data and
+    a hint; the gateway reads the rules itself and decides (§8.3).
+  - **When the gateway disagrees.** If `BeginPhase` refuses a plan or
+    command the operator sent to run because of rules (the gateway's
+    rules differ, or changed since), it refuses with `NeedsApproval` or
+    no approval, and the operator waits for an approval exactly as for an
+    Auto skip ("The gateway needs an approval for this plan: …"). The
+    Intent never fails for it.
+
 - **Clarifying.** The agent may ask 1–5 questions instead of acting.
   They appear in `status.questions`; answers go in `spec.answers`. Once
   every question has an answer, planning continues in the same session.
@@ -680,7 +705,8 @@ Pending → Clarifying ⇄ (user answers)
     discovery commands. Reaching either fails the Intent with
     `PlanningFailed` (M3 design D7, §4).
 - **AwaitingApproval.** Waits for a matching `IntentApproval`. An Auto
-  plan skips it, unless the gateway needs an approval (Auto modes, above).
+  plan, or one allow rules cover, skips it, unless the gateway needs an
+  approval (Auto modes and Allow rules, above).
 - **Executing.** Runs the plan's steps deterministically (§8.3).
 - **Verifying.** Runs every probe once; all must pass. A failure here
   marks the Intent `Failed` with the probe details, so bad probes
@@ -1239,8 +1265,10 @@ A command is **covered** at stage S if some rule (namespace
 - every `image.install` command matches an entry in `rule.install`;
 - the command is `argv`, not `script`.
 
-A plan is covered when every step is covered. `status.plan.uncoveredSteps`
-lists the ones that aren't, so approvers can see what needs attention.
+A plan is covered when every entry is covered: its steps and, for a
+Create or Update plan, its probes and teardown (§8.3).
+`status.plan.uncoveredSteps` lists the entries that aren't, so approvers
+can see what needs attention.
 The gateway does the matching itself. The operator's copy is for
 display only.
 

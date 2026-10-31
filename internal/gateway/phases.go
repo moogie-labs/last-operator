@@ -303,8 +303,8 @@ func (g *Gateway) readPolicy(ctx context.Context, ns string) (policy.Effective, 
 
 // readRules lists every ClusterCommandRule and namespace ns's CommandRules
 // through the uncached client, and returns them as rules sorted cluster first,
-// then by name, with the object each came from. A CommandRule of any other
-// namespace never applies.
+// then by name, with the object each came from (rules.FromObjects). A
+// CommandRule of any other namespace never applies.
 func (g *Gateway) readRules(ctx context.Context, ns string) ([]rules.Rule, map[rules.Ref]ruleObject, error) {
 	var cluster lastv1alpha1.ClusterCommandRuleList
 	if err := g.crd.List(ctx, &cluster); err != nil {
@@ -314,25 +314,12 @@ func (g *Gateway) readRules(ctx context.Context, ns string) ([]rules.Rule, map[r
 	if err := g.crd.List(ctx, &local, client.InNamespace(ns)); err != nil {
 		return nil, nil, status.Errorf(codes.Unavailable, "list CommandRules: %v", err)
 	}
-	slices.SortFunc(cluster.Items, func(a, b lastv1alpha1.ClusterCommandRule) int { return strings.Compare(a.Name, b.Name) })
-	slices.SortFunc(local.Items, func(a, b lastv1alpha1.CommandRule) int { return strings.Compare(a.Name, b.Name) })
-	out := make([]rules.Rule, 0, len(cluster.Items)+len(local.Items))
-	objects := make(map[rules.Ref]ruleObject, cap(out))
-	add := func(ref rules.Ref, meta metav1.ObjectMeta, spec lastv1alpha1.CommandRuleSpec) {
-		r := rules.Rule{Ref: ref, Spec: spec}
-		obj := ruleObject{uid: string(meta.UID), resourceVersion: meta.ResourceVersion, generation: meta.Generation}
+	out, metas := rules.FromObjects(ns, cluster.Items, local.Items)
+	objects := make(map[rules.Ref]ruleObject, len(out))
+	for i, r := range out {
+		obj := ruleObject{uid: string(metas[i].UID), resourceVersion: metas[i].ResourceVersion, generation: metas[i].Generation}
 		g.warnInvalidRegex(r, obj)
-		out = append(out, r)
-		objects[ref] = obj
-	}
-	for _, c := range cluster.Items {
-		add(rules.Ref{Scope: "cluster", Name: c.Name}, c.ObjectMeta, c.Spec)
-	}
-	for _, c := range local.Items {
-		if c.Namespace != ns {
-			continue
-		}
-		add(rules.Ref{Scope: "namespace", Namespace: ns, Name: c.Name}, c.ObjectMeta, c.Spec)
+		objects[r.Ref] = obj
 	}
 	return out, objects, nil
 }

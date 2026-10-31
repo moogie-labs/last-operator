@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/plan"
+	"github.com/moogie-labs/last-operator/internal/rules"
 )
 
 // planTimeout bounds one model turn: up to MaxAttempts calls, corrections
@@ -269,14 +271,48 @@ func (r *IntentReconciler) turnCheck(ctx context.Context, in *lastv1alpha1.Inten
 }
 
 // msgWithoutApproval ends the Ready message of a plan or discovery command
-// that record sent to run without waiting for an approval: its stage was Auto.
-const msgWithoutApproval = " without approval (Auto)"
+// that record sent to run without waiting for an approval because its stage
+// was Auto; msgWithoutApprovalRules, because allow rules covered it.
+const (
+	msgWithoutApproval      = " without approval (Auto)"
+	msgWithoutApprovalRules = " without approval (allow rules)"
+)
 
 // autoRun reports whether the Intent's plan reached the phase that runs it
-// through record's Auto skip, not through an approval (awaitApproval).
+// through one of record's skips, Auto or allow rules, not through an approval
+// (awaitApproval).
 func autoRun(in *lastv1alpha1.Intent) bool {
 	c := meta.FindStatusCondition(in.Status.Conditions, CondReady)
-	return c != nil && strings.HasSuffix(c.Message, msgWithoutApproval)
+	return c != nil && (strings.HasSuffix(c.Message, msgWithoutApproval) || strings.HasSuffix(c.Message, msgWithoutApprovalRules))
+}
+
+// coverage is what the allow rules, as the operator reads them, cover of a
+// model turn: for a plan, the entries no rule covers (rules.PlanCoverage), in
+// the order status.plan.uncoveredSteps shows them; covered, whether nothing is
+// uncovered, so the plan or discovery command need not wait for an approval.
+// As at the gateway, an empty plan is never covered.
+type coverage struct {
+	uncovered []string
+	covered   bool
+}
+
+// turnCoverage reads the allow rules uncached and returns what they cover of
+// turn, a plan of stage or a discovery command. Questions need no rules.
+func (r *IntentReconciler) turnCoverage(ctx context.Context, ns string, turn agent.Turn, stage lastv1alpha1.Stage) (coverage, error) {
+	if turn.Kind != agent.KindPlan && turn.Kind != agent.KindCommand {
+		return coverage{}, nil
+	}
+	rs, err := r.readRules(ctx, ns)
+	if err != nil {
+		return coverage{}, err
+	}
+	if turn.Kind == agent.KindCommand {
+		return coverage{covered: slices.ContainsFunc(rs, func(r rules.Rule) bool {
+			return rules.Covers(r.Spec, lastv1alpha1.StageDiscovery, *turn.Command)
+		})}, nil
+	}
+	_, uncovered := rules.PlanCoverage(rs, stage, plan.FromStatus(turn.Plan))
+	return coverage{uncovered: uncovered, covered: len(turn.Plan.Steps) > 0 && len(uncovered) == 0}, nil
 }
 
 // record writes the model's turn to the Intent's status and moves the Intent
@@ -286,16 +322,26 @@ func autoRun(in *lastv1alpha1.Intent) bool {
 // mark a discovery command, whose approval is for stage Discovery. The
 // conversation stays in memory until a plan ends the session.
 //
-// When the Intent's effective mode for the stage is Auto, record does not wait
-// for an approval: a plan moves straight to the phase that runs it, and a
-// command is marked ReasonRunningDiscovery, which runs it. This is the only
-// place the operator skips the wait; the gateway still decides, and if it needs
-// an approval the Intent waits for one (needsApproval). The write also shows
-// the effective modes in status.effectiveModes.
+// A plan's status.plan.uncoveredSteps lists the entries no allow rule covers,
+// from an uncached read of the rules (M6 design R9, R14): steps, then each
+// resource's probes ("probe:<id>") and teardown ("teardown:<resource>.<i>").
+//
+// When the Intent's effective mode for the stage is Auto, or allow rules cover
+// the whole plan or the discovery command, record does not wait for an
+// approval: a plan moves straight to the phase that runs it, and a command is
+// marked ReasonRunningDiscovery, which runs it. This is the only place the
+// operator skips the wait; the gateway still decides, and if it needs an
+// approval the Intent waits for one (needsApproval). The write also shows the
+// effective modes in status.effectiveModes.
 func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, turn agent.Turn, conv agent.Conversation, session int64) error {
 	l, err := r.readLayers(ctx, in.Namespace)
 	if err != nil {
 		return err // transient: the model is asked again
+	}
+	gen, prev, stage := in.Generation, in.Status.PlanningSessionSeq, planStage(in)
+	cov, err := r.turnCoverage(ctx, in.Namespace, turn, stage)
+	if err != nil {
+		return err // transient: the model is asked again; coverage is never guessed
 	}
 	subject := ""
 	var pending *lastv1alpha1.PendingCommand
@@ -312,7 +358,6 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 		}
 		pending = &lastv1alpha1.PendingCommand{Hash: subject, Command: *turn.Command, Nonce: nonce, Reason: turn.Reason}
 	}
-	gen, prev, stage := in.Generation, in.Status.PlanningSessionSeq, planStage(in)
 	applied := false
 	err = r.update(ctx, in, func(in *lastv1alpha1.Intent) {
 		applied = in.Generation == gen && in.Status.Phase == lastv1alpha1.PhasePlanning && in.Status.PlanningSessionSeq == prev &&
@@ -334,27 +379,35 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 		switch turn.Kind {
 		case agent.KindPlan:
 			in.Status.Stage = stage
-			in.Status.Plan = turn.Plan
+			in.Status.Plan = turn.Plan.DeepCopy()
+			in.Status.Plan.UncoveredSteps = cov.uncovered // never the model's own claim
 			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionTrue, ReasonPlanWritten, "Plan "+subject)
-			if modes.For(stage) == lastv1alpha1.ModeAuto {
+			switch {
+			case modes.For(stage) == lastv1alpha1.ModeAuto:
 				setRunning(in, stage, "Running plan "+subject+msgWithoutApproval)
-				break
+			case cov.covered:
+				setRunning(in, stage, "Running plan "+subject+msgWithoutApprovalRules)
+			default:
+				setPhase(in, lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval,
+					"Waiting for an IntentApproval of plan "+subject+" for stage "+string(stage))
 			}
-			setPhase(in, lastv1alpha1.PhaseAwaitingApproval, ReasonAwaitingApproval,
-				"Waiting for an IntentApproval of plan "+subject+" for stage "+string(stage))
 		case agent.KindQuestions:
 			in.Status.Questions = turn.Questions
 			setPhase(in, lastv1alpha1.PhaseClarifying, ReasonClarifying,
 				fmt.Sprintf("Waiting for spec.answers to answer %d questions", len(turn.Questions)))
 		case agent.KindCommand:
 			in.Status.PendingCommand = pending
-			if modes.For(lastv1alpha1.StageDiscovery) == lastv1alpha1.ModeAuto {
+			switch {
+			case modes.For(lastv1alpha1.StageDiscovery) == lastv1alpha1.ModeAuto:
 				setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonRunningDiscovery,
 					"Running discovery command "+subject+msgWithoutApproval)
-				break
+			case cov.covered:
+				setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonRunningDiscovery,
+					"Running discovery command "+subject+msgWithoutApprovalRules)
+			default:
+				setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonAwaitingDiscoveryApproval,
+					"Waiting for an IntentApproval of discovery command "+subject+" for stage Discovery")
 			}
-			setPhase(in, lastv1alpha1.PhaseAwaitingDiscoveryApproval, ReasonAwaitingDiscoveryApproval,
-				"Waiting for an IntentApproval of discovery command "+subject+" for stage Discovery")
 		}
 	})
 	if apierrors.IsInvalid(err) {

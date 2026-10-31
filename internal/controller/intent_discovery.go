@@ -78,20 +78,22 @@ func (r *IntentReconciler) endApprovedPhase(ctx context.Context, in *lastv1alpha
 }
 
 // autoDiscovery reports whether the pending discovery command runs without
-// waiting for an approval: record found the Discovery stage Auto. A command the
-// gateway then refused without an approval waits for one (needsApproval).
+// waiting for an approval: record found the Discovery stage Auto, or allow
+// rules covering the command. A command the gateway then refused without an
+// approval waits for one (needsApproval).
 func autoDiscovery(in *lastv1alpha1.Intent) bool {
 	c := meta.FindStatusCondition(in.Status.Conditions, CondReady)
 	return c != nil && c.Reason == ReasonRunningDiscovery
 }
 
-// runDiscovery runs the approved, or Auto, command as a one-step Discovery
+// runDiscovery runs the approved, Auto or rule-covered command as a one-step Discovery
 // phase. A command that exits non-zero still completes the phase: the model
 // reads its result. If the gateway needs an approval to open it, the Intent
 // waits for one, or asks again after a delay (needsApproval). Discovery is
 // always within Auto's limits, so a NeedsApproval refusal is not expected
-// here; it is handled defensively. A NoApproval refusal of an Auto command
-// means a policy turned the Discovery stage Manual after record.
+// here; it is handled defensively. A NoApproval refusal of a command record
+// sent to run means a policy turned the Discovery stage Manual after record,
+// or the gateway's rules do not cover it.
 func (r *IntentReconciler) runDiscovery(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	subject := in.Status.PendingCommand.Hash
 	raw, err := json.Marshal(in.Status.PendingCommand.Command)

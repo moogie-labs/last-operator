@@ -104,14 +104,17 @@ func (r *IntentReconciler) execute(ctx context.Context, in *lastv1alpha1.Intent)
 
 // needsApproval handles the gateway's refusal to open a phase without an
 // approval: an Auto stage's plan outside Auto mode's limits (design D9,
-// gatewayv1.NeedsApproval), or a stage that turned Manual after record found it
-// Auto (gatewayv1.NoApproval, which callers pass only for what record sent to
-// run in Auto). Nothing ran.
+// gatewayv1.NeedsApproval), or a plan or command record sent to run that the
+// gateway finds neither Auto nor covered by allow rules (gatewayv1.NoApproval,
+// which callers pass only for what record sent to run without an approval): a
+// stage that turned Manual after record found it Auto, or rules the gateway
+// reads differently, or that changed since (M6 design R9). Nothing ran.
 //
-// What record sent to run in Auto waits for an IntentApproval: a plan moves to
-// AwaitingApproval, and a discovery command stays in AwaitingDiscoveryApproval
-// without ReasonRunningDiscovery. From there the Intent waits as in Manual
-// mode, even though its own modes say Auto: only record skips the wait, so the
+// What record sent to run without an approval waits for an IntentApproval: a
+// plan moves to AwaitingApproval, and a discovery command stays in
+// AwaitingDiscoveryApproval without ReasonRunningDiscovery. From there the
+// Intent waits as in Manual mode, even though its own modes say Auto or its
+// own read of the rules covers it: only record skips the wait, so the
 // operator never asks the gateway again unapproved.
 //
 // What an approval sent to run stays where it is, and the gateway is asked

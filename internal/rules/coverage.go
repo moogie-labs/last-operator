@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/policy"
@@ -160,4 +162,34 @@ func PlanCoverage(rules []Rule, stage lastv1alpha1.Stage, body plan.Body) (cover
 		}
 	}
 	return covered, uncovered
+}
+
+// FromObjects returns the rules that apply in namespace ns, in the order
+// Coverage and PlanCoverage expect: every ClusterCommandRule, then ns's
+// CommandRules, each sorted by name. A CommandRule of any other namespace
+// never applies. objects holds the metadata of the object each rule came from,
+// in the same order. The gateway, the operator and the CLI all order rules
+// this way, so they pick the same covering rule. The inputs are not reordered.
+func FromObjects(ns string, cluster []lastv1alpha1.ClusterCommandRule,
+	local []lastv1alpha1.CommandRule) (out []Rule, objects []metav1.ObjectMeta) {
+	cluster = slices.SortedFunc(slices.Values(cluster), func(a, b lastv1alpha1.ClusterCommandRule) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	local = slices.SortedFunc(slices.Values(local), func(a, b lastv1alpha1.CommandRule) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	out = make([]Rule, 0, len(cluster)+len(local))
+	objects = make([]metav1.ObjectMeta, 0, cap(out))
+	for _, c := range cluster {
+		out = append(out, Rule{Ref: Ref{Scope: "cluster", Name: c.Name}, Spec: c.Spec})
+		objects = append(objects, c.ObjectMeta)
+	}
+	for _, c := range local {
+		if c.Namespace != ns {
+			continue
+		}
+		out = append(out, Rule{Ref: Ref{Scope: "namespace", Namespace: ns, Name: c.Name}, Spec: c.Spec})
+		objects = append(objects, c.ObjectMeta)
+	}
+	return out, objects
 }

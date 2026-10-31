@@ -21,6 +21,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/agent"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/policy"
+	"github.com/moogie-labs/last-operator/internal/rules"
 )
 
 // noteRestarted tells the model why its session started over.
@@ -187,6 +188,24 @@ func (r *IntentReconciler) readLayers(ctx context.Context, ns string) (layers, e
 		return layers{}, err
 	}
 	return layers{op: op, policies: policies.Items}, nil
+}
+
+// readRules reads the allow rules that apply in namespace ns uncached: every
+// ClusterCommandRule, then ns's CommandRules, each sorted by name, as the
+// gateway orders them. A list error is returned, never read as no rules. The
+// operator's coverage is display data and a hint (M6 design R9): the gateway
+// reads the rules itself and decides.
+func (r *IntentReconciler) readRules(ctx context.Context, ns string) ([]rules.Rule, error) {
+	var cluster lastv1alpha1.ClusterCommandRuleList
+	if err := r.Reader.List(ctx, &cluster); err != nil {
+		return nil, err
+	}
+	var local lastv1alpha1.CommandRuleList
+	if err := r.Reader.List(ctx, &local, client.InNamespace(ns)); err != nil {
+		return nil, err
+	}
+	rs, _ := rules.FromObjects(ns, cluster.Items, local.Items)
+	return rs, nil
 }
 
 // modes resolves the Intent's effective mode for each stage key across the

@@ -21,6 +21,7 @@ import (
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/policy"
+	"github.com/moogie-labs/last-operator/internal/rules"
 )
 
 // Call log entries.
@@ -84,6 +85,9 @@ type script struct {
 	// queryHook, when set, is called with each QueryAudit call's types; an error it returns is the call's.
 	queryHook      func(types []string) error
 	auditTruncated bool // QueryAudit reports that the index dropped every entry, and serves none
+	// ruleView, when set, narrows the allow rules the fake reads from envtest,
+	// so its view can disagree with the operator's.
+	ruleView func([]rules.Rule) []rules.Rule
 }
 
 // fakeGateway stands in for the gateway in envtest (spec §18). It enforces the
@@ -102,7 +106,11 @@ type script struct {
 // stage's mode from the OperatorConfig and IntentPolicies in envtest, opens an
 // Auto stage within D9's limits with no approval, refuses an Auto plan outside
 // them with gatewayv1.MsgNeedsApproval, and re-checks what authorized the phase
-// before every step.
+// before every step. Allow rules authorize as at the gateway (M6 design R4,
+// R6, R14): after Auto and before an Approve, when the CommandRules and
+// ClusterCommandRules in envtest cover every entry of a non-empty plan
+// (rules.PlanCoverage), or the discovery command; each step of a rule phase is
+// re-matched against the current rules, falling back to an Approve.
 type fakeGateway struct {
 	gatewayv1.GatewayServiceClient // unimplemented RPCs panic
 
@@ -126,7 +134,8 @@ type fakeGateway struct {
 	openBody  map[types.NamespacedName]plan.Body                    // plan of the open phase
 	execBody  map[types.NamespacedName]plan.Body                    // the last executed plan, when a phase of this gateway executed it
 	openAuto  map[types.NamespacedName]bool                         // the open phase was authorized by Auto
-	auths     map[types.NamespacedName][]string                     // how each opened phase was authorized: "auto:<key>" or "approval"
+	openRule  map[types.NamespacedName]bool                         // the open phase was authorized by allow rules
+	auths     map[types.NamespacedName][]string                     // how each opened phase was authorized: "auto:<key>", "rule" or "approval"
 	seq       uint64                                                // the last audit sequence number, across Intents
 	audit     map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
 }
@@ -140,7 +149,7 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{},
 		openBody: map[types.NamespacedName]plan.Body{}, execBody: map[types.NamespacedName]plan.Body{},
-		openAuto: map[types.NamespacedName]bool{}, auths: map[types.NamespacedName][]string{}}
+		openAuto: map[types.NamespacedName]bool{}, openRule: map[types.NamespacedName]bool{}, auths: map[types.NamespacedName][]string{}}
 }
 
 func keyOf(ref *gatewayv1.IntentRef) types.NamespacedName {
@@ -267,6 +276,45 @@ func (f *fakeGateway) mode(ctx context.Context, intent *lastv1alpha1.Intent, sta
 	return policy.Modes(op, policies.Items, intent.Spec.Modes).For(lastv1alpha1.Stage(stage)), nil
 }
 
+// ruleCovered reports whether the allow rules, as view narrows them, cover
+// what a phase of stage would run, as at the gateway: the Intent's pending
+// command for Discovery, else every entry of the non-empty plan body
+// (rules.PlanCoverage).
+func (f *fakeGateway) ruleCovered(ctx context.Context, intent *lastv1alpha1.Intent, stage string, body plan.Body,
+	view func([]rules.Rule) []rules.Rule) (bool, error) {
+	rs, err := f.rulesFor(ctx, client.ObjectKeyFromObject(intent), view)
+	if err != nil {
+		return false, err
+	}
+	if stage == string(lastv1alpha1.StageDiscovery) {
+		pc := intent.Status.PendingCommand
+		return pc != nil && slices.ContainsFunc(rs, func(r rules.Rule) bool {
+			return rules.Covers(r.Spec, lastv1alpha1.StageDiscovery, pc.Command)
+		}), nil
+	}
+	_, uncovered := rules.PlanCoverage(rs, lastv1alpha1.Stage(stage), body)
+	return len(body.Steps) > 0 && len(uncovered) == 0, nil
+}
+
+// rulesFor reads the allow rules that apply in the Intent's namespace from
+// envtest, ordered as the gateway orders them, and narrows them by view when
+// it is set.
+func (f *fakeGateway) rulesFor(ctx context.Context, key types.NamespacedName, view func([]rules.Rule) []rules.Rule) ([]rules.Rule, error) {
+	var cluster lastv1alpha1.ClusterCommandRuleList
+	if err := f.c.List(ctx, &cluster); err != nil {
+		return nil, err
+	}
+	var local lastv1alpha1.CommandRuleList
+	if err := f.c.List(ctx, &local, client.InNamespace(key.Namespace)); err != nil {
+		return nil, err
+	}
+	rs, _ := rules.FromObjects(key.Namespace, cluster.Items, local.Items)
+	if view != nil {
+		rs = view(rs)
+	}
+	return rs, nil
+}
+
 // withinAutoLimits applies design D9's limits as the gateway does (ruling R3):
 // Create, Update and Discovery run anything; every Remediate step must have the
 // extended key of an executed step; a Delete's steps must be a permutation of
@@ -325,15 +373,19 @@ func (f *fakeGateway) withinAutoLimits(key types.NamespacedName, stage string, b
 	return true
 }
 
-// recheck re-checks what authorized the open phase before a step, as the
-// gateway does (ruling R4): a Deny refuses; an Auto phase passes while its stage
-// is still Auto for the same Intent; otherwise an Approve must stand. f.mu must
-// be held.
-func (f *fakeGateway) recheck(ctx context.Context, key types.NamespacedName) error {
-	stage, subject, auto := f.openStage[key], f.open[key], f.openAuto[key]
+// recheck re-checks what authorized the open phase before step cmd, as the
+// gateway does (ruling R4, M6 design R6): a Deny refuses; an Auto phase passes
+// while its stage is still Auto for the same Intent; a rule phase passes while
+// a rule still covers cmd for the same Intent; otherwise an Approve must
+// stand. f.mu must be held.
+func (f *fakeGateway) recheck(ctx context.Context, key types.NamespacedName, cmd lastv1alpha1.Command) error {
+	stage, subject, auto, rule := f.openStage[key], f.open[key], f.openAuto[key], f.openRule[key]
 	withdrawn := "approval withdrawn"
-	if auto {
+	switch {
+	case auto:
 		withdrawn = "auto authorization withdrawn"
+	case rule:
+		withdrawn = "rule authorization withdrawn"
 	}
 	var intent lastv1alpha1.Intent
 	if err := f.c.Get(ctx, key, &intent); err != nil {
@@ -355,12 +407,24 @@ func (f *fakeGateway) recheck(ctx context.Context, key types.NamespacedName) err
 			return nil
 		}
 	}
+	if rule && intent.UID == f.openUID[key] {
+		rs, err := f.rulesFor(ctx, key, f.scriptFor(key).ruleView)
+		if err != nil {
+			return status.Error(codes.Unavailable, err.Error())
+		}
+		if slices.ContainsFunc(rs, func(r rules.Rule) bool { return rules.Covers(r.Spec, lastv1alpha1.Stage(stage), cmd) }) {
+			return nil
+		}
+	}
 	switch {
 	case approved:
 		return nil
 	case auto:
 		return status.Errorf(codes.PermissionDenied, "%s: the %s stage is no longer Auto for this Intent, "+
 			"and no IntentApproval approves this plan", withdrawn, stage)
+	case rule:
+		return status.Errorf(codes.PermissionDenied, "%s: no rule covers step %s and no IntentApproval approves this plan",
+			withdrawn, cmd.ID)
 	}
 	return status.Errorf(codes.PermissionDenied, "%s: no IntentApproval approves this plan", withdrawn)
 }
@@ -441,7 +505,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	key, stage, subject := keyOf(in.GetIntent()), in.GetStage(), in.GetSubjectHash()
 	discovery := stage == string(lastv1alpha1.StageDiscovery)
 	f.mu.Lock()
-	onBegin := f.scriptFor(key).onBegin
+	onBegin, view := f.scriptFor(key).onBegin, f.scriptFor(key).ruleView
 	f.mu.Unlock()
 	if onBegin != nil {
 		onBegin(stage)
@@ -470,6 +534,10 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		payload["plan"], payload["steps"] = string(canonical), len(p.Steps)
+	}
+	covered, err := f.ruleCovered(ctx, &intent, stage, body, view)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -500,12 +568,16 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	case denied:
 		return nil, status.Error(codes.PermissionDenied, gatewayv1.MsgDeniedPrefix+"an approval denies this plan")
 	}
-	// The gateway's authorization order (ruling R2): Auto within D9's limits,
-	// then an Approve, then NeedsApproval for an Auto stage.
+	// The gateway's authorization order (ruling R2, M6 design R4): Auto within
+	// D9's limits, then allow rules, then an Approve, then NeedsApproval for an
+	// Auto stage.
 	auto := mode == lastv1alpha1.ModeAuto && f.withinAutoLimits(key, stage, body)
+	rule := !auto && covered
 	switch {
 	case auto:
 		f.auths[key] = append(f.auths[key], "auto:"+string(policy.KeyFor(lastv1alpha1.Stage(stage))))
+	case rule:
+		f.auths[key] = append(f.auths[key], "rule")
 	case approved:
 		f.auths[key] = append(f.auths[key], "approval")
 	case mode == lastv1alpha1.ModeAuto:
@@ -516,7 +588,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 		return nil, status.Error(codes.FailedPrecondition, gatewayv1.MsgNoApprovalPrefix+"plan")
 	}
 	f.open[key], f.openStage[key], f.openUID[key], f.openKept[key] = subject, stage, intent.UID, kept
-	f.openAuto[key] = auto
+	f.openAuto[key], f.openRule[key] = auto, rule
 	f.openBody[key] = body
 	f.openBegin[key] = f.appendAudit(key, "phase.begin", stage, subject, payload)
 	if discovery || stage == string(lastv1alpha1.StageRemediate) {
@@ -560,7 +632,7 @@ func (f *fakeGateway) RunCommand(ctx context.Context, in *gatewayv1.RunCommandRe
 	if s.onRun != nil {
 		s.onRun(in.GetStepId())
 	}
-	if err := f.recheck(ctx, key); err != nil {
+	if err := f.recheck(ctx, key, c); err != nil {
 		return nil, err
 	}
 	if s.interrupt[in.GetStepId()] {
@@ -798,6 +870,7 @@ func (f *fakeGateway) closePhase(key types.NamespacedName, outcome, reason strin
 	delete(f.openKept, key)
 	delete(f.openBody, key)
 	delete(f.openAuto, key)
+	delete(f.openRule, key)
 }
 
 func (f *fakeGateway) RunProbes(ctx context.Context, in *gatewayv1.RunProbesRequest, _ ...grpc.CallOption) (*gatewayv1.RunProbesResponse, error) {
