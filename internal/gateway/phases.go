@@ -338,7 +338,7 @@ func (g *Gateway) readRules(ctx context.Context, ns string) ([]rules.Rule, map[r
 func (g *Gateway) warnMatchesNothing(r rules.Rule, obj ruleObject) bool {
 	var nothing []string
 	for _, f := range rules.LintFindings(r.Spec) {
-		if f.Nothing {
+		if f.Kind == rules.KindNothing {
 			nothing = append(nothing, f.Message)
 		}
 	}

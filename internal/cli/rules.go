@@ -314,7 +314,7 @@ func showPattern(w io.Writer, mode string, all []entry, spec lastv1alpha1.Comman
 	fs := rules.LintFindings(spec)
 	for _, f := range fs {
 		kind := "warning"
-		if f.Nothing {
+		if f.Kind == rules.KindNothing {
 			kind = "matches nothing"
 		}
 		writef(w, "  %s: %s\n", kind, clean(f.Message))
@@ -539,7 +539,7 @@ func lintRules(d Deps, path string) error {
 		writef(d.Out, "%s:\n", label)
 		for _, f := range fs {
 			kind := "warning"
-			if f.Nothing {
+			if f.Kind == rules.KindNothing {
 				kind = "error"
 			}
 			writef(d.Out, "  %s: %s\n", kind, clean(f.Message))

@@ -29,17 +29,31 @@ func Lint(spec lastv1alpha1.CommandRuleSpec) []string {
 	return out
 }
 
-// Finding is one lint warning. Nothing is set when the pattern can never match
-// a command (non-literal argv[0], misplaced "...", invalid regex, malformed
-// glob); every other finding is about breadth.
+// FindingKind says what a lint finding is about, so callers can pick findings by
+// kind.
+type FindingKind string
+
+const (
+	// KindNothing: the pattern can never match a command (non-literal argv[0],
+	// misplaced "...", invalid regex, malformed glob).
+	KindNothing FindingKind = "Nothing"
+	// KindCode: the code the pattern allows can vary (lintCode).
+	KindCode FindingKind = "Code"
+	// KindDestructive: a wildcard follows a destructive verb.
+	KindDestructive FindingKind = "Destructive"
+	// KindBreadth: any other breadth finding.
+	KindBreadth FindingKind = "Breadth"
+)
+
+// Finding is one lint warning and its kind.
 type Finding struct {
 	Message string
-	Nothing bool
+	Kind    FindingKind
 }
 
 // MatchesNothing reports whether any finding says its pattern matches nothing.
 func MatchesNothing(fs []Finding) bool {
-	return slices.ContainsFunc(fs, func(f Finding) bool { return f.Nothing })
+	return slices.ContainsFunc(fs, func(f Finding) bool { return f.Kind == KindNothing })
 }
 
 // LintFindings is Lint with each warning's kind; Lint returns its messages.
@@ -53,12 +67,11 @@ func LintFindings(spec lastv1alpha1.CommandRuleSpec) []Finding {
 
 func lintPattern(where string, argv []string) []Finding {
 	var out []Finding
-	warn := func(format string, a ...any) {
-		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...)})
+	add := func(kind FindingKind, format string, a ...any) {
+		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...), Kind: kind})
 	}
-	never := func(format string, a ...any) {
-		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...), Nothing: true})
-	}
+	warn := func(format string, a ...any) { add(KindBreadth, format, a...) }
+	never := func(format string, a ...any) { add(KindNothing, format, a...) }
 
 	if len(argv) > 0 && (argv[0] == restToken || strings.HasPrefix(argv[0], regexPrefix) || isGlob(argv[0])) {
 		never("argv[0] must be a literal, so this pattern matches nothing")
@@ -81,7 +94,7 @@ func lintPattern(where string, argv []string) []Finding {
 		warn("'...' at position 1 accepts any arguments after %q", argv[0])
 	}
 	if verb, at := destructiveVerb(argv); verb != "" {
-		warn("wildcard %q after destructive verb %q", argv[at], verb)
+		add(KindDestructive, "wildcard %q after destructive verb %q", argv[at], verb)
 	}
 	for i := 1; i < len(argv); i++ {
 		switch {
@@ -171,7 +184,7 @@ func isFileFlag(a string) bool {
 func lintCode(where string, argv []string) []Finding {
 	var out []Finding
 	warn := func(format string, a ...any) {
-		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...)})
+		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...), Kind: KindCode})
 	}
 	from := len(argv) // code flags at or after this position are already reported
 	lits := make([]string, len(argv))
