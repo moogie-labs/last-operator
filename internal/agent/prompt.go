@@ -53,7 +53,7 @@ A command is:
   "install": []
 }
 Set exactly one of "argv" (run directly) or "script" (run with /bin/sh -c). Step ids are
-required and unique among the steps. "timeout" is a duration such as "5m", or "" for the
+required, unique among the steps, and contain no ":". "timeout" is a duration such as "5m", or "" for the
 default. In steps, argv elements may use ${steps.<id>.stdout} or ${steps.<id>.json.<path>}
 to use the output of an earlier step; files, scripts, discovery commands and teardown
 commands never do.

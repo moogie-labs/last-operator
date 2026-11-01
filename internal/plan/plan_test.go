@@ -89,6 +89,10 @@ func TestValidate(t *testing.T) {
 		{"no steps", plan.Body{}, "at least one step"},
 		{"empty id", plan.Body{Steps: []lastv1alpha1.Command{step("", "true")}}, "has no id"},
 		{"duplicate id", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a"), step("s1", "b")}}, `duplicate step id "s1"`},
+		// I6: "probe:" and "teardown:" name coverage entries, so a step ID never holds ':'.
+		{"id like a probe entry", plan.Body{Steps: []lastv1alpha1.Command{step("probe:up", "a")}}, `step id "probe:up" contains ':'`},
+		{"id like a teardown entry", plan.Body{Steps: []lastv1alpha1.Command{step("teardown:0.0", "a")}}, `step id "teardown:0.0" contains ':'`},
+		{"id with a colon", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a"), step("a:b", "b")}}, `step id "a:b" contains ':'`},
 		{"duplicate probe", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{
 			{Probes: []lastv1alpha1.Probe{probe("p")}}, {Probes: []lastv1alpha1.Probe{probe("p")}}}}, `duplicate probe id "p"`},
 		{"teardown with argv and script", plan.Body{Steps: []lastv1alpha1.Command{step("s1", "a")}, Resources: []lastv1alpha1.ManagedResourceSpec{

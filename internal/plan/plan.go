@@ -188,8 +188,11 @@ func canonicalResources(rs []lastv1alpha1.ManagedResourceSpec) ([]byte, error) {
 	return c, nil
 }
 
-// validateSteps checks that there is a step and that step IDs are present and
-// unique; it returns the set of IDs.
+// validateSteps checks that there is a step and that step IDs are present,
+// unique and free of ':', which coverage entry IDs ("probe:<id>",
+// "teardown:<r>.<i>") use, so no step can pass for a probe or a teardown
+// command; it returns the set of IDs. agent.ParseTurn reaches it through
+// Validate, so the model is told to fix such an ID.
 func validateSteps(steps []lastv1alpha1.Command) (map[string]bool, error) {
 	if len(steps) == 0 {
 		return nil, errors.New("plan: a plan needs at least one step")
@@ -198,6 +201,9 @@ func validateSteps(steps []lastv1alpha1.Command) (map[string]bool, error) {
 	for i, s := range steps {
 		if s.ID == "" {
 			return nil, fmt.Errorf("plan: step %d has no id", i)
+		}
+		if strings.Contains(s.ID, ":") {
+			return nil, fmt.Errorf("plan: step id %q contains ':'; step ids cannot contain ':'", s.ID)
 		}
 		if seen[s.ID] {
 			return nil, fmt.Errorf("plan: duplicate step id %q", s.ID)
