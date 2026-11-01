@@ -3,6 +3,8 @@
 # ClusterCommandRules. This policy refuses their writes even if RBAC were widened.
 # This file is static, so it names the default gateway namespace, last-gateway, as
 # intentapproval-policy.yaml does.
+# DELETE is deliberately not matched: deleting a rule only narrows what runs
+# without approval, so it needs no guard beyond RBAC.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

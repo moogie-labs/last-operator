@@ -48,12 +48,12 @@ type Gateway struct {
 	probing sync.Map // intent key -> in-flight probe run
 	// tornDown maps an Intent key to the UID whose record a succeeded Delete dropped.
 	tornDown sync.Map
-	// ruleRegexWarned holds the allow rule versions (uid@resourceVersion) whose
-	// invalid regex was logged.
-	ruleRegexWarned sync.Map
-	index           auditIndex
-	images          *imageIndex // built-image digest cache
-	builds          *imageBuilds
+	// ruleNothingWarned holds the allow rule versions (uid@resourceVersion)
+	// logged for a pattern that matches nothing.
+	ruleNothingWarned sync.Map
+	index             auditIndex
+	images            *imageIndex // built-image digest cache
+	builds            *imageBuilds
 	// registry is an anonymous client for the bundled front proxy: manifest HEADs.
 	registry *images.Client
 	// newBuilder returns the builder for one build's pod configuration; tests replace it.

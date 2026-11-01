@@ -677,6 +677,10 @@ Pending → Clarifying ⇄ (user answers)
     once, with reason `RunningDiscovery` and a message ending "without
     approval (allow rules)". The operator's coverage is display data and
     a hint; the gateway reads the rules itself and decides (§8.3).
+  - **Rules added later do not release a waiting plan.** Only `record`
+    skips the wait, when it first records the plan. A rule created after
+    a plan is already in `AwaitingApproval` does not move it on: approve
+    it (with `--always-allow` if you want the rules too), or replan.
   - **When the gateway disagrees.** If `BeginPhase` refuses a plan or
     command the operator sent to run because of rules (the gateway's
     rules differ, or changed since), it refuses with `NeedsApproval` or
@@ -1295,7 +1299,11 @@ the CLI flags it when creating rules. Examples:
 - `...` directly after the binary name;
 - globs on subcommand positions of known destructive verbs (`delete`,
   `rm`, `terminate-*`);
-- file arguments (`-f`, `--from-file`).
+- code that can vary: an interpreter followed by a non-literal position,
+  a non-literal position after `--`, or a code flag (`-c`, `-e`, …) whose
+  value is not a literal;
+- file arguments (`-f`, `--from-file`), and any position naming a path
+  under `/work/`, where a command's `files` are written.
 
 **Rules match argv only, not the contents of `files` or anything read
 from stdin.** A rule for `kubectl apply -f ...` allows applying *any*
@@ -1336,12 +1344,20 @@ plan's stage. For each entry the approver picks one of:
 
 - **Exact (`e`):** a rule matching this command's argv literally. Glob
   characters in the arguments are escaped, so they match only themselves.
-- **Generalized (`g`):** `status.plan.generalizations[entry]` (or
-  `status.pendingCommand.generalization`) when the operator wrote one
-  (§9.5), else the CLI's heuristic: `argv[0]` and the first non-flag
-  arguments, up to 3 in all, stay literal; flag names stay literal; a
-  flag's value becomes `*`; every later positional becomes `[!-]*`, so it
-  can't swallow a flag. The CLI shows the lint warnings and the commands
+- **Generalized (`g`):** the CLI's heuristic, always applied to the
+  entry's own command. In M6 the CLI ignores
+  `status.plan.generalizations` and `status.pendingCommand.generalization`:
+  the untrusted operator writes them outside the plan hash (M7 revisits
+  this with a design for trusted suggestions). `argv[0]` and the first
+  non-flag arguments, up to 3 in all, stay literal; flag names stay
+  literal; a flag's separate value and every later positional become
+  `[!-]*`, so they can't swallow a flag; the value of `--flag=value`
+  becomes `--flag=*`. Code never varies: a code flag's value (`-c`, `-e`,
+  `-E`, `--eval`, `-Command`, `-r`, …) stays literal, and from an
+  interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any
+  position) or a `--` argument on, every argument stays literal. A
+  command that carries `files` gets a warning that the rule matches argv
+  only, so the files it runs can change. The CLI shows the lint warnings and the commands
   in this plan the pattern matches. The approver can type an edited
   pattern as space-separated argv, which is linted again, or press Enter
   to accept. A pattern that matches nothing is not accepted.
@@ -1410,7 +1426,9 @@ command to `status.plan.generalizations` (and to
 `status.pendingCommand` for discovery), so the "Generalized" option in
 §9.4 is available during approval. Generalizations are not part of
 `planHash`: they are advice to humans and never authorize anything by
-themselves.
+themselves. *(M6: the CLI does not offer them at all, since the untrusted
+operator writes them outside the plan hash; M7 decides how a suggestion
+reaches the approver in a form they can trust.)*
 
 **Deciding.** `kubectl last rules suggestions` lists pending suggestions.
 Accepting creates the rule as the human and sets `decision: Accepted`.

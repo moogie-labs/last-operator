@@ -767,29 +767,39 @@ func TestARuleListErrorIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestAnInvalidRegexIsLoggedOncePerRuleVersion(t *testing.T) {
+func TestARuleThatMatchesNothingIsLoggedOncePerRuleVersion(t *testing.T) {
 	env := newTestEnv(t)
 	ref := func(name string) rules.Ref { return rules.Ref{Scope: "cluster", Name: name} }
 	invalid := rules.Rule{Ref: ref("invalid"), Spec: ruleSpec(create, kubectlBin, "get", "re:(")}
 	valid := rules.Rule{Ref: ref("valid"), Spec: allSpec()}
 	v1 := ruleObject{uid: "u1", resourceVersion: "1"}
-	if !env.g.warnInvalidRegex(invalid, v1) {
+	if !env.g.warnMatchesNothing(invalid, v1) {
 		t.Fatal("an invalid regex was not logged")
 	}
-	if env.g.warnInvalidRegex(invalid, v1) {
+	if env.g.warnMatchesNothing(invalid, v1) {
 		t.Fatal("an invalid regex was logged twice for one resourceVersion")
 	}
-	if !env.g.warnInvalidRegex(invalid, ruleObject{uid: "u1", resourceVersion: "2"}) {
+	if !env.g.warnMatchesNothing(invalid, ruleObject{uid: "u1", resourceVersion: "2"}) {
 		t.Fatal("an invalid regex was not logged for a new resourceVersion")
 	}
-	if env.g.warnInvalidRegex(valid, v1) {
+	if env.g.warnMatchesNothing(valid, v1) {
 		t.Fatal("a valid rule was logged")
 	}
 	inInstall := ruleSpec(create, kubectlBin, "get")
 	inInstall.Install = []lastv1alpha1.ArgvPattern{{Argv: []string{apkBin, "re:[a-"}}}
-	if !env.g.warnInvalidRegex(rules.Rule{Ref: ref("in-install"), Spec: inInstall},
+	if !env.g.warnMatchesNothing(rules.Rule{Ref: ref("in-install"), Spec: inInstall},
 		ruleObject{uid: "u2", resourceVersion: "1"}) {
 		t.Fatal("an invalid install regex was not logged")
+	}
+	// The typed finding decides, not its text: any pattern that matches nothing is
+	// logged, and a merely broad one is not.
+	if !env.g.warnMatchesNothing(rules.Rule{Ref: ref("glob"), Spec: ruleSpec(create, kubectlBin, "get", "[a")},
+		ruleObject{uid: "u3", resourceVersion: "1"}) {
+		t.Fatal("a malformed glob was not logged")
+	}
+	if env.g.warnMatchesNothing(rules.Rule{Ref: ref("broad"), Spec: ruleSpec(create, kubectlBin, "get", "...")},
+		ruleObject{uid: "u4", resourceVersion: "1"}) {
+		t.Fatal("a broad rule that matches commands was logged")
 	}
 }
 

@@ -320,6 +320,30 @@ An Intent that has executed is not frozen.
   backing off from there. The first runs after a restart are spread over the
   first tenth of that interval, so they do not all start at once.
 
+## Upgrading to M6
+
+- **Apply the CRDs by hand.** `helm upgrade` never updates a chart's `crds/`, so
+  run `kubectl apply -f charts/last-operator/crds/` before upgrading the release.
+  Without it the API server prunes the new `status.remediationTimes`, and the cap
+  of 6 remediations in 24 hours silently does nothing.
+- **Older partial plans join the teardown.** A Create or Update from before M6
+  that failed after running a step is now partial: deleting its Intent puts that
+  plan's teardown commands in the Delete plan, next to the executed plan's.
+  Teardown written before M6 may not tolerate objects that were never made. In
+  Auto, a Delete with a partial plan in the history needs approval (or rules),
+  so read it before you approve. If such a teardown fails on a missing object,
+  fix the cause and change the retry annotation, or, as a last resort, remove
+  the `last.moogie-labs.com/teardown` finalizer by hand, which skips the teardown
+  (spec §17.2).
+- **Provider credentials must not write rules or approvals.** Among
+  ServiceAccounts, the `last-rules` and IntentApproval admission policies refuse
+  only the operator's and those in the gateway namespace (an IntentApproval
+  must also name its creator in `approvedBy`). A Provider whose
+  credentials can write CommandRule, ClusterCommandRule or IntentApproval lets a
+  covered command (say `kubectl apply -f …`) write its own rules or approvals.
+  Check each Provider's RBAC, for example
+  `kubectl auth can-i create commandrules.last.moogie-labs.com --as=system:serviceaccount:<ns>:<sa>`.
+
 ## Demo against Claude (opt-in)
 
 ```bash

@@ -325,29 +325,31 @@ func (g *Gateway) readRules(ctx context.Context, ns string) ([]rules.Rule, map[r
 	objects := make(map[rules.Ref]ruleObject, len(out))
 	for i, r := range out {
 		obj := ruleObject{uid: string(metas[i].UID), resourceVersion: metas[i].ResourceVersion, generation: metas[i].Generation}
-		g.warnInvalidRegex(r, obj)
+		g.warnMatchesNothing(r, obj)
 		objects[r.Ref] = obj
 	}
 	return out, objects, nil
 }
 
-// warnInvalidRegex logs a rule whose re: patterns do not compile, and so match
-// nothing, once for each rule object and resourceVersion. It reports whether it logged.
-func (g *Gateway) warnInvalidRegex(r rules.Rule, obj ruleObject) bool {
-	var invalid []string
-	for _, w := range rules.Lint(r.Spec) {
-		if strings.Contains(w, "invalid regex") {
-			invalid = append(invalid, w)
+// warnMatchesNothing logs a rule with a pattern that matches nothing (an invalid
+// re:, a malformed glob, a non-literal argv[0], a misplaced "..."), so it covers
+// no command, once for each rule object and resourceVersion. It reports whether
+// it logged.
+func (g *Gateway) warnMatchesNothing(r rules.Rule, obj ruleObject) bool {
+	var nothing []string
+	for _, f := range rules.LintFindings(r.Spec) {
+		if f.Nothing {
+			nothing = append(nothing, f.Message)
 		}
 	}
-	if len(invalid) == 0 {
+	if len(nothing) == 0 {
 		return false
 	}
-	if _, seen := g.ruleRegexWarned.LoadOrStore(obj.key(), true); seen {
+	if _, seen := g.ruleNothingWarned.LoadOrStore(obj.key(), true); seen {
 		return false
 	}
-	slog.Warn("Allow rule has an invalid regex that matches nothing", "rule", r.Ref.String(), "uid", obj.uid,
-		"resourceVersion", obj.resourceVersion, "findings", invalid)
+	slog.Warn("Allow rule has a pattern that matches nothing", "rule", r.Ref.String(), "uid", obj.uid,
+		"resourceVersion", obj.resourceVersion, "findings", nothing)
 	return true
 }
 
