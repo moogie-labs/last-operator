@@ -14,9 +14,12 @@ var fileFlags = []string{"-f", "--filename", "--from-file"}
 // and install patterns: patterns that match nothing (non-literal argv[0], misplaced
 // "...", invalid regex, malformed glob); "..." at position 1; a wildcard after a
 // destructive verb; a positional "*" or "..." that also matches flag-shaped arguments;
-// a file flag together with "..." or a glob or regex; and, for any pattern with a file
-// flag, that rules match argv only. Match comes first, then install patterns in
-// order; within a pattern the findings follow that order.
+// code that can vary (an interpreter followed by a non-literal position, a
+// non-literal position after "--", a code flag whose value is not a literal); a
+// file flag together with "..." or a glob or regex; for any pattern with a file
+// flag, that rules match argv only; and each position that names a path under
+// /work/, where a command's files are written. Match comes first, then install
+// patterns in order; within a pattern the findings follow that order.
 func Lint(spec lastv1alpha1.CommandRuleSpec) []string {
 	fs := LintFindings(spec)
 	out := make([]string, len(fs))
@@ -95,7 +98,30 @@ func lintPattern(where string, argv []string) []Finding {
 		}
 		warn("rules match argv only, not files or stdin")
 	}
+	for i := 1; i < len(argv); i++ {
+		if namesWorkPath(argv[i]) {
+			warn("position %d names %q under %s, where a command's files are written; the rule matches the path, not the file's contents", i, argv[i], filesRoot)
+		}
+	}
 	return out
+}
+
+// filesRoot is where the sandbox writes a command's files (the /work mount of
+// internal/sandbox; Command.Files keys must be under it).
+const filesRoot = "/work/"
+
+// namesWorkPath reports whether pattern argument p, or the value of a --flag=p,
+// is a literal, glob or regex that starts with filesRoot.
+func namesWorkPath(p string) bool {
+	if strings.HasPrefix(p, "-") {
+		_, v, ok := strings.Cut(p, "=")
+		if !ok {
+			return false
+		}
+		p = v
+	}
+	p = strings.TrimPrefix(p, regexPrefix)
+	return strings.HasPrefix(p, filesRoot)
 }
 
 // isFlagWithoutValue reports whether a is a flag that takes its value from the next

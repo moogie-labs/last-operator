@@ -287,6 +287,28 @@ func TestAlwaysAllowIgnoresTheStoredGeneralization(t *testing.T) {
 	}
 }
 
+// TestAlwaysAllowWarnsThatFilesCanChange: a rule matches argv only, so for a
+// command that carries files the CLI says the files it runs can change (I3).
+func TestAlwaysAllowWarnsThatFilesCanChange(t *testing.T) {
+	const filesWarning = "this rule matches argv only; the files it runs can change"
+	in := ruleIntent()
+	in.Status.Plan.Steps[0].Run.Argv = []string{"kubectl", wordApply, "-n", "team-x", "-f", "/work/app.yaml"}
+	in.Status.Plan.Steps[0].Files = map[string]string{"/work/app.yaml": "kind: Deployment"}
+	in.Status.Plan.Hash = planHash(in.Status.Plan)
+	c := fakeClient(in)
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=generalized"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	got := out.String()
+	if n := strings.Count(got, filesWarning); n != 1 {
+		t.Errorf("output has %d files warning(s), want 1 (s1 only):\n%s", n, got)
+	}
+	if !strings.Contains(got, "s1 writes /work/app.yaml; "+filesWarning) {
+		t.Errorf("the files warning does not name s1 and its file:\n%s", got)
+	}
+}
+
 func TestRulesAreCreatedBeforeTheApproval(t *testing.T) {
 	var order []string
 	c := interceptCreates(ruleIntent(), func(obj client.Object) error {

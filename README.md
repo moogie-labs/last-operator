@@ -176,13 +176,26 @@ kubectl last approve web -n team-x --always-allow=generalized --providers prod
   once, and the CLI says so.
 
 `kubectl last rules lint rules.yaml` (or `-` for stdin) warns about rules that
-are too broad: `...` right after the binary, a glob or regex after a destructive
-verb (`delete`, `rm`, `destroy`, `terminate-*`, `drop`, `purge`), and a file flag
-(`-f`, `--filename`, `--from-file`) with `...` or a glob. It always reminds you
-that rules match argv only, not file contents or stdin, so a rule for
-`kubectl apply -f *` allows any manifest those credentials permit. It exits 1 only
-for a pattern that matches nothing. `kubectl last plan` shows which rule covers
-each entry.
+are too broad:
+
+- `...` right after the binary, and a positional `*` or `...` that also matches
+  flags such as `--kubeconfig`;
+- a glob, regex or `...` after a destructive verb (`delete`, `rm`, `destroy`,
+  `terminate-*`, `drop`, `purge`);
+- code that can vary: an interpreter (`sh`, `bash`, `python3`, `node`, … at any
+  position) followed by a position that is not a literal, a non-literal position
+  after `--`, or a code flag (`-c`, `-e`, `--eval`, …) whose value is not a literal;
+- a file flag (`-f`, `--filename`, `--from-file`) with `...`, a glob or a regex,
+  and, for any pattern with a file flag, a note that rules match argv only, not
+  file contents or stdin, so a rule for `kubectl apply -f [!-]*` allows any
+  manifest those credentials permit;
+- a position that names a path under `/work/`, where a command's `files` are
+  written: the rule matches the path, not the file's contents.
+
+Lint does not see a command's `files` or stdin, so a rule with none of these
+shapes can still run changed files; `approve --always-allow` warns for each
+command that carries `files`. Lint exits 1 only for a pattern that matches
+nothing. `kubectl last plan` shows which rule covers each entry.
 
 Related limits: at most 6 remediations in 24 hours (`status.remediationTimes`)
 before a drifting Intent fails `RemediationFailed`; a spec edit clears the count.

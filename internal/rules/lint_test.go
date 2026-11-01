@@ -61,6 +61,13 @@ func TestLintWarnings(t *testing.T) {
 		{"code flag value", []string{"su", "root", "-c", "[!-]*"}, []string{`position 3: the value of code flag "-c" is not a literal`}},
 		{"code flag=value", []string{"tool", "--eval=*"}, []string{`position 1: the value of code flag "--eval" is not a literal`}},
 		{"a flag after a code flag is not its value", []string{"tool", "-c", "--x=*"}, nil},
+		// I3: a path under /work/ is a file the command's files write.
+		{"path under /work/", []string{"python3", "/work/x.py"}, []string{`position 1 names "/work/x.py" under /work/`}},
+		{"glob under /work/", []string{"kubectl", "apply", "-f", "/work/*.yaml"},
+			[]string{"file flag", fileNote, `position 3 names "/work/*.yaml" under /work/`}},
+		{"flag=value under /work/", []string{"tool", "--config=/work/c.json"}, []string{`position 1 names "--config=/work/c.json" under /work/`}},
+		{"regex under /work/", []string{"tool", "re:/work/.*"}, []string{`position 1 names "re:/work/.*" under /work/`}},
+		{"/work itself and lookalikes are not under /work/", []string{"tool", "/work", "/workspace/x", "/tmp/work/x"}, nil},
 		{"code flag literal is clean", []string{"su", "root", "-c", "id"}, nil},
 	}
 	for _, tt := range tests {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -222,6 +223,10 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 		writef(w, "No rule for %s: no command in this plan names a provider, and a rule needs at least one; "+
 			"pass --providers p1,p2 to give it some. It is approved just this once.\n", clean(e.id))
 		return nil, nil //nolint:nilnil // nil means no rule
+	}
+	if len(e.cmd.Files) > 0 {
+		writef(w, "Warning: %s writes %s; this rule matches argv only; the files it runs can change.\n", clean(e.id),
+			clean(strings.Join(slices.Sorted(maps.Keys(e.cmd.Files)), ", ")))
 	}
 	mode := opts.mode
 	if mode == allowPrompt {
