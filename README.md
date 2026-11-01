@@ -163,9 +163,12 @@ kubectl last approve web -n team-x --always-allow=generalized --providers prod
   and later positionals into `[!-]*` (so they cannot swallow a flag) and the value
   of `--flag=value` into `--flag=*`. Code never varies: the value of a code flag
   (`-c`, `-e`, `-E`, `--eval`, `-Command`, `-r`, …) stays literal, and from an
-  interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any position)
-  or a `--` argument on, every argument stays literal, so `kubectl exec web -- sh -c
-  date` generalizes to itself. You can edit the pattern at the prompt.
+  interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any position),
+  a command runner that passes the rest on as a command line or another program
+  (`ssh`, `watch`, `su`, `sudo`, `timeout`, `env`, `xargs`, …), a container CLI's
+  `exec` or `run` (`docker exec ctr …`, unless a later `--` marks the program), or a
+  `--` argument on, every argument stays literal, so `kubectl exec web -- sh -c
+  date` and `ssh host uptime` generalize to themselves. You can edit the pattern at the prompt.
 - Rules are created as you (so your RBAC applies), then the approval. They are
   named `<intent>-<entry>-<hash8>` and labelled
   `last.moogie-labs.com/intent: <intent>`.
@@ -183,7 +186,8 @@ are too broad:
 - a glob, regex or `...` after a destructive verb (`delete`, `rm`, `destroy`,
   `terminate-*`, `drop`, `purge`);
 - code that can vary: an interpreter (`sh`, `bash`, `python3`, `node`, … at any
-  position) followed by a position that is not a literal, a non-literal position
+  position), a command runner (`ssh`, `watch`, `su`, `sudo`, `timeout`, …) or a
+  container CLI's `exec`/`run`, followed by a position that is not a literal, a non-literal position
   after `--`, or a code flag (`-c`, `-e`, `--eval`, …) whose value is not a literal;
 - a file flag (`-f`, `--filename`, `--from-file`) with `...`, a glob or a regex,
   and, for any pattern with a file flag, a note that rules match argv only, not

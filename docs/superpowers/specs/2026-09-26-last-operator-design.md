@@ -1299,7 +1299,9 @@ the CLI flags it when creating rules. Examples:
 - `...` directly after the binary name;
 - globs on subcommand positions of known destructive verbs (`delete`,
   `rm`, `terminate-*`);
-- code that can vary: an interpreter followed by a non-literal position,
+- code that can vary: an interpreter, a command runner (`ssh`, `watch`,
+  `su`, `sudo`, `timeout`, …) or a container CLI's `exec`/`run`, followed by
+  a non-literal position,
   a non-literal position after `--`, or a code flag (`-c`, `-e`, …) whose
   value is not a literal;
 - file arguments (`-f`, `--from-file`), and any position naming a path
@@ -1355,7 +1357,10 @@ plan's stage. For each entry the approver picks one of:
   becomes `--flag=*`. Code never varies: a code flag's value (`-c`, `-e`,
   `-E`, `--eval`, `-Command`, `-r`, …) stays literal, and from an
   interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any
-  position) or a `--` argument on, every argument stays literal. A
+  position), a command runner (`ssh`, `rsh`, `watch`, `su`, `runuser`,
+  `sudo`, `doas`, `timeout`, `nice`, `env`, `xargs`, `chroot`, …), a
+  container CLI's `exec` or `run` (unless a later `--` marks the program),
+  or a `--` argument on, every argument stays literal. A
   command that carries `files` gets a warning that the rule matches argv
   only, so the files it runs can change. The CLI shows the lint warnings and the commands
   in this plan the pattern matches. The approver can type an edited

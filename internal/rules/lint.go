@@ -165,8 +165,8 @@ func isFileFlag(a string) bool {
 }
 
 // lintCode warns where the code a pattern allows can vary (M6 design §10, C1): the
-// first interpreter (a literal one, at any position) followed by a non-literal
-// position; the first "--" followed by one; and each
+// first position where code or another command line starts (StartsCode, on a
+// literal, other than "--") followed by a non-literal position; the first "--" followed by one; and each
 // code flag whose value is not a literal, outside those two.
 func lintCode(where string, argv []string) []Finding {
 	var out []Finding
@@ -174,8 +174,12 @@ func lintCode(where string, argv []string) []Finding {
 		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...)})
 	}
 	from := len(argv) // code flags at or after this position are already reported
+	lits := make([]string, len(argv))
 	for i, a := range argv {
-		if lit, ok := literalOf(a); !ok || !IsInterpreter(lit) {
+		lits[i], _ = literalOf(a)
+	}
+	for i, a := range argv {
+		if _, ok := literalOf(a); !ok || lits[i] == endOfFlags || !StartsCode(lits, i) {
 			continue
 		}
 		if j := nextNonLiteral(argv, i+1); j > 0 {

