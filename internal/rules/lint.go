@@ -88,8 +88,9 @@ func lintPattern(where string, argv []string) []Finding {
 			warn("position %d: `...` also accepts flags such as --kubeconfig", i)
 		}
 	}
+	out = append(out, lintCode(where, argv)...)
 	if slices.ContainsFunc(argv, isFileFlag) {
-		if slices.ContainsFunc(argv, func(a string) bool { return a == restToken || isGlob(a) || strings.HasPrefix(a, regexPrefix) }) {
+		if slices.ContainsFunc(argv, nonLiteral) {
 			warn("file flag combined with '...', a glob or a regex lets the file argument vary")
 		}
 		warn("rules match argv only, not files or stdin")
@@ -112,7 +113,7 @@ func destructiveVerb(argv []string) (verb string, at int) {
 			continue
 		}
 		for j := i + 1; j < len(argv); j++ {
-			if argv[j] == restToken || isGlob(argv[j]) || strings.HasPrefix(argv[j], regexPrefix) {
+			if nonLiteral(argv[j]) {
 				return argv[i], j
 			}
 		}
@@ -135,4 +136,108 @@ func isFileFlag(a string) bool {
 		}
 	}
 	return false
+}
+
+// lintCode warns where the code a pattern allows can vary (M6 design §10, C1): the
+// first interpreter (a literal one, at any position) followed by a non-literal
+// position; the first "--" followed by one; and each
+// code flag whose value is not a literal, outside those two.
+func lintCode(where string, argv []string) []Finding {
+	var out []Finding
+	warn := func(format string, a ...any) {
+		out = append(out, Finding{Message: where + ": " + fmt.Sprintf(format, a...)})
+	}
+	from := len(argv) // code flags at or after this position are already reported
+	for i, a := range argv {
+		if lit, ok := literalOf(a); !ok || !IsInterpreter(lit) {
+			continue
+		}
+		if j := nextNonLiteral(argv, i+1); j > 0 {
+			warn("position %d: %q runs code, and position %d is not a literal, so the code can vary", i, a, j)
+			from = i
+		}
+		break
+	}
+	if i := slices.IndexFunc(argv, func(a string) bool { lit, ok := literalOf(a); return ok && lit == endOfFlags }); i > 0 {
+		if j := nextNonLiteral(argv, i+1); j > 0 {
+			warn("position %d is not a literal after \"--\" at position %d, so the command after \"--\" can vary", j, i)
+			from = min(from, i)
+		}
+	}
+	for i := 1; i < from; i++ {
+		name, value, hasValue := strings.Cut(argv[i], "=")
+		lit, ok := literalOf(name)
+		if !ok || !isCodeFlag(lit) {
+			continue
+		}
+		// a next argument that starts with "-" is another flag, not this one's value
+		if hasValue && nonLiteral(value) || !hasValue && i+1 < from && nonLiteral(argv[i+1]) && !strings.HasPrefix(argv[i+1], "-") {
+			warn("position %d: the value of code flag %q is not a literal, so the code can vary", i+boolInt(!hasValue), lit)
+		}
+	}
+	return out
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// nextNonLiteral returns the first position at or after from whose pattern matches
+// more than one string, or -1.
+func nextNonLiteral(argv []string, from int) int {
+	for j := from; j < len(argv); j++ {
+		if nonLiteral(argv[j]) {
+			return j
+		}
+	}
+	return -1
+}
+
+func nonLiteral(p string) bool {
+	_, ok := literalOf(p)
+	return !ok
+}
+
+// literalOf returns the one string pattern argument p matches, when it matches
+// exactly one: a plain literal, or a glob made only of escaped characters and
+// one-character classes such as Generalize writes ("a\*b", "[r]e:x", "[.]..").
+func literalOf(p string) (string, bool) {
+	if p == restToken || strings.HasPrefix(p, regexPrefix) {
+		return "", false
+	}
+	if !isGlob(p) {
+		return p, true
+	}
+	rs := []rune(p)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		switch rs[i] {
+		case '*', '?':
+			return "", false
+		case '\\':
+			i++
+			if i >= len(rs) {
+				return "", false
+			}
+			b.WriteRune(rs[i])
+		case '[':
+			j := i + 1
+			if j < len(rs) && rs[j] == '\\' {
+				j++
+			} else if j < len(rs) && (rs[j] == '!' || rs[j] == '^' || rs[j] == ']') {
+				return "", false
+			}
+			if j+1 >= len(rs) || rs[j+1] != ']' {
+				return "", false
+			}
+			b.WriteRune(rs[j])
+			i = j + 1
+		default:
+			b.WriteRune(rs[i])
+		}
+	}
+	return b.String(), true
 }

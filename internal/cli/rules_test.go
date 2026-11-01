@@ -141,7 +141,7 @@ func TestAlwaysAllowGeneralizedUsesTheEditedPattern(t *testing.T) {
 		t.Errorf("match = %q, want %q", r.Spec.Match.Argv, want)
 	}
 	got := out.String()
-	if !strings.Contains(got, "kubectl apply -n * -f *") { // the proposal
+	if !strings.Contains(got, "kubectl apply -n [!-]* -f [!-]*") { // the proposal
 		t.Errorf("output lacks the proposed pattern:\n%s", got)
 	}
 	// The lint is printed for the edited pattern, and the examples are the plan commands it matches.
@@ -236,7 +236,7 @@ func TestAlwaysAllowGeneralizedWithNoStdin(t *testing.T) {
 		t.Fatalf("rules = %d, want 4", len(items))
 	}
 	s1 := ruleFor(t, items, "web-s1-")
-	if want := []string{"kubectl", wordApply, "-n", "*", "-f", "*"}; !reflect.DeepEqual(s1.Spec.Match.Argv, want) {
+	if want := []string{"kubectl", wordApply, "-n", "[!-]*", "-f", "[!-]*"}; !reflect.DeepEqual(s1.Spec.Match.Argv, want) {
 		t.Errorf("s1 match = %q, want %q", s1.Spec.Match.Argv, want)
 	}
 	if a := approvalsIn(t, c); len(a) != 1 {

@@ -159,9 +159,13 @@ kubectl last approve web -n team-x --always-allow=generalized --providers prod
 ```
 
 - **Exact** matches this argv only. **Generalized** keeps `argv[0]` and the first
-  two non-flag arguments literal, keeps flag names, turns flag values into `*`
-  and later positionals into `[!-]*` (so they cannot swallow a flag). You can edit
-  the pattern at the prompt.
+  two non-flag arguments literal, keeps flag names, turns a flag's separate value
+  and later positionals into `[!-]*` (so they cannot swallow a flag) and the value
+  of `--flag=value` into `--flag=*`. Code never varies: the value of a code flag
+  (`-c`, `-e`, `-E`, `--eval`, `-Command`, `-r`, …) stays literal, and from an
+  interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any position)
+  or a `--` argument on, every argument stays literal, so `kubectl exec web -- sh -c
+  date` generalizes to itself. You can edit the pattern at the prompt.
 - Rules are created as you (so your RBAC applies), then the approval. They are
   named `<intent>-<entry>-<hash8>` and labelled
   `last.moogie-labs.com/intent: <intent>`.
