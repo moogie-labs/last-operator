@@ -166,9 +166,15 @@ kubectl last approve web -n team-x --always-allow=generalized --providers prod
   interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any position),
   a command runner that passes the rest on as a command line or another program
   (`ssh`, `watch`, `su`, `sudo`, `timeout`, `env`, `xargs`, …), a container CLI's
-  `exec` or `run` (`docker exec ctr …`, unless a later `--` marks the program), or a
+  `exec` or `run`, at any position (`docker exec ctr …`, `kubectl -n x exec …`), or a
   `--` argument on, every argument stays literal, so `kubectl exec web -- sh -c
   date` and `ssh host uptime` generalize to themselves. You can edit the pattern at the prompt.
+- What a generalized rule still lets vary is worth reading before you accept it.
+  `--image=*` lets any image run, which is any code in the cluster under that
+  rule's credentials. A command-valued `--flag=value` option (`rsync --rsh=…`,
+  `helm --post-renderer=…`) generalizes to `--flag=*`, and lint does not know which
+  options take commands. Code shipped through a cloud API (`aws ssm send-command`,
+  `az vm run-command`) is outside what rules and lint can see.
 - Rules are created as you (so your RBAC applies), then the approval. They are
   named `<intent>-<entry>-<hash8>` and labelled
   `last.moogie-labs.com/intent: <intent>`.

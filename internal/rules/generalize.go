@@ -22,7 +22,7 @@ const positionalValue = "[!-]*"
 // becomes "[!-]*". Code never varies (M6 design §10, C1): the value of a code flag
 // (codeFlags), in either form, stays literal, and from the position where code or
 // another command line starts (StartsCode: an interpreter or command runner word at
-// any position, a "--" argument, or a container CLI's exec or run) every argument
+// any position, a "--" argument, or a container CLI's exec or run anywhere) every argument
 // stays literal. Literals are escaped so they match only themselves. The empty string
 // stays the empty literal. A script has no argv, so the result is empty.
 func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
@@ -73,17 +73,18 @@ func Generalize(cmd lastv1alpha1.Command) lastv1alpha1.ArgvPattern {
 // another command line, so none of them may vary: a "--" argument; an interpreter
 // word (IsInterpreter); a command runner (IsRunner), such as ssh or watch, which
 // passes the rest on as a command line, or timeout and sudo, which run the rest as
-// another program; or the exec or run subcommand of a container CLI (docker exec,
-// kubectl run), whose rest is the program the container runs, unless a later "--"
-// marks where that program starts.
+// another program; or an exec or run argument, at any position, of a container CLI
+// (docker exec, docker container exec, kubectl -n x exec, kubectl run), whose rest
+// names the container and the program it runs.
 func StartsCode(argv []string, i int) bool {
 	a := argv[i]
 	switch {
 	case i > 0 && a == endOfFlags, IsInterpreter(a), IsRunner(a):
 		return true
-	case i == 1 && (a == "exec" || a == "run"):
-		// with a later "--", that argument marks where the program starts
-		return containerCLIs[baseName(argv[0])] && !slices.Contains(argv[2:], endOfFlags)
+	case i > 0 && (a == "exec" || a == "run"):
+		// at any position: global flags (docker -H h exec), nouns (docker container
+		// exec, docker compose exec) and a later "--" all leave the program variable
+		return containerCLIs[baseName(argv[0])]
 	}
 	return false
 }

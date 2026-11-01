@@ -1359,7 +1359,7 @@ plan's stage. For each entry the approver picks one of:
   interpreter (`sh`, `bash`, `python3`, `node`, `perl`, `pwsh`, … at any
   position), a command runner (`ssh`, `rsh`, `watch`, `su`, `runuser`,
   `sudo`, `doas`, `timeout`, `nice`, `env`, `xargs`, `chroot`, …), a
-  container CLI's `exec` or `run` (unless a later `--` marks the program),
+  container CLI's `exec` or `run` (at any position),
   or a `--` argument on, every argument stays literal. A
   command that carries `files` gets a warning that the rule matches argv
   only, so the files it runs can change. The CLI shows the lint warnings and the commands

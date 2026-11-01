@@ -173,6 +173,13 @@ func TestGeneralizeNeverWidensCode(t *testing.T) {
 		{[]string{"sudo", "-u", "app", "kubectl", "get", "pods"}, []string{"sudo", "-u", "root", "kubectl", "get", "pods"}},
 		{[]string{"docker", "exec", "ctr", "ls", "/tmp"}, []string{"docker", "exec", "ctr", "rm", "/data"}},
 		{[]string{"xargs", "-I{}", "kubectl", "get", "{}"}, []string{"xargs", "-I{}", "rm", "-rf", "{}"}},
+		// a container CLI's exec or run at any position, with or without a later "--"
+		{[]string{"docker", "exec", "ctr", "ls", "/tmp", "--", "y"}, []string{"docker", "exec", "ctr", "rm", "/data", "--", "y"}},
+		{[]string{"docker", "exec", "-it", "ctr", "ls", "--", "y"}, []string{"docker", "exec", "-it", "other", "ls", "--", "y"}},
+		{[]string{"docker", "-H", "tcp://h", "exec", "ctr", "ls", "/tmp"}, []string{"docker", "-H", "tcp://h", "exec", "ctr", "rm", "/data"}},
+		{[]string{"docker", "container", "exec", "ctr", "ls", "/tmp"}, []string{"docker", "container", "exec", "ctr", "rm", "/data"}},
+		{[]string{"docker", "compose", "exec", "svc", "ls", "/tmp"}, []string{"docker", "compose", "exec", "svc", "rm", "/data"}},
+		{[]string{"kubectl", "-n", "prod", "exec", "web", "ls", "/tmp"}, []string{"kubectl", "-n", "prod", "exec", "web", "rm", "/data"}},
 	}
 	for _, tc := range notMatch {
 		p := gen(tc.argv...)
