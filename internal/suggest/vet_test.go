@@ -3,6 +3,7 @@ package suggest_test
 
 import (
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -143,7 +144,7 @@ func TestVetSkipsCoveredAndSuppressed(t *testing.T) {
 
 func TestVetPassesGeneralizeOutput(t *testing.T) {
 	words := []string{"kubectl", "get", "bash", "-c", "-n", "--", "--x=y", "--eval=1", "", "*", "a?b", "[c]", `d\e`, "re:x",
-		"...", "-", "web", "/work/kc", "node", "python3", "-e", "exec", "run", "--all", "=", "-=", "x=y"}
+		"...", "-", "web", "delete", "rm", "destroy", "terminate-x", "/work/kc", "node", "python3", "-e", "exec", "run", "--all", "=", "-=", "x=y"}
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 20000 {
 		argv := make([]string, 1+r.IntN(8))
@@ -157,10 +158,19 @@ func TestVetPassesGeneralizeOutput(t *testing.T) {
 		p := proposal(rules.Generalize(c).Argv)
 		p.Examples = []lastv1alpha1.Command{c}
 		p.Spec.Providers = nil
+		for _, f := range rules.LintFindings(p.Spec) {
+			if f.Kind == rules.KindNothing || f.Kind == rules.KindCode {
+				t.Fatalf("Generalize(%q) = %q has a %s finding: %s", argv, p.Spec.Match.Argv, f.Kind, f.Message)
+			}
+		}
 		ok, reason, _ := suggest.Vet(p, nil, nil)
-		if !ok && (strings.Contains(reason, "matches nothing") || strings.Contains(reason, "code") ||
-			strings.Contains(reason, "destructive") || strings.Contains(reason, "argv[0]") || strings.Contains(reason, "does not match")) {
-			t.Fatalf("Vet(Generalize(%q) = %q) dropped: %s", argv, p.Spec.Match.Argv, reason)
+		if !ok {
+			hasVerb := slices.ContainsFunc(argv, func(a string) bool {
+				return a == "delete" || a == "rm" || a == "destroy" || strings.HasPrefix(a, "terminate-")
+			})
+			if !hasVerb || !strings.Contains(reason, "destructive verb") {
+				t.Fatalf("Vet(Generalize(%q) = %q) dropped: %s", argv, p.Spec.Match.Argv, reason)
+			}
 		}
 	}
 }

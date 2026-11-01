@@ -23,10 +23,10 @@ func Broader(p, g lastv1alpha1.CommandRuleSpec) []string {
 		case i >= len(gm):
 			out = append(out, fmt.Sprintf("match[%d] %q allows arguments the plain rule does not", i, a))
 		case a == "...":
-			if rules.Contains(gm[i:], pm[i:]) != rules.Yes {
+			if contains(gm[i:], pm[i:]) != rules.Yes {
 				out = append(out, fmt.Sprintf("match[%d] \"...\" allows arguments the plain rule does not", i))
 			}
-		case rules.Contains(gm[i:i+1], []string{a}) != rules.Yes:
+		case contains(gm[i:i+1], []string{a}) != rules.Yes:
 			out = append(out, fmt.Sprintf("match[%d] %q is broader than %q", i, a, gm[i]))
 		}
 	}
@@ -51,6 +51,13 @@ func Broader(p, g lastv1alpha1.CommandRuleSpec) []string {
 		}
 	}
 	return out
+}
+
+// contains is rules.Contains on pattern tails. Contains lints each pattern and
+// treats element 0 as argv[0], so a tail that starts with a glob, "re:" or "..."
+// would be undecided; a shared literal prefix avoids that.
+func contains(broad, narrow []string) rules.Verdict {
+	return rules.Contains(append([]string{"x"}, broad...), append([]string{"x"}, narrow...))
 }
 
 // sameStage treats Create and Update as one class, as rules do.

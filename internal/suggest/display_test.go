@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/rules"
 	"github.com/moogie-labs/last-operator/internal/suggest"
 )
 
@@ -59,5 +60,28 @@ func TestSanitize(t *testing.T) {
 	}
 	if got := suggest.Sanitize("x\x1b]0;title\x07y\r\u202ez"); got != "xyz" {
 		t.Errorf("Sanitize = %q", got)
+	}
+}
+
+func TestBroaderOnGeneralizeOutput(t *testing.T) {
+	gen := func(argv ...string) lastv1alpha1.CommandRuleSpec {
+		return lastv1alpha1.CommandRuleSpec{
+			Stages: []lastv1alpha1.Stage{lastv1alpha1.StageDiscovery}, Providers: []string{"aws"},
+			Match: rules.Generalize(lastv1alpha1.Command{Run: lastv1alpha1.CommandRun{Argv: argv}}),
+		}
+	}
+	g := gen("aws", "s3", "ls", "bucket", "--region=us-east-1")
+	if got := suggest.Broader(g, g); len(got) != 0 {
+		t.Errorf("Broader(g, g) = %q", got)
+	}
+	p := *g.DeepCopy()
+	p.Match.Argv = []string{"aws", "s3", "ls", "*", "--region=*"}
+	if got := suggest.Broader(p, g); len(got) != 1 {
+		t.Errorf("* against [!-]*: %q", got)
+	}
+	r := *g.DeepCopy()
+	r.Match.Argv = []string{"aws", "s3", "..."}
+	if got := suggest.Broader(r, r); len(got) != 0 {
+		t.Errorf("... against ...: %q", got)
 	}
 }
