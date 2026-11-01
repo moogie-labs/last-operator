@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -244,17 +245,45 @@ func TestAlwaysAllowGeneralizedWithNoStdin(t *testing.T) {
 	}
 }
 
-func TestAlwaysAllowPrefersTheStoredGeneralization(t *testing.T) {
+// TestAlwaysAllowIgnoresTheStoredGeneralization: the operator writes
+// status.plan.generalizations and pendingCommand.generalization outside the plan
+// hash, and the operator is untrusted, so the CLI never offers them (M6 design §10, I2).
+func TestAlwaysAllowIgnoresTheStoredGeneralization(t *testing.T) {
 	in := ruleIntent()
-	in.Status.Plan.Generalizations = map[string]lastv1alpha1.Generalization{"s2": {Argv: []string{"kubectl", "rollout", "status", "[!-]*", "[!-]*"}}}
+	broad := []string{"kubectl", "..."}
+	in.Status.Plan.Generalizations = map[string]lastv1alpha1.Generalization{
+		"s1": {Argv: broad}, "s2": {Argv: broad}, "probe:up": {Argv: broad}, "teardown:0.0": {Argv: broad}}
 	c := fakeClient(in)
 	d, out := depsFor(c, "")
 	if err := execute(d, verbApprove, webName, "--always-allow=generalized"); err != nil {
 		t.Fatalf("approve = %v\n%s", err, out)
 	}
-	s2 := ruleFor(t, nsRules(t, c), "web-s2-")
+	items := nsRules(t, c)
+	for _, prefix := range []string{"web-s1-", "web-s2-", "web-probe-up-", "web-teardown-0-0-"} {
+		if r := ruleFor(t, items, prefix); slices.Contains(r.Spec.Match.Argv, "...") {
+			t.Errorf("%s match = %q, want rules.Generalize, not the stored generalization", prefix, r.Spec.Match.Argv)
+		}
+	}
+	s2 := ruleFor(t, items, "web-s2-")
 	if want := []string{"kubectl", "rollout", "status", "[!-]*", "[!-]*"}; !reflect.DeepEqual(s2.Spec.Match.Argv, want) {
-		t.Errorf("s2 match = %q, want the stored generalization", s2.Spec.Match.Argv)
+		t.Errorf("s2 match = %q, want %q", s2.Spec.Match.Argv, want)
+	}
+	if strings.Contains(out.String(), "kubectl ...") {
+		t.Errorf("the stored generalization was offered:\n%s", out)
+	}
+
+	look := pendingIntent()
+	look.Status.PendingCommand.Command.Providers = []string{k8sProv}
+	look.Status.PendingCommand.Generalization = &lastv1alpha1.Generalization{Argv: broad}
+	look.Status.PendingCommand.Hash = discoveryHash(look.Status.PendingCommand)
+	c = fakeClient(look)
+	d, out = depsFor(c, "")
+	if err := execute(d, verbApprove, "look", "--always-allow=generalized"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	items = nsRules(t, c)
+	if len(items) != 1 || !reflect.DeepEqual(items[0].Spec.Match.Argv, []string{"kubectl", "get", "ns"}) {
+		t.Errorf("discovery rules = %+v, want one matching kubectl get ns", items)
 	}
 }
 

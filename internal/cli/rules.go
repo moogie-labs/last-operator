@@ -54,7 +54,6 @@ type entry struct {
 	id    string
 	cmd   lastv1alpha1.Command
 	stage lastv1alpha1.Stage // the stage its rule defaults to
-	gen   *lastv1alpha1.Generalization
 }
 
 // parseStages reads a comma list of stages and checks each against the Stage enum.
@@ -97,13 +96,12 @@ func entriesOf(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) []entry {
 		pc := in.Status.PendingCommand
 		cmd := pc.Command
 		cmd.ID = plan.DiscoveryStepID
-		return []entry{{id: plan.DiscoveryStepID, cmd: cmd, stage: stage, gen: pc.Generalization}}
+		return []entry{{id: plan.DiscoveryStepID, cmd: cmd, stage: stage}}
 	}
 	p := in.Status.Plan
 	var out []entry
 	for _, s := range p.Steps {
-		g := p.Generalizations[s.ID]
-		out = append(out, entry{id: s.ID, cmd: s, stage: stage, gen: generalizationOf(g)})
+		out = append(out, entry{id: s.ID, cmd: s, stage: stage})
 	}
 	if stage != lastv1alpha1.StageCreate && stage != lastv1alpha1.StageUpdate {
 		return out
@@ -111,21 +109,14 @@ func entriesOf(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) []entry {
 	for ri, r := range p.Resources {
 		for _, pr := range r.Probes {
 			id := "probe:" + pr.ID
-			out = append(out, entry{id: id, cmd: pr.Command, stage: stage, gen: generalizationOf(p.Generalizations[id])})
+			out = append(out, entry{id: id, cmd: pr.Command, stage: stage})
 		}
 		for i, c := range r.Teardown {
 			id := fmt.Sprintf("teardown:%d.%d", ri, i)
-			out = append(out, entry{id: id, cmd: c, stage: lastv1alpha1.StageDelete, gen: generalizationOf(p.Generalizations[id])})
+			out = append(out, entry{id: id, cmd: c, stage: lastv1alpha1.StageDelete})
 		}
 	}
 	return out
-}
-
-func generalizationOf(g lastv1alpha1.Generalization) *lastv1alpha1.Generalization {
-	if len(g.Argv) == 0 {
-		return nil
-	}
-	return &g
 }
 
 // coverageOf computes which of the subject's entries the rules cover, as the
@@ -255,7 +246,10 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 	if mode == allowExact {
 		pattern = rules.Exact(e.cmd.Run.Argv)
 	} else {
-		pattern = proposal(e)
+		// Always the CLI's own generalization of the entry's command: the operator's
+		// status.plan.generalizations and pendingCommand.generalization are outside
+		// the plan hash and the operator is untrusted (M6 design §10, I2).
+		pattern = rules.Generalize(e.cmd)
 	}
 	for {
 		spec := ruleSpec(in, e, pattern, opts.stages, providers)
@@ -302,15 +296,6 @@ func providersFor(e entry, all []entry, opts allowOpts) []string {
 		return slices.Clone(opts.providers)
 	}
 	return union
-}
-
-// proposal is the generalized pattern for e: the operator's, when it wrote
-// one, else the CLI's (M6 design R11).
-func proposal(e entry) lastv1alpha1.ArgvPattern {
-	if e.gen != nil && len(e.gen.Argv) > 0 {
-		return lastv1alpha1.ArgvPattern{Argv: slices.Clone(e.gen.Argv)}
-	}
-	return rules.Generalize(e.cmd)
 }
 
 // showPattern prints a candidate rule's pattern, its lint warnings, and the
