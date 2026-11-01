@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +140,11 @@ type ruleObserved struct {
 	UID             string `json:"uid"`
 	ResourceVersion string `json:"resourceVersion"`
 	Generation      int64  `json:"generation"`
+	// Spec is the rule's spec as the gateway read it, in canonical JSON, and
+	// SpecHash is sha256:<hex> of those bytes, so the entry alone says what the
+	// rule allowed.
+	Spec     json.RawMessage `json:"spec"`
+	SpecHash string          `json:"specHash"`
 }
 
 // ruleObject is the identity and version of the object a rules.Rule was read from.
@@ -754,11 +761,19 @@ func ruleStep(ref rules.Ref) *audit.Authorization {
 	return &audit.Authorization{Kind: authRule, Name: ref.String()}
 }
 
-// observeRule writes rule.observed for the rule object obj that ref names.
-func observeRule(d denial, ref rules.Ref, obj ruleObject) error {
+// observeRule writes rule.observed for rule r, read from the rule object obj,
+// with its canonical spec and that spec's hash.
+func observeRule(d denial, r rules.Rule, obj ruleObject) error {
+	spec, err := audit.Canonical(r.Spec)
+	if err != nil {
+		return status.Errorf(codes.Internal, "record rule.observed: %v", err)
+	}
+	sum := sha256.Sum256(spec)
+	ref := r.Ref
 	if _, err := d.w.Append(d.ctx, audit.Draft{Type: audit.TypeRuleObserved, Actor: d.actor, Intent: d.intent, Stage: d.stage,
 		SubjectHash: d.subject, Payload: ruleObserved{Scope: ref.Scope, Namespace: ref.Namespace, Name: ref.Name, UID: obj.uid,
-			ResourceVersion: obj.resourceVersion, Generation: obj.generation}}); err != nil {
+			ResourceVersion: obj.resourceVersion, Generation: obj.generation, Spec: spec,
+			SpecHash: "sha256:" + hex.EncodeToString(sum[:])}}); err != nil {
 		return status.Errorf(codes.Unavailable, "record rule.observed: %v", err)
 	}
 	return nil
@@ -794,7 +809,7 @@ func observeRules(d denial, layers policyLayers, covered map[string]rules.Ref) (
 			continue
 		}
 		obj := layers.ruleObjects[r.Ref]
-		if err := observeRule(d, r.Ref, obj); err != nil {
+		if err := observeRule(d, r, obj); err != nil {
 			return nil, nil, err
 		}
 		seen[obj.key()] = true

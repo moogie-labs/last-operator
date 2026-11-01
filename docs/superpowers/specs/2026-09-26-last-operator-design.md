@@ -1215,7 +1215,10 @@ phase keeps the same authorization; an approved phase carries
 **The audit of rules.** A rule phase writes no `approval.observed`. Before
 its `phase.begin` it writes one `rule.observed` for each distinct rule it
 uses, in the order above, with payload `{scope: "namespace"|"cluster",
-namespace, name, uid, resourceVersion, generation}`. Its `phase.begin`
+namespace, name, uid, resourceVersion, generation, spec, specHash}`:
+`spec` is the rule's spec as the gateway read it, in canonical JSON, and
+`specHash` is `sha256:<hex>` of those bytes, so the entry alone says what
+the rule allowed. Its `phase.begin`
 carries `authorizedBy: {kind: rule}` and a `rules` map from each entry to
 the rule that covers it, as `<scope>/<namespace or ->/<name>`. Entry IDs
 are `<stepID>` (a Discovery phase's is the command's ID, `discovery`),

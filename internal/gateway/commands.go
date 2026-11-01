@@ -224,7 +224,7 @@ func (g *Gateway) recheckAuthorization(ctx context.Context, d denial, layers pol
 	if p.rule && sameIntent {
 		if r, obj, ok := layers.covering(p.stage, cmd); ok {
 			if !p.ruleSeen[obj.key()] {
-				if err := observeRule(d, r.Ref, obj); err != nil {
+				if err := observeRule(d, r, obj); err != nil {
 					return nil, err // nothing ran; the step can be retried
 				}
 				p.ruleSeen[obj.key()] = true

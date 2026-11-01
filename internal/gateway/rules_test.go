@@ -2,10 +2,13 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -171,6 +174,15 @@ func jsonObject(t *testing.T, s string) map[string]any {
 	return m
 }
 
+func jsonValue(t *testing.T, b []byte) any {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
 func ruleAuthOf(ref string) audit.Authorization {
 	return audit.Authorization{Kind: authRule, Name: ref}
 }
@@ -216,8 +228,33 @@ func TestCoveredPlanRunsWithoutApproval(t *testing.T) {
 		jsonObject(t, fmt.Sprintf(observedJSON, "cluster", "", ruleGetNS, cluster.UID, cluster.ResourceVersion, cluster.Generation)),
 		jsonObject(t, fmt.Sprintf(observedJSON, "namespace", envNS, ruleGetDeploy, ns.UID, ns.ResourceVersion, ns.Generation)),
 	}
-	if len(payloads) != 2 || !maps.Equal(payloads[0], want[0]) || !maps.Equal(payloads[1], want[1]) {
-		t.Fatalf("rule.observed payloads = %v, want %v", payloads, want)
+	specs := []lastv1alpha1.CommandRuleSpec{cluster.Spec, ns.Spec}
+	if len(payloads) != 2 {
+		t.Fatalf("rule.observed payloads = %v, want 2", payloads)
+	}
+	// Each rule.observed also carries the rule's spec and its hash, so an auditor
+	// can tell what the rule allowed (I4).
+	for i, p := range payloads {
+		spec, hash := p["spec"], p["specHash"]
+		delete(p, "spec")
+		delete(p, "specHash")
+		if !maps.Equal(p, want[i]) {
+			t.Fatalf("rule.observed payload %d = %v, want %v", i, p, want[i])
+		}
+		c, err := audit.Canonical(specs[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(spec, jsonValue(t, c)) {
+			t.Errorf("rule.observed %d spec = %v, want %s", i, spec, c)
+		}
+		sum := sha256.Sum256(c)
+		if want := "sha256:" + hex.EncodeToString(sum[:]); hash != want {
+			t.Errorf("rule.observed %d specHash = %v, want %s", i, hash, want)
+		}
+		if again, err := audit.Canonical(spec); err != nil || sha256.Sum256(again) != sum {
+			t.Errorf("rule.observed %d specHash is not the hash of its own spec (%v)", i, err)
+		}
 	}
 	if cluster.UID == "" || cluster.ResourceVersion == "" || cluster.Generation != ruleGeneration {
 		t.Fatalf("rule object = %+v", cluster.ObjectMeta)
