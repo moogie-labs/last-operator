@@ -1439,7 +1439,7 @@ created at three points:
 |---|---|---|
 | `PlanTime` | With every new plan | Rules that would let this Intent's **remediation** and **teardown** run unattended, and rules generalizing the plan's own commands |
 | `RepeatedApproval` | A command group has been approved manually `repeatThreshold` times (counted via `QueryAudit`). Commands are grouped by binary, leading subcommands (the first non-flag arguments, up to 3), provider set, and stage. | A rule covering those approvals |
-| `PeriodicReview` | Every `reviewInterval` | Consolidated rules from recent audit history (e.g. merging several narrow rules) |
+| `PeriodicReview` | Every `reviewInterval` | Consolidated rules from recent audit history (e.g. merging several narrow rules), and Cluster rules for CommandRules identical in several namespaces |
 
 **PlanTime.** While a plan waits in `AwaitingApproval`, the operator
 runs one PlanTime step for it, after reading the approvals, so a plan
@@ -1463,6 +1463,62 @@ provider with no `_suggest.` key for the Intent means no proposal and
 no event. The step never fails the Intent or holds up its approval, and
 an Intent deleted during it just ends it. Discovery commands get no
 PlanTime suggestions.
+
+**RepeatedApproval.** A leader-only runner in the operator scans a
+namespace's audit for commands people keep approving. A successful
+`EndPhase` queues a scan of its namespace, and a namespace is scanned at
+most once a minute: scans queued within a minute of its last one run
+together once the minute is up. A scan reads the `command.start` entries
+of every Intent in the namespace with `QueryAudit`, 200 at a time from a
+high-water mark the operator keeps in memory, and keeps the commands
+whose `authorizedBy.kind` is `approval`. It leaves out scripts, commands
+with `${steps.` references and commands a rule already covers at the
+stage they ran at. The rest are grouped by `rules.GroupKey`: the stage
+class (Create and Update as one), the sorted provider set, and the
+binary with its first non-flag arguments, up to 3 in all; an argv with a
+code position (`StartsCode`) is keyed by its whole argv, so only exact
+repeats group. A group fires when its commands come from at least
+`repeatThreshold` distinct IntentApprovals (distinct
+`authorizedBy.name`; default 3, from `OperatorConfig.spec.suggestions`),
+and fires again only once it gains another approval or at the next
+PeriodicReview. Its examples are its 20 newest distinct commands, and
+the newest one's Intent labels the suggestion, receives its events and
+is the Intent the one `purpose: suggest` call is made for. That call
+sends every example under one entry id, and the first answer that
+matches every example and passes the vetting checks is the pattern.
+Otherwise the deterministic merge is used: examples of the same length
+whose equal positions stay literal and whose differing positions become
+`[!-]*`, when none of those values starts with `-` and none is at or
+after a code position. When neither gives a pattern there is no
+suggestion, only a `SuggestionFailed` event; a failed call also raises
+one, and the merge is still tried. The rule gets the group's stage
+class and providers, the union of the examples' egress and an exact
+install pattern per install command; a group whose commands name no
+provider gets no suggestion. Target: `Namespace`. Approvals of a deleted
+Intent stop counting, because its audit index is gone.
+
+**PeriodicReview.** The same runner reviews every `reviewInterval`
+(default 24h, 1h to 720h), with ±10% jitter, from a timer in memory that
+a restart starts again; creates are idempotent, so that is harmless. In
+each namespace that has Intents or CommandRules the review runs the full
+RepeatedApproval scan, which also lets every group fire again, and then
+consolidates the namespace's CommandRules: two or more that share
+`argv[0]`, pattern length, stages, providers, egress and install are
+merged into one proposal by the same deterministic merge, applied to
+their patterns (a position equal in all stays as it is), with no LLM. A
+merge fails when a differing position is at or after a code position,
+or holds a pattern `[!-]*` does not decidedly contain. The proposal must
+contain each merged rule's match, its rationale names the rules, and its
+examples are audited commands they covered while the index still holds
+them. Last, CommandRules whose specs are identical in two or more
+namespaces (canonical JSON with sorted sets, ignoring `source` and
+`description`) give one `Cluster`-target suggestion in the system
+namespace, whose rationale names the rules. A Cluster proposal is
+compared with every Denied suggestion, so its `SuggestionSuppressed`
+event names the Denied one by namespace and name. Review and
+consolidation suggestions use the trigger `PeriodicReview`; their events
+go to the Intent of their newest example, and there are none when no
+audited command is an example.
 
 **Vetting, names and the cap.** Before creating a proposal the operator
 vets it (M7 design S5): it drops one whose pattern matches nothing, lets

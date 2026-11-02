@@ -2,6 +2,7 @@
 package rules_test
 
 import (
+	"slices"
 	"testing"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -116,6 +117,45 @@ func TestMerge(t *testing.T) {
 			for _, a := range tt.argvs {
 				if !rules.Match(got, a) {
 					t.Errorf("merged %q does not match example %q", got, a)
+				}
+			}
+		})
+	}
+}
+
+func TestMergePatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		patterns [][]string
+		want     []string // nil when no merge
+	}{
+		{"one differing literal", [][]string{{"kubectl", "get", "pods", "web"}, {"kubectl", "get", "pods", "api"}},
+			[]string{"kubectl", "get", "pods", "[!-]*"}},
+		{"equal globs stay as they are", [][]string{{"aws", "s3", "ls", "[!-]*", "a"}, {"aws", "s3", "ls", "[!-]*", "b"}},
+			[]string{"aws", "s3", "ls", "[!-]*", "[!-]*"}},
+		{"a trailing ... stays", [][]string{{"aws", "s3", "a", "..."}, {"aws", "s3", "b", "..."}}, []string{"aws", "s3", "[!-]*", "..."}},
+		{"a differing glob that cannot start with a dash", [][]string{{"aws", "s3", "a*"}, {"aws", "s3", "b"}}, []string{"aws", "s3", "[!-]*"}},
+		{"escaped literals stay escaped", [][]string{{"tool", `a\*`, "x"}, {"tool", `a\*`, "y"}}, []string{"tool", `a\*`, "[!-]*"}},
+		{"a differing glob that may start with a dash", [][]string{{"aws", "s3", "*"}, {"aws", "s3", "b"}}, nil},
+		{"a differing literal flag", [][]string{{"kubectl", "get", "-A"}, {"kubectl", "get", "web"}}, nil},
+		{"a differing regex", [][]string{{"tool", "re:a.*"}, {"tool", "b"}}, nil},
+		{"... against a value", [][]string{{"aws", "s3", "..."}, {"aws", "s3", "b"}}, nil},
+		{"different lengths", [][]string{{"aws", "s3"}, {"aws", "s3", "ls"}}, nil},
+		{"argv[0] differs", [][]string{{"kubectl", "get"}, {"oc", "get"}}, nil},
+		{"difference after a runner", [][]string{{"ssh", "a", "uptime"}, {"ssh", "b", "uptime"}}, nil},
+		{"difference after an exec", [][]string{{"kubectl", "exec", "web", "--", "date"}, {"kubectl", "exec", "web", "--", "id"}}, nil},
+		{"a code flag's value differs", [][]string{{"tool", "-c", "x"}, {"tool", "-c", "y"}}, nil},
+		{"no patterns", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := rules.MergePatterns(tt.patterns)
+			if ok != (tt.want != nil) || ok && !slices.Equal(got, tt.want) {
+				t.Fatalf("MergePatterns = %q, %v; want %q", got, ok, tt.want)
+			}
+			for _, p := range tt.patterns {
+				if ok && rules.Contains(got, p) != rules.Yes {
+					t.Errorf("merged %q does not contain %q", got, p)
 				}
 			}
 		})

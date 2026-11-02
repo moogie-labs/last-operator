@@ -290,13 +290,19 @@ func (r *IntentReconciler) writeOutputs(ctx context.Context, in *lastv1alpha1.In
 
 // endPhase calls EndPhase with the same outcome until it is recorded, retrying
 // while the gateway is unavailable (it treats a repeated EndPhase as a retry of
-// its record save) or a step of the phase still holds it (Aborted).
+// its record save) or a step of the phase still holds it (Aborted). A phase
+// recorded as succeeded queues a RepeatedApproval scan of the namespace (M7
+// design §4.2); the scan itself keeps only the commands an IntentApproval
+// authorized.
 func (r *IntentReconciler) endPhase(ctx context.Context, in *lastv1alpha1.Intent, subject string, succeeded bool, reason string) error {
 	req := &gatewayv1.EndPhaseRequest{Intent: intentRef(in), SubjectHash: subject, Succeeded: succeeded, Reason: reason}
 	for attempt := 1; ; attempt++ {
 		ectx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
 		_, err := r.Gateway.EndPhase(ectx, req)
 		cancel()
+		if succeeded && err == nil {
+			r.Runner.Queue(in.Namespace)
+		}
 		if code := status.Code(err); (code != codes.Unavailable && code != codes.Aborted) || attempt == retries {
 			return err
 		}

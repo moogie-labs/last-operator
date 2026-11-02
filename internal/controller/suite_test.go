@@ -38,6 +38,7 @@ var (
 	// intentReconciler is the suite's Intent controller; specs drop its
 	// sessions to act out an operator restart.
 	intentReconciler *IntentReconciler
+	suiteRunner      *SuggestRunner
 )
 
 func TestControllers(t *testing.T) {
@@ -85,11 +86,14 @@ var _ = BeforeSuite(func() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme.Scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
 	Expect(err).NotTo(HaveOccurred())
+	suggestions := &SuggestionCreator{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
+		Recorder: mgr.GetEventRecorder("last-operator"), SystemNamespace: "last-system", MaxPending: DefaultMaxPending}
+	// The suite's runner only records what the reconciler queues: it is never
+	// started, so no scan reaches the shared fake gateway's call logs.
+	suiteRunner = &SuggestRunner{Creator: suggestions, Gateway: gw, Client: k8sClient}
 	intentReconciler = &IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw, Reader: mgr.GetAPIReader(),
 		Planner: &agent.Planner{LLM: gw}, Recorder: mgr.GetEventRecorder("last-operator"),
-		RetryDelay: 10 * time.Millisecond, Now: clockNow,
-		Suggestions: &SuggestionCreator{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
-			Recorder: mgr.GetEventRecorder("last-operator"), SystemNamespace: "last-system", MaxPending: DefaultMaxPending}}
+		RetryDelay: 10 * time.Millisecond, Now: clockNow, Suggestions: suggestions, Runner: suiteRunner}
 	Expect(intentReconciler.SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()

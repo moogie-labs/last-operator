@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -261,6 +262,19 @@ func (f *fakeGateway) appendAudit(key types.NamespacedName, typ, stage, subject 
 	f.seq++
 	f.audit[key] = append(f.audit[key], &gatewayv1.AuditEntry{Seq: f.seq, Type: typ, Stage: stage, SubjectHash: subject, Payload: b})
 	return f.seq
+}
+
+// seedCommand appends a command.start entry for cmd, run at stage, to the
+// Intent's audit index, with the gateway executor's payload and auth
+// ("approval:<namespace>/<IntentApproval>", "rule:<rule>" or "auto:<key>") as
+// its authorized_by. QueryAudit serves it, paged like any other entry.
+func (f *fakeGateway) seedCommand(key types.NamespacedName, stage lastv1alpha1.Stage, cmd lastv1alpha1.Command, auth string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appendAudit(key, audit.TypeCommandStart, string(stage), "", map[string]any{
+		"runId": "run-" + strconv.FormatUint(f.seq+1, 10), "image": "runner", "command": cmd,
+		"providers": cmd.Providers, "egress": cmd.Egress})
+	f.audit[key][len(f.audit[key])-1].AuthorizedBy = authorization(auth)
 }
 
 // authorization maps an f.auths value ("auto:<key>", "rule", "approval") to the

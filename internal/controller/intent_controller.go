@@ -50,6 +50,9 @@ type IntentReconciler struct {
 	// Suggestions creates rule suggestions for plans that wait for an approval
 	// (M7 design §4.1); nil makes none.
 	Suggestions *SuggestionCreator
+	// Runner runs the RepeatedApproval scans a successful EndPhase queues
+	// (M7 design §4.2); nil queues none.
+	Runner *SuggestRunner
 
 	// sessions holds planning conversations in memory (M3 spec §4.3).
 	sessions sessionStore

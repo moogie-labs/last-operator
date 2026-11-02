@@ -107,8 +107,10 @@ func (c *SuggestionCreator) Create(ctx context.Context, p suggest.Proposal, inte
 	ok, reason, suppressedBy := suggest.Vet(p, existing, denied)
 	switch {
 	case ok:
-	case suppressedBy != "":
-		d := deniedObjs[slices.IndexFunc(denied, func(d suggest.Denied) bool { return d.Name == suppressedBy })]
+	case suppressedBy != nil:
+		d := deniedObjs[slices.IndexFunc(denied, func(d suggest.Denied) bool {
+			return d.Namespace == suppressedBy.Namespace && d.Name == suppressedBy.Name
+		})]
 		c.event(intent, d, corev1.EventTypeNormal, ReasonSuggestionSuppressed,
 			"Did not suggest %q: it would let through everything the Denied suggestion %s/%s does", what, d.Namespace, d.Name)
 		return "", false, nil

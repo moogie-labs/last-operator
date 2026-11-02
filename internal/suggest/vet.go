@@ -35,13 +35,15 @@ type Denied struct {
 
 // Vet is the S5 gate followed by the S8 suppression check. It returns ok when the
 // proposal may be created. Otherwise reason says why it was dropped or skipped, and
-// suppressedBy names the Denied suggestion that suppressed it, if one did.
-func Vet(p Proposal, existing []rules.Rule, denied []Denied) (ok bool, reason, suppressedBy string) {
+// suppressedBy points at the element of denied that suppressed it, if one did:
+// its namespace and name identify it even when a Cluster proposal is compared
+// with same-named denials in several namespaces.
+func Vet(p Proposal, existing []rules.Rule, denied []Denied) (ok bool, reason string, suppressedBy *Denied) {
 	if p.Spec.Source != nil {
-		return false, "the proposal sets source", ""
+		return false, "the proposal sets source", nil
 	}
 	if len([]rune(p.Rationale)) > MaxRationale {
-		return false, fmt.Sprintf("the rationale is longer than %d characters", MaxRationale), ""
+		return false, fmt.Sprintf("the rationale is longer than %d characters", MaxRationale), nil
 	}
 	findings := rules.LintFindings(p.Spec)
 	for _, k := range []struct {
@@ -53,45 +55,45 @@ func Vet(p Proposal, existing []rules.Rule, denied []Denied) (ok bool, reason, s
 		{rules.KindDestructive, "a wildcard follows a destructive verb"},
 	} {
 		if i := slices.IndexFunc(findings, func(f rules.Finding) bool { return f.Kind == k.kind }); i >= 0 {
-			return false, k.what + ": " + findings[i].Message, ""
+			return false, k.what + ": " + findings[i].Message, nil
 		}
 	}
 	match := p.Spec.Match.Argv
 	if len(p.Contains) > 0 {
 		for _, c := range p.Contains {
 			if len(c) == 0 || len(match) == 0 || c[0] != match[0] {
-				return false, "argv[0] differs from a consolidated pattern", ""
+				return false, "argv[0] differs from a consolidated pattern", nil
 			}
 			if rules.Contains(match, c) != rules.Yes {
-				return false, fmt.Sprintf("the match does not contain %q", c), ""
+				return false, fmt.Sprintf("the match does not contain %q", c), nil
 			}
 		}
 	} else {
 		if len(p.Examples) == 0 {
-			return false, "the proposal has no examples", ""
+			return false, "the proposal has no examples", nil
 		}
 		for _, e := range p.Examples {
 			if len(match) == 0 || len(e.Run.Argv) == 0 || e.Run.Argv[0] != match[0] {
-				return false, "argv[0] differs from an example's argv[0]", ""
+				return false, "argv[0] differs from an example's argv[0]", nil
 			}
 			if !rules.Match(match, e.Run.Argv) {
-				return false, fmt.Sprintf("the match does not match the example %q", e.Run.Argv), ""
+				return false, fmt.Sprintf("the match does not match the example %q", e.Run.Argv), nil
 			}
 		}
 	}
 	if covered(p, existing) {
-		return false, "already covered by existing rules", ""
+		return false, "already covered by existing rules", nil
 	}
-	for _, d := range denied {
+	for i, d := range denied {
 		if p.TargetScope == lastv1alpha1.RuleScopeNamespace &&
 			(d.Scope != lastv1alpha1.RuleScopeNamespace || d.Namespace != p.Namespace) {
 			continue
 		}
 		if v := rules.Subsumes(p.Spec, d.Spec); v == rules.Yes || v == rules.Unknown {
-			return false, "suppressed by a denied suggestion", d.Name
+			return false, "suppressed by a denied suggestion", &denied[i]
 		}
 	}
-	return true, "", ""
+	return true, "", nil
 }
 
 // covered reports whether existing rules already allow everything the proposal is

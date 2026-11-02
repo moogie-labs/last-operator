@@ -23,6 +23,7 @@ Rules you must follow:
 - Never put a wildcard (a glob, a regex or "...") after a destructive verb such as delete, rm, destroy, drop, purge or terminate-*.
 - Prefer [!-]* for values, so a slot cannot match a flag.
 - Give one pattern per entry, and it must match that entry's argv.
+- Entries that share an id are one group of commands: give one pattern for that id, and it must match every argv in the group.
 - Keep rationales under 500 characters, in plain text.
 
 Reply only with JSON of the form {"suggestions":[{"entry":"<id>","argv":["..."],"rationale":"..."}]}. An empty list is fine.`

@@ -57,8 +57,8 @@ func TestVetDrops(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ok, reason, by := suggest.Vet(tt.p, nil, nil)
-			if ok || !strings.Contains(reason, tt.want) || by != "" {
-				t.Errorf("Vet = %v, %q, %q; want a drop naming %q", ok, reason, by, tt.want)
+			if ok || !strings.Contains(reason, tt.want) || by != nil {
+				t.Errorf("Vet = %v, %q, %+v; want a drop naming %q", ok, reason, by, tt.want)
 			}
 		})
 	}
@@ -111,11 +111,11 @@ func TestVetSkipsCoveredAndSuppressed(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ok, reason, by := suggest.Vet(proposal(tt.match, tt.ex), nil, denied)
-			if tt.sup && (ok || by != "sugg-1" || reason == "") {
-				t.Errorf("Vet = %v, %q, %q; want suppressed by sugg-1", ok, reason, by)
+			if tt.sup && (ok || by == nil || by.Name != "sugg-1" || reason == "") {
+				t.Errorf("Vet = %v, %q, %+v; want suppressed by sugg-1", ok, reason, by)
 			}
-			if !tt.sup && (!ok || by != "") {
-				t.Errorf("Vet = %v, %q, %q; want ok", ok, reason, by)
+			if !tt.sup && (!ok || by != nil) {
+				t.Errorf("Vet = %v, %q, %+v; want ok", ok, reason, by)
 			}
 		})
 	}
@@ -132,13 +132,22 @@ func TestVetSkipsCoveredAndSuppressed(t *testing.T) {
 	cp := p
 	cp.TargetScope = lastv1alpha1.RuleScopeCluster
 	cp.Namespace = ""
-	if ok, _, by := suggest.Vet(cp, nil, elsewhere); ok || by != "sugg-y" {
-		t.Errorf("Vet = %v, %q; want a Cluster proposal suppressed by a denial in any namespace", ok, by)
+	if ok, _, by := suggest.Vet(cp, nil, elsewhere); ok || by == nil || by.Namespace != "team-y" || by.Name != "sugg-y" {
+		t.Errorf("Vet = %v, %+v; want a Cluster proposal suppressed by team-y/sugg-y", ok, by)
+	}
+	// a Cluster proposal names the Denied suggestion that suppressed it by
+	// namespace too: same-named denials elsewhere are not confused with it
+	sameName := []suggest.Denied{
+		{Scope: lastv1alpha1.RuleScopeNamespace, Namespace: "team-a", Name: "sugg-d", Spec: spec("gcloud", "...")},
+		{Scope: lastv1alpha1.RuleScopeNamespace, Namespace: "team-b", Name: "sugg-d", Spec: spec("aws", "ec2", "...")},
+	}
+	if ok, _, by := suggest.Vet(cp, nil, sameName); ok || by == nil || by.Namespace != "team-b" || by.Name != "sugg-d" {
+		t.Errorf("Vet = %v, %+v; want a Cluster proposal suppressed by team-b/sugg-d", ok, by)
 	}
 	// undecidable counts as suppressing
 	und := []suggest.Denied{{Scope: lastv1alpha1.RuleScopeNamespace, Namespace: "team-x", Name: "sugg-u", Spec: spec("aws", "re:e.*", "...")}}
-	if ok, _, by := suggest.Vet(proposal([]string{"aws", "ec2", "..."}, []string{"aws", "ec2", "x"}), nil, und); ok || by != "sugg-u" {
-		t.Errorf("Vet = %v, %q; want an undecidable comparison to suppress", ok, by)
+	if ok, _, by := suggest.Vet(proposal([]string{"aws", "ec2", "..."}, []string{"aws", "ec2", "x"}), nil, und); ok || by == nil || by.Name != "sugg-u" {
+		t.Errorf("Vet = %v, %+v; want an undecidable comparison to suppress", ok, by)
 	}
 }
 

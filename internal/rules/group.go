@@ -85,30 +85,47 @@ func leadingPositionals(argv []string) []string {
 // empty ("[!-]*" matches neither), or when a differing position is at or after
 // a StartsCode position of any argv. It also reports false when the result lets
 // code vary (lintCode), such as a code flag's value. The result matches every
-// argv.
+// argv. It is MergePatterns over the argvs' exact patterns.
 func Merge(argvs [][]string) ([]string, bool) {
-	if len(argvs) == 0 || len(argvs[0]) == 0 {
+	patterns := make([][]string, len(argvs))
+	for i, a := range argvs {
+		patterns[i] = Exact(a).Argv
+	}
+	return MergePatterns(patterns)
+}
+
+// MergePatterns is the deterministic merge for match patterns, which
+// PeriodicReview's consolidation uses (M7 design §4.3): patterns of the same
+// length, with the same argv[0], become one where a position identical in
+// every pattern stays as it is and a differing position becomes "[!-]*". It
+// reports false when there are no patterns, when lengths or argv[0] differ,
+// when a differing position is "..." or a position "[!-]*" does not decidedly
+// contain (Contains), when a differing position is at or after a StartsCode
+// position of any pattern (read through its literal words), or when the result
+// lets code vary (lintCode). The result contains every pattern.
+func MergePatterns(patterns [][]string) ([]string, bool) {
+	if len(patterns) == 0 || len(patterns[0]) == 0 {
 		return nil, false
 	}
-	n := len(argvs[0])
+	n := len(patterns[0])
 	codeFrom := n
-	for _, a := range argvs {
-		if len(a) != n {
+	for _, p := range patterns {
+		if len(p) != n {
 			return nil, false
 		}
-		if i := startsCodeAt(a); i >= 0 {
+		if i := startsCodeAt(words(p)); i >= 0 {
 			codeFrom = min(codeFrom, i)
 		}
 	}
 	out := make([]string, n)
 	for i := range n {
-		first := argvs[0][i]
-		if !slices.ContainsFunc(argvs, func(a []string) bool { return a[i] != first }) {
-			out[i] = literal(first)
+		first := patterns[0][i]
+		if !slices.ContainsFunc(patterns, func(p []string) bool { return p[i] != first }) {
+			out[i] = first
 			continue
 		}
-		if i == 0 || i >= codeFrom || slices.ContainsFunc(argvs, func(a []string) bool {
-			return a[i] == "" || strings.HasPrefix(a[i], "-")
+		if i == 0 || i >= codeFrom || slices.ContainsFunc(patterns, func(p []string) bool {
+			return p[i] == restToken || containsArg(positionalValue, p[i]) != Yes
 		}) {
 			return nil, false
 		}
@@ -118,4 +135,18 @@ func Merge(argvs [][]string) ([]string, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// words is pattern with each position that matches one string replaced by that
+// string, so StartsCode reads the words a person would see.
+func words(pattern []string) []string {
+	out := make([]string, len(pattern))
+	for i, p := range pattern {
+		if lit, ok := literalOf(p); ok {
+			out[i] = lit
+		} else {
+			out[i] = p
+		}
+	}
+	return out
 }

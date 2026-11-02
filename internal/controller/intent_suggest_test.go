@@ -93,7 +93,7 @@ var _ = Describe("PlanTime suggestions", func() {
 	create, remediate, del := lastv1alpha1.StageCreate, lastv1alpha1.StageRemediate, lastv1alpha1.StageDelete
 	s1 := k8sStep("s1", argKubectl, "apply", "-f", "web.yaml")
 	steps := []lastv1alpha1.Command{s1}
-	applyAny := []string{argKubectl, "apply", "-f", "[!-]*"}
+	applyAny := []string{argKubectl, "apply", "-f", anyValue}
 	applyAnySpec := lastv1alpha1.CommandRuleSpec{Stages: stages(create, remediate), Providers: []string{providerK8s},
 		Match: lastv1alpha1.ArgvPattern{Argv: applyAny}}
 	applyWebSpec := lastv1alpha1.CommandRuleSpec{Stages: stages(create, remediate), Providers: []string{providerK8s},
