@@ -1488,8 +1488,8 @@ sends every example under one entry id, and the first answer that
 matches every example and passes the vetting checks is the pattern.
 Otherwise the deterministic merge is used: examples of the same length
 whose equal positions stay literal and whose differing positions become
-`[!-]*`, when none of those values starts with `-` and none is at or
-after a code position. When neither gives a pattern there is no
+`[!-]*`, when none of those values starts with `-` or is a destructive
+verb and none is at or after a code position. When neither gives a pattern there is no
 suggestion, only a `SuggestionFailed` event; a failed call also raises
 one, and the merge is still tried. The rule gets the group's stage
 class and providers, the union of the examples' egress and an exact
@@ -1507,7 +1507,8 @@ consolidates the namespace's CommandRules: two or more that share
 merged into one proposal by the same deterministic merge, applied to
 their patterns (a position equal in all stays as it is), with no LLM. A
 merge fails when a differing position is at or after a code position,
-or holds a pattern `[!-]*` does not decidedly contain. The proposal must
+holds a destructive verb, or holds a pattern `[!-]*` does not decidedly
+contain. The proposal must
 contain each merged rule's match, its rationale names the rules, and its
 examples are audited commands they covered while the index still holds
 them. Last, CommandRules whose specs are identical in two or more
@@ -1522,7 +1523,9 @@ audited command is an example.
 
 **Vetting, names and the cap.** Before creating a proposal the operator
 vets it (M7 design S5): it drops one whose pattern matches nothing, lets
-code vary, or puts a wildcard after a destructive verb, one that does
+code vary, or puts a wildcard after a destructive verb or in place of one
+(a non-literal position where an example, or a pattern it must contain,
+has a destructive verb), one that does
 not match its examples, and one that sets `source`, with a
 `SuggestionDropped` event; it skips one that existing rules already
 cover. A suggestion is named `sugg-<hash10>`, the first 10 hex

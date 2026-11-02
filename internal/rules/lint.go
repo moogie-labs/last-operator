@@ -160,6 +160,56 @@ func destructiveVerb(argv []string) (verb string, at int) {
 	return "", 0
 }
 
+// WidenedDestructive returns a destructive verb that a non-literal position of
+// match stands in for, or "": the argument at that position of one of argvs,
+// or the one string that position of one of patterns matches. A trailing
+// "..." of match stands in for every position from its own on. Lint's
+// destructive check sees only a literal destructive verb followed by a
+// wildcard; this catches the wildcard that replaces the verb itself, as a
+// merge of "kubectl delete pods web" and "kubectl get pods api" would.
+func WidenedDestructive(match []string, argvs, patterns [][]string) string {
+	for i, m := range match {
+		if !nonLiteral(m) {
+			continue
+		}
+		end := i + 1
+		if m == restToken {
+			end = -1 // every position from i on
+		}
+		for _, w := range wordsAt(argvs, patterns, i, end) {
+			if isDestructive(w) {
+				return w
+			}
+		}
+	}
+	return ""
+}
+
+// wordsAt returns the arguments of argvs and the one-string positions of
+// patterns at positions [from, end); end -1 means to the end.
+func wordsAt(argvs, patterns [][]string, from, end int) []string {
+	var out []string
+	span := func(n int) int {
+		if end < 0 || end > n {
+			return n
+		}
+		return end
+	}
+	for _, a := range argvs {
+		for j := from; j < span(len(a)); j++ {
+			out = append(out, a[j])
+		}
+	}
+	for _, p := range patterns {
+		for j := from; j < span(len(p)); j++ {
+			if lit, ok := literalOf(p[j]); ok {
+				out = append(out, lit)
+			}
+		}
+	}
+	return out
+}
+
 func isDestructive(a string) bool {
 	switch a {
 	case "delete", "rm", "destroy", "drop", "purge":

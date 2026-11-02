@@ -82,7 +82,7 @@ func leadingPositionals(argv []string) []string {
 // in every argv stays an escaped literal and a differing position becomes
 // "[!-]*". It reports false when there are no argvs, when lengths or argv[0]
 // differ, when a differing position holds a value that starts with "-" or is
-// empty ("[!-]*" matches neither), or when a differing position is at or after
+// empty ("[!-]*" matches neither) or a destructive verb, or when a differing position is at or after
 // a StartsCode position of any argv. It also reports false when the result lets
 // code vary (lintCode), such as a code flag's value. The result matches every
 // argv. It is MergePatterns over the argvs' exact patterns.
@@ -100,7 +100,9 @@ func Merge(argvs [][]string) ([]string, bool) {
 // every pattern stays as it is and a differing position becomes "[!-]*". It
 // reports false when there are no patterns, when lengths or argv[0] differ,
 // when a differing position is "..." or a position "[!-]*" does not decidedly
-// contain (Contains), when a differing position is at or after a StartsCode
+// contain (Contains), when a differing position holds a destructive verb in
+// any pattern (a wildcard must never stand in for one, M7 design S5), when a
+// differing position is at or after a StartsCode
 // position of any pattern (read through its literal words), or when the result
 // lets code vary (lintCode). The result contains every pattern.
 func MergePatterns(patterns [][]string) ([]string, bool) {
@@ -125,7 +127,8 @@ func MergePatterns(patterns [][]string) ([]string, bool) {
 			continue
 		}
 		if i == 0 || i >= codeFrom || slices.ContainsFunc(patterns, func(p []string) bool {
-			return p[i] == restToken || containsArg(positionalValue, p[i]) != Yes
+			lit, isLit := literalOf(p[i])
+			return p[i] == restToken || containsArg(positionalValue, p[i]) != Yes || isLit && isDestructive(lit)
 		}) {
 			return nil, false
 		}

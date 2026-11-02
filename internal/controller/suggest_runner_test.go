@@ -368,6 +368,15 @@ var _ = Describe("PeriodicReview suggestions", func() {
 		Expect(suggestionsIn(ns)).To(BeEmpty())
 	})
 
+	It("Review does not consolidate a rule for a destructive verb with one for another verb", func() {
+		ns := newNamespace()
+		del := lastv1alpha1.StageDelete
+		createRule(ns, "delete-web", stages(del), argKubectl, "delete", argPods, "web")
+		createRule(ns, "get-api", stages(del), argKubectl, argGet, argPods, "api")
+		Expect(runner.Review(ctx)).To(Succeed())
+		Expect(suggestionsIn(ns)).To(BeEmpty())
+	})
+
 	It("Review proposes a Cluster suggestion in last-system for identical rules in two namespaces", func() {
 		ns1, ns2 := newNamespace(), newNamespace()
 		argv := []string{"helm", "status", ns1}

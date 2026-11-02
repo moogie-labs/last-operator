@@ -151,6 +151,46 @@ func TestVetSkipsCoveredAndSuppressed(t *testing.T) {
 	}
 }
 
+func TestVetDropsAWildcardStandingInForADestructiveVerb(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		p    suggest.Proposal
+		verb string // "" when Vet keeps it
+	}{
+		{"an example's verb", proposal([]string{"kubectl", "[!-]*", "pods", "web"},
+			[]string{"kubectl", "get", "pods", "web"}, []string{"kubectl", "delete", "pods", "web"}), "delete"},
+		{"under a trailing ...", proposal([]string{"kubectl", "..."}, []string{"kubectl", "rm", "x"}), "rm"},
+		{"a terminate- verb", proposal([]string{"aws", "ec2", "*", "a"}, []string{"aws", "ec2", "terminate-instances", "a"}), "terminate-instances"},
+		{"a value that is a destructive word", proposal([]string{"kubectl", "get", "pods", "[!-]*"},
+			[]string{"kubectl", "get", "pods", "delete"}), "delete"},
+		{"a literal destructive verb is fine", proposal([]string{"kubectl", "delete", "pods", "web"},
+			[]string{"kubectl", "delete", "pods", "web"}), ""},
+		{"no destructive verb", proposal([]string{"kubectl", "[!-]*", "pods"}, []string{"kubectl", "get", "pods"},
+			[]string{"kubectl", "describe", "pods"}), ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, reason, _ := suggest.Vet(tt.p, nil, nil)
+			if tt.verb == "" && !ok {
+				t.Fatalf("Vet dropped it: %s", reason)
+			}
+			if tt.verb != "" && (ok || !strings.Contains(reason, "destructive verb") || !strings.Contains(reason, tt.verb)) {
+				t.Fatalf("Vet = %v, %q; want a drop naming the destructive verb %q", ok, reason, tt.verb)
+			}
+		})
+	}
+
+	consolidated := proposal([]string{"kubectl", "[!-]*", "pods", "[!-]*"})
+	consolidated.Contains = [][]string{{"kubectl", "delete", "pods", "web"}, {"kubectl", "get", "pods", "api"}}
+	if ok, reason, _ := suggest.Vet(consolidated, nil, nil); ok || !strings.Contains(reason, `destructive verb "delete"`) {
+		t.Errorf("Vet = %v, %q; want a consolidation that widens delete dropped", ok, reason)
+	}
+	escaped := proposal([]string{"tool", "[!-]*"})
+	escaped.Contains = [][]string{{"tool", "[r]m"}, {"tool", "ls"}}
+	if ok, reason, _ := suggest.Vet(escaped, nil, nil); ok || !strings.Contains(reason, `destructive verb "rm"`) {
+		t.Errorf("Vet = %v, %q; want an escaped literal destructive verb to count", ok, reason)
+	}
+}
+
 func TestVetPassesGeneralizeOutput(t *testing.T) {
 	words := []string{"kubectl", "get", "bash", "-c", "-n", "--", "--x=y", "--eval=1", "", "*", "a?b", "[c]", `d\e`, "re:x",
 		"...", "-", "web", "delete", "rm", "destroy", "terminate-x", "/work/kc", "node", "python3", "-e", "exec", "run", "--all", "=", "-=", "x=y"}

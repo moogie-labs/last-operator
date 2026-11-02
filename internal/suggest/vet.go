@@ -59,6 +59,13 @@ func Vet(p Proposal, existing []rules.Rule, denied []Denied) (ok bool, reason st
 		}
 	}
 	match := p.Spec.Match.Argv
+	argvs := make([][]string, len(p.Examples))
+	for i, e := range p.Examples {
+		argvs[i] = e.Run.Argv
+	}
+	if verb := rules.WidenedDestructive(match, argvs, p.Contains); verb != "" {
+		return false, fmt.Sprintf("a wildcard stands in for the destructive verb %q", verb), nil
+	}
 	if len(p.Contains) > 0 {
 		for _, c := range p.Contains {
 			if len(c) == 0 || len(match) == 0 || c[0] != match[0] {

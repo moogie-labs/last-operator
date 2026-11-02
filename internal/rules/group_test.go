@@ -96,6 +96,12 @@ func TestMerge(t *testing.T) {
 		{"difference before a StartsCode position", [][]string{{"tool", "a", "--", "date"}, {"tool", "b", "--", "date"}},
 			[]string{"tool", "[!-]*", "--", "date"}},
 		{"a code flag's value differs", [][]string{{"tool", "-c", "x"}, {"tool", "-c", "y"}}, nil},
+		{"a destructive verb differs", [][]string{{"kubectl", "delete", "pods", "web"}, {"kubectl", "get", "pods", "api"}}, nil},
+		{"a destructive verb differs late", [][]string{{"gcloud", "compute", "instances", "delete", "a"},
+			{"gcloud", "compute", "instances", "describe", "b"}}, nil},
+		{"a terminate- verb differs", [][]string{{"aws", "ec2", "terminate-instances", "a"}, {"aws", "ec2", "describe-instances", "a"}}, nil},
+		{"an equal destructive verb stays literal", [][]string{{"kubectl", "delete", "pods", "web"}, {"kubectl", "delete", "pods", "api"}},
+			[]string{"kubectl", "delete", "pods", "[!-]*"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,6 +152,10 @@ func TestMergePatterns(t *testing.T) {
 		{"difference after an exec", [][]string{{"kubectl", "exec", "web", "--", "date"}, {"kubectl", "exec", "web", "--", "id"}}, nil},
 		{"a code flag's value differs", [][]string{{"tool", "-c", "x"}, {"tool", "-c", "y"}}, nil},
 		{"no patterns", nil, nil},
+		{"a destructive verb differs", [][]string{{"kubectl", "delete", "pods", "web"}, {"kubectl", "get", "pods", "api"}}, nil},
+		{"a destructive verb differs late", [][]string{{"gcloud", "compute", "instances", "delete", "a"},
+			{"gcloud", "compute", "instances", "describe", "b"}}, nil},
+		{"an escaped destructive verb differs", [][]string{{"tool", "[r]m", "x"}, {"tool", "ls", "x"}}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
