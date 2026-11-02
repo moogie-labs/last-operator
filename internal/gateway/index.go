@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
 // indexedTypes are the audit entry types QueryAudit serves (M3 spec §3.5).
@@ -46,12 +48,28 @@ func (x *auditIndex) observe(e audit.Entry) {
 	if e.Intent == "" || !indexedTypes[e.Type] {
 		return
 	}
+	if suggestCall(e) {
+		return
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	if x.pending == nil {
 		x.pending = map[string][]IndexEntry{}
 	}
 	x.pending[e.Intent] = append(x.pending[e.Intent], IndexEntry{Seq: e.Seq, Type: e.Type})
+}
+
+// suggestCall reports whether e is an llm.request or llm.response of a suggest
+// call: audited, but kept out of the index so it never joins a planning session.
+// The writer hands observe the payload as raw JSON.
+func suggestCall(e audit.Entry) bool {
+	if e.Type != audit.TypeLLMRequest && e.Type != audit.TypeLLMResponse {
+		return false
+	}
+	var p struct {
+		Purpose string `json:"purpose"`
+	}
+	return json.Unmarshal(e.Payload, &p) == nil && p.Purpose == gatewayv1.PurposeSuggest
 }
 
 func (x *auditIndex) take(intent string) []IndexEntry {

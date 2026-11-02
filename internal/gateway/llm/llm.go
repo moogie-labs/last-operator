@@ -20,6 +20,8 @@ type Request struct {
 	// Schema, when set, is a JSON Schema the answer must match. Adapters that
 	// support structured output enforce it; the caller validates the answer anyway.
 	Schema []byte
+	// Purpose is "" or "turn" for a planning turn, "suggest" for a rule suggestion.
+	Purpose string
 }
 
 // Response is the model's reply.

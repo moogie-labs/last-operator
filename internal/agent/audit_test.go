@@ -100,18 +100,25 @@ func TestResultTurnClipsEachStream(t *testing.T) {
 	}
 }
 
+const (
+	keyRole        = "role"
+	keyContent     = "content"
+	keyMessages    = "messages"
+	purposeSuggest = "suggest"
+)
+
 // sessionEntries is the audit index of an Intent whose current planning
 // session started at llm.request 5, after an earlier session at 2.
 func sessionEntries() []*gatewayv1.AuditEntry {
 	msg := func(role, content string) map[string]string {
-		return map[string]string{"role": role, "content": content}
+		return map[string]string{keyRole: role, keyContent: content}
 	}
 	sys, user := msg("system", "sys"), msg("user", "run nginx")
 	asked, answers := msg("assistant", questionsAnswer), msg("user", "Answers:\n- q1: default\n")
 	asks, result := msg("assistant", commandAnswer), msg("user", "The command exited 0.")
 	garbage, correction := msg("assistant", "garbage"), msg("user", "That answer is not a valid turn")
 	req := func(seq uint64, msgs ...map[string]string) *gatewayv1.AuditEntry {
-		return entry(seq, audit.TypeLLMRequest, "", "", map[string]any{"messages": msgs})
+		return entry(seq, audit.TypeLLMRequest, "", "", map[string]any{keyMessages: msgs})
 	}
 	resp := func(seq, request uint64, content, errText string) *gatewayv1.AuditEntry {
 		return entry(seq, audit.TypeLLMResponse, "", "", llmResponse{RequestSeq: request, Content: content, Error: errText})
@@ -407,5 +414,45 @@ func TestPhaseSucceededPairsBeginAndEnd(t *testing.T) {
 	}
 	if _, err := PhaseSucceeded(context.Background(), &fakeAuditor{err: status.Error(codes.Unavailable, "down")}, ref, "Remediate", "x"); err == nil {
 		t.Error("PhaseSucceeded hid a gateway error")
+	}
+}
+
+// indexedLikeTheGateway serves entries as the gateway's audit index would: a
+// suggest call's llm.request and llm.response are audited but never indexed.
+type indexedLikeTheGateway struct{ fakeAuditor }
+
+func (f *indexedLikeTheGateway) QueryAudit(ctx context.Context, in *gatewayv1.QueryAuditRequest, o ...grpc.CallOption) (*gatewayv1.QueryAuditResponse, error) {
+	resp, err := f.fakeAuditor.QueryAudit(ctx, in, o...)
+	if err != nil {
+		return nil, err
+	}
+	kept := resp.Entries[:0]
+	for _, e := range resp.Entries {
+		if !strings.Contains(string(e.GetPayload()), `"purpose":"`+purposeSuggest+`"`) {
+			kept = append(kept, e)
+		}
+	}
+	resp.Entries = kept
+	return resp, nil
+}
+
+func TestReloadIgnoresSuggestCalls(t *testing.T) {
+	base := sessionEntries()
+	// A suggest call between the session's turns: audited, so present in the log,
+	// but the gateway keeps it out of the index QueryAudit serves.
+	sMsgs := []map[string]string{{keyRole: "system", keyContent: purposeSuggest}, {keyRole: "user", keyContent: "rules"}}
+	suggest := []*gatewayv1.AuditEntry{
+		entry(7, audit.TypeLLMRequest, "", "", map[string]any{"purpose": purposeSuggest, keyMessages: sMsgs}),
+		entry(7, audit.TypeLLMResponse, "", "", map[string]any{"purpose": purposeSuggest, "requestSeq": 7, keyContent: commandAnswer}),
+	}
+	suggest[1].Seq = 8
+	mixed := slices.Concat(base[:4], suggest, base[4:])
+	want, err := Reload(context.Background(), &fakeAuditor{entries: base}, ref, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Reload(context.Background(), &indexedLikeTheGateway{fakeAuditor{entries: mixed}}, ref, 5, nil)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Reload = %v, %v; want %v", got, err, want)
 	}
 }

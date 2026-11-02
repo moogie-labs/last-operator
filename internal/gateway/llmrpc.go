@@ -28,6 +28,8 @@ type llmRequestPayload struct {
 	// The response schema is the same on every turn; the log keeps its digest only.
 	SchemaSHA256 string `json:"schemaSha256,omitempty"`
 	SchemaBytes  int    `json:"schemaBytes,omitempty"`
+	// Purpose is "suggest" for a rule suggestion; a planning turn omits it.
+	Purpose string `json:"purpose,omitempty"`
 }
 
 type llmResponsePayload struct {
@@ -38,6 +40,7 @@ type llmResponsePayload struct {
 	CacheReadTokens     int    `json:"cacheReadTokens,omitempty"`
 	CacheCreationTokens int    `json:"cacheCreationTokens,omitempty"`
 	Error               string `json:"error,omitempty"`
+	Purpose             string `json:"purpose,omitempty"`
 }
 
 // maxSchemaBytes bounds CallLLMRequest.response_schema.
@@ -105,6 +108,14 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	purpose := req.GetPurpose()
+	switch purpose {
+	case "", gatewayv1.PurposeTurn:
+		purpose = ""
+	case gatewayv1.PurposeSuggest:
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "purpose %q is not turn or suggest", truncateReason(purpose))
+	}
 	if len(req.GetMessages()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "messages are required")
 	}
@@ -145,8 +156,8 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 		return nil, err
 	}
 	actor := CallerFrom(ctx)
-	lreq := llm.Request{Intent: key, Messages: msgs, MaxTokens: int(req.GetMaxTokens()), Schema: schema}
-	reqPayload := llmRequestPayload{Provider: lp.Name, Model: lp.Spec.Model, Messages: msgs, MaxTokens: lreq.MaxTokens}
+	lreq := llm.Request{Intent: key, Messages: msgs, MaxTokens: int(req.GetMaxTokens()), Schema: schema, Purpose: purpose}
+	reqPayload := llmRequestPayload{Provider: lp.Name, Model: lp.Spec.Model, Messages: msgs, MaxTokens: lreq.MaxTokens, Purpose: purpose}
 	if len(schema) > 0 {
 		sum := sha256.Sum256(schema)
 		reqPayload.SchemaSHA256, reqPayload.SchemaBytes = hex.EncodeToString(sum[:]), len(schema)
@@ -163,7 +174,7 @@ func (g *Gateway) callLLM(ctx context.Context, req *gatewayv1.CallLLMRequest) (*
 		func(before audit.Entry, _ any, actionErr error) audit.Draft {
 			requestSeq = before.Seq
 			p := llmResponsePayload{RequestSeq: before.Seq, Content: resp.Content, InputTokens: resp.InputTokens,
-				OutputTokens: resp.OutputTokens, CacheReadTokens: resp.CacheReadTokens, CacheCreationTokens: resp.CacheCreationTokens}
+				OutputTokens: resp.OutputTokens, CacheReadTokens: resp.CacheReadTokens, CacheCreationTokens: resp.CacheCreationTokens, Purpose: purpose}
 			if actionErr != nil {
 				p.Error = actionErr.Error()
 			}

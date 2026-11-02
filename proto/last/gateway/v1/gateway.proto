@@ -158,6 +158,10 @@ message CallLLMRequest {
   // JSON Schema the answer must match. Adapters that support structured output
   // enforce it; the caller validates the answer either way. Optional.
   bytes response_schema = 4;
+  // What the call is for: "turn" (the default, also ""), a planning turn, or
+  // "suggest", a rule suggestion. The gateway audits a suggest call but does not
+  // add it to the Intent's audit index. Any other value is refused.
+  string purpose = 5;
 }
 
 // CallLLMResponse is the model's reply.
@@ -190,6 +194,15 @@ message AuditEntry {
   string subject_hash = 5;
   // The entry's payload, canonical JSON.
   bytes payload = 6;
+  // What authorized the entry's action, when the entry records one.
+  Authorization authorized_by = 7;
+}
+
+// Authorization records what allowed an action.
+message Authorization {
+  // approval, rule or auto.
+  string kind = 1;
+  string name = 2;
 }
 
 // QueryAuditResponse lists entries oldest first.

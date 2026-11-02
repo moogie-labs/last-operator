@@ -977,8 +977,12 @@ type CallLLMRequest struct {
 	// JSON Schema the answer must match. Adapters that support structured output
 	// enforce it; the caller validates the answer either way. Optional.
 	ResponseSchema []byte `protobuf:"bytes,4,opt,name=response_schema,json=responseSchema,proto3" json:"response_schema,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// What the call is for: "turn" (the default, also ""), a planning turn, or
+	// "suggest", a rule suggestion. The gateway audits a suggest call but does not
+	// add it to the Intent's audit index. Any other value is refused.
+	Purpose       string `protobuf:"bytes,5,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CallLLMRequest) Reset() {
@@ -1037,6 +1041,13 @@ func (x *CallLLMRequest) GetResponseSchema() []byte {
 		return x.ResponseSchema
 	}
 	return nil
+}
+
+func (x *CallLLMRequest) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
 }
 
 // CallLLMResponse is the model's reply.
@@ -1191,7 +1202,9 @@ type AuditEntry struct {
 	Stage       string `protobuf:"bytes,4,opt,name=stage,proto3" json:"stage,omitempty"`
 	SubjectHash string `protobuf:"bytes,5,opt,name=subject_hash,json=subjectHash,proto3" json:"subject_hash,omitempty"`
 	// The entry's payload, canonical JSON.
-	Payload       []byte `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
+	Payload []byte `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
+	// What authorized the entry's action, when the entry records one.
+	AuthorizedBy  *Authorization `protobuf:"bytes,7,opt,name=authorized_by,json=authorizedBy,proto3" json:"authorized_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1268,6 +1281,67 @@ func (x *AuditEntry) GetPayload() []byte {
 	return nil
 }
 
+func (x *AuditEntry) GetAuthorizedBy() *Authorization {
+	if x != nil {
+		return x.AuthorizedBy
+	}
+	return nil
+}
+
+// Authorization records what allowed an action.
+type Authorization struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// approval, rule or auto.
+	Kind          string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Authorization) Reset() {
+	*x = Authorization{}
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Authorization) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Authorization) ProtoMessage() {}
+
+func (x *Authorization) ProtoReflect() protoreflect.Message {
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Authorization.ProtoReflect.Descriptor instead.
+func (*Authorization) Descriptor() ([]byte, []int) {
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *Authorization) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Authorization) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 // QueryAuditResponse lists entries oldest first.
 type QueryAuditResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
@@ -1282,7 +1356,7 @@ type QueryAuditResponse struct {
 
 func (x *QueryAuditResponse) Reset() {
 	*x = QueryAuditResponse{}
-	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1294,7 +1368,7 @@ func (x *QueryAuditResponse) String() string {
 func (*QueryAuditResponse) ProtoMessage() {}
 
 func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_last_gateway_v1_gateway_proto_msgTypes[20]
+	mi := &file_last_gateway_v1_gateway_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1307,7 +1381,7 @@ func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryAuditResponse.ProtoReflect.Descriptor instead.
 func (*QueryAuditResponse) Descriptor() ([]byte, []int) {
-	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{20}
+	return file_last_gateway_v1_gateway_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *QueryAuditResponse) GetEntries() []*AuditEntry {
@@ -1398,13 +1472,14 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"secretName\"7\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent\"\xc2\x01\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\"\xdc\x01\n" +
 	"\x0eCallLLMRequest\x122\n" +
 	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x124\n" +
 	"\bmessages\x18\x02 \x03(\v2\x18.last.gateway.v1.MessageR\bmessages\x12\x1d\n" +
 	"\n" +
 	"max_tokens\x18\x03 \x01(\x05R\tmaxTokens\x12'\n" +
-	"\x0fresponse_schema\x18\x04 \x01(\fR\x0eresponseSchema\"\x94\x01\n" +
+	"\x0fresponse_schema\x18\x04 \x01(\fR\x0eresponseSchema\x12\x18\n" +
+	"\apurpose\x18\x05 \x01(\tR\apurpose\"\x94\x01\n" +
 	"\x0fCallLLMResponse\x12\x18\n" +
 	"\acontent\x18\x01 \x01(\tR\acontent\x12!\n" +
 	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
@@ -1415,7 +1490,7 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"\x06intent\x18\x01 \x01(\v2\x1a.last.gateway.v1.IntentRefR\x06intent\x12\x14\n" +
 	"\x05types\x18\x02 \x03(\tR\x05types\x12\x1b\n" +
 	"\tafter_seq\x18\x03 \x01(\x04R\bafterSeq\x12\x14\n" +
-	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\x95\x01\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\xda\x01\n" +
 	"\n" +
 	"AuditEntry\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x12\n" +
@@ -1423,7 +1498,11 @@ const file_last_gateway_v1_gateway_proto_rawDesc = "" +
 	"\x02ts\x18\x03 \x01(\tR\x02ts\x12\x14\n" +
 	"\x05stage\x18\x04 \x01(\tR\x05stage\x12!\n" +
 	"\fsubject_hash\x18\x05 \x01(\tR\vsubjectHash\x12\x18\n" +
-	"\apayload\x18\x06 \x01(\fR\apayload\"}\n" +
+	"\apayload\x18\x06 \x01(\fR\apayload\x12C\n" +
+	"\rauthorized_by\x18\a \x01(\v2\x1e.last.gateway.v1.AuthorizationR\fauthorizedBy\"7\n" +
+	"\rAuthorization\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"}\n" +
 	"\x12QueryAuditResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.last.gateway.v1.AuditEntryR\aentries\x12\x1c\n" +
 	"\ttruncated\x18\x02 \x01(\bR\ttruncated\x12\x12\n" +
@@ -1453,7 +1532,7 @@ func file_last_gateway_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_last_gateway_v1_gateway_proto_rawDescData
 }
 
-var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_last_gateway_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_last_gateway_v1_gateway_proto_goTypes = []any{
 	(*PingRequest)(nil),               // 0: last.gateway.v1.PingRequest
 	(*PingResponse)(nil),              // 1: last.gateway.v1.PingResponse
@@ -1475,8 +1554,9 @@ var file_last_gateway_v1_gateway_proto_goTypes = []any{
 	(*CallLLMResponse)(nil),           // 17: last.gateway.v1.CallLLMResponse
 	(*QueryAuditRequest)(nil),         // 18: last.gateway.v1.QueryAuditRequest
 	(*AuditEntry)(nil),                // 19: last.gateway.v1.AuditEntry
-	(*QueryAuditResponse)(nil),        // 20: last.gateway.v1.QueryAuditResponse
-	nil,                               // 21: last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
+	(*Authorization)(nil),             // 20: last.gateway.v1.Authorization
+	(*QueryAuditResponse)(nil),        // 21: last.gateway.v1.QueryAuditResponse
+	nil,                               // 22: last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
 }
 var file_last_gateway_v1_gateway_proto_depIdxs = []int32{
 	2,  // 0: last.gateway.v1.BeginPhaseRequest.intent:type_name -> last.gateway.v1.IntentRef
@@ -1487,32 +1567,33 @@ var file_last_gateway_v1_gateway_proto_depIdxs = []int32{
 	8,  // 5: last.gateway.v1.ProbeOutcome.result:type_name -> last.gateway.v1.CommandResult
 	11, // 6: last.gateway.v1.RunProbesResponse.outcomes:type_name -> last.gateway.v1.ProbeOutcome
 	2,  // 7: last.gateway.v1.WriteOutputSecretRequest.intent:type_name -> last.gateway.v1.IntentRef
-	21, // 8: last.gateway.v1.WriteOutputSecretRequest.values:type_name -> last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
+	22, // 8: last.gateway.v1.WriteOutputSecretRequest.values:type_name -> last.gateway.v1.WriteOutputSecretRequest.ValuesEntry
 	2,  // 9: last.gateway.v1.CallLLMRequest.intent:type_name -> last.gateway.v1.IntentRef
 	15, // 10: last.gateway.v1.CallLLMRequest.messages:type_name -> last.gateway.v1.Message
 	2,  // 11: last.gateway.v1.QueryAuditRequest.intent:type_name -> last.gateway.v1.IntentRef
-	19, // 12: last.gateway.v1.QueryAuditResponse.entries:type_name -> last.gateway.v1.AuditEntry
-	0,  // 13: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
-	3,  // 14: last.gateway.v1.GatewayService.BeginPhase:input_type -> last.gateway.v1.BeginPhaseRequest
-	5,  // 15: last.gateway.v1.GatewayService.EndPhase:input_type -> last.gateway.v1.EndPhaseRequest
-	7,  // 16: last.gateway.v1.GatewayService.RunCommand:input_type -> last.gateway.v1.RunCommandRequest
-	10, // 17: last.gateway.v1.GatewayService.RunProbes:input_type -> last.gateway.v1.RunProbesRequest
-	13, // 18: last.gateway.v1.GatewayService.WriteOutputSecret:input_type -> last.gateway.v1.WriteOutputSecretRequest
-	16, // 19: last.gateway.v1.GatewayService.CallLLM:input_type -> last.gateway.v1.CallLLMRequest
-	18, // 20: last.gateway.v1.GatewayService.QueryAudit:input_type -> last.gateway.v1.QueryAuditRequest
-	1,  // 21: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
-	4,  // 22: last.gateway.v1.GatewayService.BeginPhase:output_type -> last.gateway.v1.BeginPhaseResponse
-	6,  // 23: last.gateway.v1.GatewayService.EndPhase:output_type -> last.gateway.v1.EndPhaseResponse
-	9,  // 24: last.gateway.v1.GatewayService.RunCommand:output_type -> last.gateway.v1.RunCommandResponse
-	12, // 25: last.gateway.v1.GatewayService.RunProbes:output_type -> last.gateway.v1.RunProbesResponse
-	14, // 26: last.gateway.v1.GatewayService.WriteOutputSecret:output_type -> last.gateway.v1.WriteOutputSecretResponse
-	17, // 27: last.gateway.v1.GatewayService.CallLLM:output_type -> last.gateway.v1.CallLLMResponse
-	20, // 28: last.gateway.v1.GatewayService.QueryAudit:output_type -> last.gateway.v1.QueryAuditResponse
-	21, // [21:29] is the sub-list for method output_type
-	13, // [13:21] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	20, // 12: last.gateway.v1.AuditEntry.authorized_by:type_name -> last.gateway.v1.Authorization
+	19, // 13: last.gateway.v1.QueryAuditResponse.entries:type_name -> last.gateway.v1.AuditEntry
+	0,  // 14: last.gateway.v1.GatewayService.Ping:input_type -> last.gateway.v1.PingRequest
+	3,  // 15: last.gateway.v1.GatewayService.BeginPhase:input_type -> last.gateway.v1.BeginPhaseRequest
+	5,  // 16: last.gateway.v1.GatewayService.EndPhase:input_type -> last.gateway.v1.EndPhaseRequest
+	7,  // 17: last.gateway.v1.GatewayService.RunCommand:input_type -> last.gateway.v1.RunCommandRequest
+	10, // 18: last.gateway.v1.GatewayService.RunProbes:input_type -> last.gateway.v1.RunProbesRequest
+	13, // 19: last.gateway.v1.GatewayService.WriteOutputSecret:input_type -> last.gateway.v1.WriteOutputSecretRequest
+	16, // 20: last.gateway.v1.GatewayService.CallLLM:input_type -> last.gateway.v1.CallLLMRequest
+	18, // 21: last.gateway.v1.GatewayService.QueryAudit:input_type -> last.gateway.v1.QueryAuditRequest
+	1,  // 22: last.gateway.v1.GatewayService.Ping:output_type -> last.gateway.v1.PingResponse
+	4,  // 23: last.gateway.v1.GatewayService.BeginPhase:output_type -> last.gateway.v1.BeginPhaseResponse
+	6,  // 24: last.gateway.v1.GatewayService.EndPhase:output_type -> last.gateway.v1.EndPhaseResponse
+	9,  // 25: last.gateway.v1.GatewayService.RunCommand:output_type -> last.gateway.v1.RunCommandResponse
+	12, // 26: last.gateway.v1.GatewayService.RunProbes:output_type -> last.gateway.v1.RunProbesResponse
+	14, // 27: last.gateway.v1.GatewayService.WriteOutputSecret:output_type -> last.gateway.v1.WriteOutputSecretResponse
+	17, // 28: last.gateway.v1.GatewayService.CallLLM:output_type -> last.gateway.v1.CallLLMResponse
+	21, // 29: last.gateway.v1.GatewayService.QueryAudit:output_type -> last.gateway.v1.QueryAuditResponse
+	22, // [22:30] is the sub-list for method output_type
+	14, // [14:22] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_last_gateway_v1_gateway_proto_init() }
@@ -1526,7 +1607,7 @@ func file_last_gateway_v1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_last_gateway_v1_gateway_proto_rawDesc), len(file_last_gateway_v1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

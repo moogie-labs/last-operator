@@ -31,6 +31,13 @@ func NewScripted(kube kubernetes.Interface, namespace, configMap string) *Script
 	return &Scripted{kube: kube, namespace: namespace, configMap: configMap}
 }
 
+const (
+	// PurposeSuggest is Request.Purpose for a rule suggestion.
+	PurposeSuggest = "suggest"
+	// SuggestScriptPrefix precedes the script key of a suggest call.
+	SuggestScriptPrefix = "_suggest."
+)
+
 // ScriptKey turns "<namespace>/<name>" into a valid ConfigMap key.
 func ScriptKey(intent string) string { return strings.Replace(intent, "/", ".", 1) }
 
@@ -40,6 +47,9 @@ func (s *Scripted) Complete(ctx context.Context, req Request) (Response, error) 
 		return Response{}, fmt.Errorf("llm: read script %s/%s: %w", s.namespace, s.configMap, err)
 	}
 	key := ScriptKey(req.Intent)
+	if req.Purpose == PurposeSuggest {
+		key = SuggestScriptPrefix + key
+	}
 	raw, ok := cm.Data[key]
 	if !ok {
 		return Response{}, fmt.Errorf("%w: %s", ErrNoScript, key)

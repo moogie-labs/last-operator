@@ -381,3 +381,30 @@ func TestQueryAuditRefusesATamperedEntry(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryAuditCarriesAuthorizedBy(t *testing.T) {
+	env, in := newRunEnv(t, twoSteps())
+	h := in.Status.Plan.Hash
+	if _, err := env.begin(h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.run(h, in.Status.Plan.Steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.query(&gatewayv1.QueryAuditRequest{Types: []string{audit.TypeCommandStart, audit.TypeLLMRequest}})
+	if err != nil || len(resp.GetEntries()) == 0 {
+		t.Fatalf("QueryAudit = %v, %v", resp, err)
+	}
+	got := resp.GetEntries()[0]
+	if got.GetType() != audit.TypeCommandStart || got.GetAuthorizedBy().GetKind() != authApproval || got.GetAuthorizedBy().GetName() != "team-x/ok" {
+		t.Fatalf("authorized_by = %v", got)
+	}
+	llmEnv := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	if _, err := llmEnv.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := llmEnv.query(&gatewayv1.QueryAuditRequest{Types: []string{audit.TypeLLMRequest}})
+	if err != nil || len(r.GetEntries()) != 1 || r.GetEntries()[0].GetAuthorizedBy() != nil {
+		t.Fatalf("an unauthorized entry = %v, %v", r, err)
+	}
+}

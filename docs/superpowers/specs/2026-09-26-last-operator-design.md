@@ -1962,6 +1962,15 @@ and size), so the audit log also serves as the complete transcript store.
 `CallLLM` returns the `llm.request` entry's sequence number, which anchors
 conversation reload (§7).
 
+`CallLLM` also takes a `purpose`: `turn` (the default) for a planning turn,
+or `suggest` for a rule suggestion (§9). Any other value is refused with
+`InvalidArgument`. The gateway records a non-default purpose in both the
+`llm.request` and `llm.response` payloads. A suggest call is audited like any
+other, but its two entries are not added to the Intent's `QueryAudit` index,
+so they never join a planning session or conversation reload. The scripted
+provider answers a suggest call from the key `_suggest.<namespace>.<intent>`;
+a missing key gives no script.
+
 ## 13. Credentials
 
 v1 uses **operator-wide credentials**: Providers are cluster-scoped,
@@ -2033,6 +2042,12 @@ One object per entry, at `chains/<chainId>/<seq zero-padded to 20>.json`:
   out of scope for v1.
 - Writes use `PutObject` with `If-None-Match: *`, and each object gets
   compliance-mode retention.
+
+`QueryAudit` entries carry `authorized_by` (`kind`: `approval`, `rule` or
+`auto`, and `name`) when the audit entry records what authorized the action,
+for instance a `command.start`. It is how a caller counts approvals by kind.
+The `llm.request` and `llm.response` entries of a `purpose: suggest` call are
+audited but not indexed, so `QueryAudit` never serves them (§12).
 
 **Entry types:** `gateway.start`, `checkpoint`, `phase.begin`,
 `phase.end`, `llm.request`, `llm.response`, `command.start`,

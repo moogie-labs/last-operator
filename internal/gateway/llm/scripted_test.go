@@ -60,3 +60,21 @@ func TestScriptedErrors(t *testing.T) {
 		t.Fatal("ScriptKey")
 	}
 }
+
+func TestScriptedSuggestReadsItsOwnKey(t *testing.T) {
+	ctx := context.Background()
+	req := llm.Request{Intent: intentRef, Purpose: "suggest", Messages: []llm.Message{{Role: roleUser}}}
+	s := llm.NewScripted(script(map[string]string{scriptKey: `["plan"]`, "_suggest." + scriptKey: `["rules"]`}), gwNS, cmName)
+	if r, err := s.Complete(ctx, req); err != nil || r.Content != "rules" {
+		t.Fatalf("suggest = %q, %v", r.Content, err)
+	}
+	req.Purpose = ""
+	if r, err := s.Complete(ctx, req); err != nil || r.Content != "plan" {
+		t.Fatalf("turn = %q, %v", r.Content, err)
+	}
+	req.Purpose = "suggest"
+	only := llm.NewScripted(script(map[string]string{scriptKey: `["plan"]`}), gwNS, cmName)
+	if _, err := only.Complete(ctx, req); !errors.Is(err, llm.ErrNoScript) {
+		t.Fatalf("suggest without its key = %v, want ErrNoScript", err)
+	}
+}

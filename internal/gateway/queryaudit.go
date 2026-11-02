@@ -82,8 +82,12 @@ func (g *Gateway) queryAudit(ctx context.Context, req *gatewayv1.QueryAuditReque
 			break
 		}
 		size += len(e.Payload)
-		resp.Entries = append(resp.Entries, &gatewayv1.AuditEntry{Seq: e.Seq, Type: e.Type, Ts: e.TS, Stage: e.Stage,
-			SubjectHash: e.SubjectHash, Payload: e.Payload})
+		ae := &gatewayv1.AuditEntry{Seq: e.Seq, Type: e.Type, Ts: e.TS, Stage: e.Stage,
+			SubjectHash: e.SubjectHash, Payload: e.Payload}
+		if a := e.AuthorizedBy; a != nil {
+			ae.AuthorizedBy = &gatewayv1.Authorization{Kind: a.Kind, Name: a.Name}
+		}
+		resp.Entries = append(resp.Entries, ae)
 	}
 	return resp, nil
 }

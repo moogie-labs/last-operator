@@ -29,6 +29,7 @@ const (
 	roleUser      = "user"
 	roleAssistant = "assistant"
 	keySecret     = "key"
+	scriptName    = "llm-script"
 )
 
 func llmConfig(providerType lastv1alpha1.LLMProviderType) (*lastv1alpha1.OperatorConfig, *lastv1alpha1.LLMProvider) {
@@ -36,7 +37,7 @@ func llmConfig(providerType lastv1alpha1.LLMProviderType) (*lastv1alpha1.Operato
 	op.Spec.LLMProviderRef = &lastv1alpha1.LocalRef{Name: "fixture"}
 	lp := &lastv1alpha1.LLMProvider{ObjectMeta: metav1.ObjectMeta{Name: "fixture"}, Spec: lastv1alpha1.LLMProviderSpec{Type: providerType, Model: "m"}}
 	if providerType == lastv1alpha1.LLMScripted {
-		lp.Spec.Scripted = &lastv1alpha1.ScriptedLLM{ConfigMapRef: lastv1alpha1.LocalRef{Name: "llm-script"}}
+		lp.Spec.Scripted = &lastv1alpha1.ScriptedLLM{ConfigMapRef: lastv1alpha1.LocalRef{Name: scriptName}}
 	} else {
 		lp.Spec.SecretRef = &lastv1alpha1.LocalRef{Name: keySecret}
 	}
@@ -48,7 +49,7 @@ func newLLMEnv(t *testing.T, providerType lastv1alpha1.LLMProviderType) *testEnv
 	op, lp := llmConfig(providerType)
 	env := newTestEnv(t, intentWithPlan(t, twoSteps()), op, lp)
 	if _, err := env.kube.CoreV1().ConfigMaps(ns).Create(context.Background(), &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "llm-script", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: scriptName, Namespace: ns},
 		Data:       map[string]string{"team-x.web": `["the plan"]`},
 	}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
@@ -265,5 +266,61 @@ func TestCallLLMOpenAICompatibleUsesItsEndpointAndKey(t *testing.T) {
 	resp, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "x"})
 	if err != nil || resp.GetContent() != "local answer" {
 		t.Fatalf("CallLLM = %v, %v", resp, err)
+	}
+}
+
+func (e *testEnv) suggestCall(content string) (*gatewayv1.CallLLMResponse, error) {
+	return e.g.callLLM(e.ctx, &gatewayv1.CallLLMRequest{Intent: ref(), MaxTokens: 1024, Purpose: gatewayv1.PurposeSuggest,
+		Messages: []*gatewayv1.Message{{Role: roleUser, Content: content}}})
+}
+
+func TestSuggestCallsAreAuditedButNotIndexed(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	if _, err := env.kube.CoreV1().ConfigMaps(ns).Update(env.ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: scriptName, Namespace: ns},
+		Data:       map[string]string{"team-x.web": `["the plan"]`, "_suggest.team-x.web": `["a suggestion"]`},
+	}, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.callLLM(&gatewayv1.Message{Role: roleUser, Content: "turn one"}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.suggestCall("suggest")
+	if err != nil || resp.GetContent() != "a suggestion" {
+		t.Fatalf("suggest call = %v, %v", resp, err)
+	}
+	es := env.entries()
+	req, res := es[len(es)-2], es[len(es)-1]
+	if req.Type != audit.TypeLLMRequest || res.Type != audit.TypeLLMResponse ||
+		!strings.Contains(string(req.Payload), `"purpose":"suggest"`) || !strings.Contains(string(res.Payload), `"purpose":"suggest"`) {
+		t.Fatalf("audited entries = %s %s / %s %s", req.Type, req.Payload, res.Type, res.Payload)
+	}
+	if strings.Contains(string(es[len(es)-4].Payload), "purpose") {
+		t.Fatalf("a turn call's payload carries a purpose: %s", es[len(es)-4].Payload)
+	}
+	q, err := env.query(&gatewayv1.QueryAuditRequest{Types: []string{audit.TypeLLMRequest, audit.TypeLLMResponse}})
+	if err != nil || len(q.GetEntries()) != 2 {
+		t.Fatalf("QueryAudit = %v, %v; want only the turn call's two entries", q, err)
+	}
+	for _, e := range q.GetEntries() {
+		if e.GetSeq() == req.Seq || e.GetSeq() == res.Seq {
+			t.Fatalf("QueryAudit served suggest entry %d", e.GetSeq())
+		}
+	}
+}
+
+func TestUnknownPurposeIsRefused(t *testing.T) {
+	env := newLLMEnv(t, lastv1alpha1.LLMScripted)
+	before := len(env.entries())
+	_, err := env.g.callLLM(env.ctx, &gatewayv1.CallLLMRequest{Intent: ref(), Purpose: "chat",
+		Messages: []*gatewayv1.Message{{Role: roleUser, Content: "x"}}})
+	if status.Code(err) != codes.InvalidArgument || len(env.entries()) != before {
+		t.Fatalf("purpose chat = %v (entries %d -> %d)", err, before, len(env.entries()))
+	}
+	for _, p := range []string{"", gatewayv1.PurposeTurn} {
+		if _, err := env.g.callLLM(env.ctx, &gatewayv1.CallLLMRequest{Intent: ref(), Purpose: p,
+			Messages: []*gatewayv1.Message{{Role: roleUser, Content: "x"}}}); err != nil {
+			t.Fatalf("purpose %q = %v", p, err)
+		}
 	}
 }

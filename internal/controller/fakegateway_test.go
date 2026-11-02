@@ -138,6 +138,14 @@ type fakeGateway struct {
 	auths     map[types.NamespacedName][]string                     // how each opened phase was authorized: "auto:<key>", "rule" or "approval"
 	seq       uint64                                                // the last audit sequence number, across Intents
 	audit     map[types.NamespacedName][]*gatewayv1.AuditEntry      // indexed entries, oldest first
+	// suggestScript maps "<namespace>/<name>" to the answers of the Intent's
+	// purpose-suggest CallLLM calls: call n (counting from 0, per Intent) gets
+	// answer n, and a call past the end, or for an Intent with no entry, fails
+	// with FailedPrecondition, as the gateway's scripted provider does. Suggest
+	// calls are not indexed, not in llmReqs and not in log's "CallLLM" count.
+	suggestScript map[string][]string
+	// purposes logs the purpose of every CallLLM per Intent: "turn" or "suggest".
+	purposes map[types.NamespacedName][]string
 }
 
 func newFakeGateway(c client.Client) *fakeGateway {
@@ -148,6 +156,7 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		openUID: map[types.NamespacedName]types.UID{}, openSteps: map[types.NamespacedName]int{}, openKept: map[types.NamespacedName]int{},
 		tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{},
+		suggestScript: map[string][]string{}, purposes: map[types.NamespacedName][]string{},
 		openBody: map[types.NamespacedName]plan.Body{}, execBody: map[types.NamespacedName]plan.Body{},
 		openAuto: map[types.NamespacedName]bool{}, openRule: map[types.NamespacedName]bool{}, auths: map[types.NamespacedName][]string{}}
 }
@@ -194,6 +203,21 @@ func (f *fakeGateway) CallLLM(_ context.Context, in *gatewayv1.CallLLMRequest, _
 		msgs = append(msgs, fakeMessage{Role: m.GetRole(), Content: m.GetContent()})
 	}
 	f.mu.Lock()
+	if in.GetPurpose() == gatewayv1.PurposeSuggest {
+		defer f.mu.Unlock()
+		f.purposes[key] = append(f.purposes[key], gatewayv1.PurposeSuggest)
+		answers, n := f.suggestScript[key.String()], 0
+		for _, c := range f.purposes[key] {
+			if c == gatewayv1.PurposeSuggest {
+				n++
+			}
+		}
+		if n > len(answers) {
+			return nil, status.Error(codes.FailedPrecondition, "llm: no script for this intent")
+		}
+		return &gatewayv1.CallLLMResponse{Content: answers[n-1]}, nil
+	}
+	f.purposes[key] = append(f.purposes[key], gatewayv1.PurposeTurn)
 	f.record(key, callLLM)
 	f.llmReqs[key] = append(f.llmReqs[key], in)
 	seq := f.appendAudit(key, "llm.request", "", "", map[string]any{"messages": msgs})
@@ -226,6 +250,13 @@ func (f *fakeGateway) appendAudit(key types.NamespacedName, typ, stage, subject 
 	f.seq++
 	f.audit[key] = append(f.audit[key], &gatewayv1.AuditEntry{Seq: f.seq, Type: typ, Stage: stage, SubjectHash: subject, Payload: b})
 	return f.seq
+}
+
+// authorization maps an f.auths value ("auto:<key>", "rule", "approval") to the
+// authorized_by an audit entry carries.
+func authorization(auth string) *gatewayv1.Authorization {
+	kind, name, _ := strings.Cut(auth, ":")
+	return &gatewayv1.Authorization{Kind: kind, Name: name}
 }
 
 // auditOf returns the Intent's audit entries of one type, oldest first.
@@ -591,6 +622,7 @@ func (f *fakeGateway) BeginPhase(ctx context.Context, in *gatewayv1.BeginPhaseRe
 	f.openAuto[key], f.openRule[key] = auto, rule
 	f.openBody[key] = body
 	f.openBegin[key] = f.appendAudit(key, "phase.begin", stage, subject, payload)
+	f.audit[key][len(f.audit[key])-1].AuthorizedBy = authorization(f.auths[key][len(f.auths[key])-1])
 	if discovery || stage == string(lastv1alpha1.StageRemediate) {
 		f.used[subject] = true
 	}
