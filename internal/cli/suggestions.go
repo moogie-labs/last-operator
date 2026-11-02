@@ -39,10 +39,11 @@ const (
 	lintWarning            = "warning"
 )
 
-// op makes one piece of operator text safe to print on one line: terminal
-// escapes and control characters stripped (suggest.Sanitize), and anything else
-// that is not graphic, newlines included, written as \uXXXX (clean).
-func op(s string) string { return clean(suggest.Sanitize(s)) }
+// op makes one piece of operator text safe to print on one line or in one table
+// cell: terminal escapes and control characters stripped (suggest.Sanitize), and
+// anything else that is not graphic, newlines and tabs included, written as
+// \uXXXX (clean, then the tabs clean keeps), so it cannot add lines or cells.
+func op(s string) string { return strings.ReplaceAll(clean(suggest.Sanitize(s)), "\t", `\u0009`) }
 
 // opArgv is an operator-written argv, each element sanitized, quoted as a shell
 // would need it.
@@ -129,23 +130,24 @@ func coveringSuggestions(ctx context.Context, k *Kube, ns string, stage lastv1al
 	if err := k.Client.List(ctx, &local, client.InNamespace(ns)); err != nil {
 		return nil, fmt.Errorf("read the suggestions in %s: %w", ns, err)
 	}
-	items := local.Items
-	if ns != clusterSuggestionNamespace {
-		var sys lastv1alpha1.CommandRuleSuggestionList
-		if err := k.Client.List(ctx, &sys, client.InNamespace(clusterSuggestionNamespace)); err == nil {
-			items = append(items, sys.Items...)
+	// A suggestion in ns applies to it as a CommandRule there; in the system
+	// namespace only a Cluster-target one applies elsewhere, as a ClusterCommandRule.
+	var out []lastv1alpha1.CommandRuleSuggestion
+	keep := func(items []lastv1alpha1.CommandRuleSuggestion, scopes ...lastv1alpha1.RuleScope) {
+		for _, s := range items {
+			if isPending(&s) && slices.Contains(scopes, s.Spec.TargetScope) && rules.Covers(s.Spec.Proposed, stage, cmd) {
+				out = append(out, s)
+			}
 		}
 	}
-	var out []lastv1alpha1.CommandRuleSuggestion
-	for _, s := range items {
-		scope := lastv1alpha1.RuleScopeNamespace
-		if s.Namespace == clusterSuggestionNamespace {
-			scope = s.Spec.TargetScope
-		}
-		if !isPending(&s) || s.Spec.TargetScope != scope || !rules.Covers(s.Spec.Proposed, stage, cmd) {
-			continue
-		}
-		out = append(out, s)
+	if ns == clusterSuggestionNamespace {
+		keep(local.Items, lastv1alpha1.RuleScopeNamespace, lastv1alpha1.RuleScopeCluster)
+		return out, nil
+	}
+	keep(local.Items, lastv1alpha1.RuleScopeNamespace)
+	var sys lastv1alpha1.CommandRuleSuggestionList
+	if err := k.Client.List(ctx, &sys, client.InNamespace(clusterSuggestionNamespace)); err == nil {
+		keep(sys.Items, lastv1alpha1.RuleScopeCluster)
 	}
 	return out, nil
 }

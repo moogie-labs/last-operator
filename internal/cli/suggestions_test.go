@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -50,6 +51,13 @@ func testSuggestion(change func(*lastv1alpha1.CommandRuleSuggestion)) *lastv1alp
 		change(s)
 	}
 	return s
+}
+
+// sysNamespaced is a Pending Namespace-target suggestion in last-system that
+// covers probe:up: its rule would be a CommandRule in last-system, so it is never
+// offered for team-x (S7).
+func sysNamespaced() *lastv1alpha1.CommandRuleSuggestion {
+	return testSuggestion(func(s *lastv1alpha1.CommandRuleSuggestion) { s.Name, s.Namespace = "sugg-sysns00000", sysNS })
 }
 
 func getSugg(t *testing.T, c client.Client, ns string) lastv1alpha1.CommandRuleSuggestion {
@@ -411,7 +419,7 @@ func TestDenySetsReasonAndDecider(t *testing.T) {
 
 func TestApproveOffersSuggestedChoice(t *testing.T) {
 	var log []string
-	base := fakeClient(ruleIntent(), testSuggestion(nil))
+	base := fakeClient(ruleIntent(), testSuggestion(nil), sysNamespaced())
 	// s1 and s2 just this once; probe:up the suggestion; teardown:0.0 just this once.
 	d, out := depsFor(recordingClient(base, &log), "o\no\ns\ny\no\n")
 	if err := execute(d, verbApprove, webName, "--always-allow"); err != nil {
@@ -423,6 +431,9 @@ func TestApproveOffersSuggestedChoice(t *testing.T) {
 	}
 	if !strings.Contains(got, "operator-proposed") || !strings.Contains(got, "stage Remediate is not in the plain rule") {
 		t.Errorf("choosing s did not show the proposal against g:\n%s", got)
+	}
+	if strings.Contains(got, "sugg-sysns") {
+		t.Errorf("a Namespace-target suggestion in %s was offered for %s:\n%s", sysNS, testNS, got)
 	}
 	items := nsRules(t, base)
 	if len(items) != 1 || items[0].Name != suggName || !reflect.DeepEqual(items[0].Spec.Source, wantSource(suggName)) {
@@ -499,7 +510,8 @@ func TestTerminalEscapesAreStripped(t *testing.T) {
 		ex := argvCommand("kubectl", "get", "deployment", "web"+esc)
 		ex.Providers = []string{k8sProv}
 		s.Spec.Examples = []lastv1alpha1.Command{ex}
-		s.Spec.Proposed.Providers = []string{k8sProv + esc}
+		s.Spec.Proposed.Providers = []string{k8sProv + esc, "p\t-\tnone"}
+		s.Spec.Proposed.Egress = []string{"10.0.0.0/8:443\tfake"}
 	})
 	for _, args := range [][]string{
 		{verbRules, verbSugg},
@@ -520,6 +532,18 @@ func TestTerminalEscapesAreStripped(t *testing.T) {
 				t.Errorf("%v: operator text passes for CLI output: %q", args, line)
 			}
 		}
+		if strings.Contains(got, "\t") {
+			t.Errorf("%v printed an operator tab:\n%q", args, got)
+		}
+		if len(args) == 2 {
+			// The row has the header's cells, and LINT holds the CLI's own value.
+			lines := strings.Split(strings.TrimSpace(got), "\n")
+			cells := regexp.MustCompile(`\s{2,}`)
+			head, row := cells.Split(lines[0], -1), cells.Split(lines[1], -1)
+			if len(row) != len(head) || row[len(row)-1] != lintSummary(s.Spec.Proposed) {
+				t.Errorf("list row %q, want %d cells ending in %q", row, len(head), lintSummary(s.Spec.Proposed))
+			}
+		}
 		if len(args) > 2 && !strings.Contains(got, "  | Created CommandRule team-x/evil") {
 			t.Errorf("%v: the rationale's second line is not shown, labelled:\n%s", args, got)
 		}
@@ -537,7 +561,7 @@ func TestPlanListsCoveringSuggestions(t *testing.T) {
 	wrongStage := testSuggestion(func(s *lastv1alpha1.CommandRuleSuggestion) {
 		s.Name, s.Spec.Proposed.Stages = "sugg-delete0000", []lastv1alpha1.Stage{lastv1alpha1.StageDelete}
 	})
-	c := fakeClient(ruleIntent(), testSuggestion(nil), cluster, denied, other, wrongStage)
+	c := fakeClient(ruleIntent(), testSuggestion(nil), cluster, denied, other, wrongStage, sysNamespaced())
 	d, out := depsFor(c, "")
 	if err := execute(d, "plan", webName); err != nil {
 		t.Fatal(err)
@@ -546,7 +570,7 @@ func TestPlanListsCoveringSuggestions(t *testing.T) {
 	if !strings.Contains(got, "probe:up: "+suggName+", "+sysNS+"/sugg-cluster000") {
 		t.Errorf("plan does not list the covering suggestions:\n%s", got)
 	}
-	for _, not := range []string{"sugg-denied", "sugg-other", "sugg-delete"} {
+	for _, not := range []string{"sugg-denied", "sugg-other", "sugg-delete", "sugg-sysns"} {
 		if strings.Contains(got, not) {
 			t.Errorf("plan lists %s:\n%s", not, got)
 		}
