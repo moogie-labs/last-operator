@@ -356,10 +356,19 @@ helm-lint: helm-crds ## Lint and render the Helm chart in bundled and external m
 	@# Only humans write allow rules: the last-rules policy renders, and neither the operator nor the gateway role
 	@# grants a write verb (or *) on either rule kind. Each check looks at the verbs line after the rule's resources line.
 	helm template last charts/last-operator -n last-system | grep -q 'name: last-rules'
-	grep -A1 'commandrules' charts/last-operator/files/operator-clusterrole.yaml | grep -q 'verbs: \[get, list, watch\]'
-	! grep -A1 'commandrules' charts/last-operator/files/operator-clusterrole.yaml | grep -Eq 'create|update|patch|delete|\*'
-	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'commandrules' | grep -q 'verbs: \[get, list, watch\]'
-	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'commandrules' | grep -Eq 'create|update|patch|delete|\*'
+	grep -A1 'clustercommandrules\]' charts/last-operator/files/operator-clusterrole.yaml | grep -q 'verbs: \[get, list, watch\]'
+	! grep -A1 'clustercommandrules\]' charts/last-operator/files/operator-clusterrole.yaml | grep -Eq 'create|update|patch|delete|\*'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'clustercommandrules\]' | grep -q 'verbs: \[get, list, watch\]'
+	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'clustercommandrules\]' | grep -Eq 'create|update|patch|delete|\*'
+	@# Suggestions (M7): the policy renders; the operator creates but never changes or deletes one; the gateway only reads;
+	@# the decider role may update.
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-suggestions'
+	helm template last charts/last-operator -n last-system | grep -q 'name: last-suggestion-decider'
+	grep -A1 'commandrulesuggestions' charts/last-operator/files/operator-clusterrole.yaml | grep -q 'verbs: \[get, list, watch, create\]'
+	! grep -A1 'commandrulesuggestions' charts/last-operator/files/operator-clusterrole.yaml | grep -Eq 'update|patch|delete|\*'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'commandrulesuggestions' | grep -q 'verbs: \[get, list, watch\]'
+	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'commandrulesuggestions' | grep -Eq 'create|update|patch|delete|\*'
+	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-suggestion-decider\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'commandrulesuggestions' | grep -q 'verbs: \[get, list, watch, update, patch\]'
 	@# The gateway deletes, and audits, the ManagedResources an Update dropped: delete on managedresources alone, in its own rule.
 	helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[managedresources\]' | grep -q 'verbs: \[delete\]'
 	! helm template last charts/last-operator -n last-system | awk 'function emit() { if (doc ~ /\nkind: ClusterRole\n/ && doc ~ /\nmetadata:\n  name: last-gateway-lifecycle\n/) printf "%s", doc; doc = "" } /^---/ { emit(); next } { doc = doc $$0 "\n" } END { emit() }' | grep -A1 'resources: \[.*,.*\]' | grep -q 'verbs: \[.*delete'

@@ -1,6 +1,7 @@
 package v1alpha1_test
 
 import (
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -103,4 +104,53 @@ func TestSuggestionDecisionCannotChangeOnceDecided(t *testing.T) {
 	}
 	obj.Spec.Decision = lastv1alpha1.SuggestionAccepted
 	expectInvalid(t, k8sClient.Update(ctx, obj), "decision cannot change once decided")
+}
+
+func TestSuggestionsAreImmutableApartFromTheDecision(t *testing.T) {
+	obj := suggestion()
+	if err := k8sClient.Create(ctx, obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	fresh := func() *lastv1alpha1.CommandRuleSuggestion {
+		got := &lastv1alpha1.CommandRuleSuggestion{}
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for name, change := range map[string]func(*lastv1alpha1.CommandRuleSuggestion){
+		"proposed":  func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.Proposed.Match.Argv = []string{"helm", "..."} },
+		"rationale": func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.Rationale = "changed" },
+		"removed rationale": func(s *lastv1alpha1.CommandRuleSuggestion) {
+			s.Spec.Rationale = ""
+		},
+		"trigger": func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.Trigger = lastv1alpha1.TriggerPeriodicReview },
+		"scope":   func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.TargetScope = lastv1alpha1.RuleScopeCluster },
+	} {
+		got := fresh()
+		change(got)
+		if err := k8sClient.Update(ctx, got); err == nil || !strings.Contains(err.Error(), "immutable apart from its decision") {
+			t.Errorf("%s: update = %v, want an immutability error", name, err)
+		}
+	}
+
+	// The decision itself may be set once, with its decider and reason.
+	got := fresh()
+	got.Spec.Decision = lastv1alpha1.SuggestionDenied
+	got.Spec.DecidedBy = "alice"
+	got.Spec.DecisionReason = "too broad"
+	if err := k8sClient.Update(ctx, got); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	got = fresh()
+	got.Spec.DecisionReason = "changed my mind"
+	expectInvalid(t, k8sClient.Update(ctx, got), "cannot change once decided")
+	got = fresh()
+	got.Spec.DecidedBy = "bob"
+	expectInvalid(t, k8sClient.Update(ctx, got), "cannot change once decided")
+	got = fresh()
+	got.Labels = map[string]string{"x": "y"}
+	if err := k8sClient.Update(ctx, got); err != nil {
+		t.Errorf("label change after the decision: %v", err)
+	}
 }

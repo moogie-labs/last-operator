@@ -6,7 +6,7 @@
 # finalizer is released after a succeeded Delete phase. It has no access to Secrets, Pods,
 # ConfigMaps or anything in the gateway, sandbox or audit namespaces, cannot
 # impersonate or mint tokens, and cannot delete ManagedResources (that would
-# garbage-collect output Secrets unaudited). test/admission checks this file.
+# garbage-collect output Secrets unaudited), or update or delete a CommandRuleSuggestion. test/admission checks this file.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -33,6 +33,9 @@ rules:
   - apiGroups: [last.moogie-labs.com]
     resources: [commandrules, clustercommandrules]
     verbs: [get, list, watch]            # read-only: admission (files/rules-policy.yaml) refuses its writes too
+  - apiGroups: [last.moogie-labs.com]
+    resources: [commandrulesuggestions]
+    verbs: [get, list, watch, create]    # it only proposes, so a denial stays (M7 S3); suggestions-policy.yaml limits what it creates
   - apiGroups: [events.k8s.io]
     resources: [events]
     verbs: [create, patch]

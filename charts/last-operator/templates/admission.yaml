@@ -5,3 +5,5 @@
 {{ .Files.Get "files/gateway-audit-guard-policy.yaml" }}
 ---
 {{ .Files.Get "files/rules-policy.yaml" }}
+---
+{{ .Files.Get "files/suggestions-policy.yaml" }}

@@ -27,6 +27,15 @@ rules:
 - apiGroups:
   - last.moogie-labs.com
   resources:
+  - commandrulesuggestions
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - last.moogie-labs.com
+  resources:
   - intents
   verbs:
   - get

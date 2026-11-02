@@ -1,0 +1,12 @@
+# Bind this ClusterRole to the people who review rule suggestions (M7 S3). Deciding is
+# an update; accepting a suggestion also needs create on the rule kind (spec §9.4).
+# The last-suggestions policy makes decidedBy the requester.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: last-suggestion-decider
+  labels: {{- include "last.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [last.moogie-labs.com]
+    resources: [commandrulesuggestions]
+    verbs: [get, list, watch, update, patch]

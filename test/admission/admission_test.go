@@ -86,7 +86,7 @@ func applyChartPolicy(t *testing.T, admin client.Client, file string) {
 		if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
 			t.Fatal(err)
 		}
-		if err := admin.Create(context.Background(), obj); err != nil {
+		if err := admin.Create(context.Background(), obj); client.IgnoreAlreadyExists(err) != nil {
 			t.Fatal(err)
 		}
 	}
@@ -413,8 +413,8 @@ func TestRuleWritesNeedAHuman(t *testing.T) {
 
 	spec := lastv1alpha1.CommandRuleSpec{
 		Stages:    []lastv1alpha1.Stage{lastv1alpha1.StageDiscovery},
-		Providers: []string{"aws-prod"},
-		Match:     lastv1alpha1.ArgvPattern{Argv: []string{"aws", "ec2", "..."}}}
+		Providers: []string{provProd},
+		Match:     lastv1alpha1.ArgvPattern{Argv: ec2Argv()}}
 	newRule := func(kind, n string) client.Object {
 		if kind == "ClusterCommandRule" {
 			return &lastv1alpha1.ClusterCommandRule{ObjectMeta: metav1.ObjectMeta{Name: n}, Spec: spec}
@@ -422,7 +422,7 @@ func TestRuleWritesNeedAHuman(t *testing.T) {
 		return &lastv1alpha1.CommandRule{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}, Spec: spec}
 	}
 	touch := func(o client.Object) {
-		o.SetLabels(map[string]string{"touched": "true"})
+		o.SetLabels(map[string]string{labelKey: valTrue})
 	}
 
 	alice := clientAs(t, "alice")
@@ -481,4 +481,221 @@ func TestRuleWritesNeedAHuman(t *testing.T) {
 			t.Errorf("%s update by a plain user: %v", kind, err)
 		}
 	}
+}
+
+func ec2Argv() []string { return []string{awsBin, "ec2", ellipsis} }
+
+const (
+	userAlice  = "alice"
+	userBob    = "bob"
+	userSneaky = "sneaky"
+	provProd   = "aws-prod"
+	labelKey   = "touched"
+	ellipsis   = "..."
+	awsBin     = "aws"
+	valTrue    = "true"
+	mustBeUser = "must be the requesting user"
+)
+
+// waitForPolicy retries create until err mentions want, since admission policies take
+// effect asynchronously.
+func waitForPolicy(t *testing.T, what, want string, create func(i int) error) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for i := 0; ; i++ {
+		err := create(i)
+		if err != nil && strings.Contains(err.Error(), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the policy never took effect: %v", what, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// expectErr checks err mentions want, or is nil when want is empty.
+func expectErr(t *testing.T, what string, err error, want string) {
+	t.Helper()
+	switch {
+	case want == "" && err != nil:
+		t.Errorf("%s: %v, want allowed", what, err)
+	case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+		t.Errorf("%s = %v, want %q", what, err, want)
+	}
+}
+
+func grantWriters(t *testing.T, admin client.Client, name, resource string, namespaces ...string) {
+	t.Helper()
+	ctx := context.Background()
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: []rbacv1.PolicyRule{{
+		APIGroups: []string{lastv1alpha1.GroupVersion.Group}, Resources: []string{resource},
+		Verbs: []string{verbCreate, verbGet, verbUpdate}}}}
+	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: name},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: userAlice},
+			{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: userBob},
+			{Kind: rbacv1.ServiceAccountKind, Name: operatorSA, Namespace: systemNS},
+			{Kind: rbacv1.ServiceAccountKind, Name: userSneaky, Namespace: gatewayName},
+		}}
+	objs := make([]client.Object, 0, 2+len(namespaces))
+	objs = append(objs, role, binding)
+	for _, ns := range namespaces {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+	}
+	for _, o := range objs {
+		if err := admin.Create(ctx, o); client.IgnoreAlreadyExists(err) != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func suggestionIn(ns, n string,
+	change func(*lastv1alpha1.CommandRuleSuggestionSpec)) *lastv1alpha1.CommandRuleSuggestion {
+	s := &lastv1alpha1.CommandRuleSuggestion{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns},
+		Spec: lastv1alpha1.CommandRuleSuggestionSpec{
+			TargetScope: lastv1alpha1.RuleScopeNamespace, Trigger: lastv1alpha1.TriggerPlanTime, Rationale: "r",
+			Proposed: lastv1alpha1.CommandRuleSpec{Stages: []lastv1alpha1.Stage{lastv1alpha1.StageDiscovery},
+				Providers: []string{provProd}, Match: lastv1alpha1.ArgvPattern{Argv: ec2Argv()}}}}
+	if change != nil {
+		change(&s.Spec)
+	}
+	return s
+}
+
+// decidedAs makes a change that sets the decision to Denied, by the named user.
+func decidedAs(by string) func(*lastv1alpha1.CommandRuleSuggestionSpec) {
+	return func(s *lastv1alpha1.CommandRuleSuggestionSpec) {
+		s.Decision, s.DecidedBy = lastv1alpha1.SuggestionDenied, by
+	}
+}
+
+// TestSuggestionWritesFollowS1 checks the last-suggestions policy (M7 design S1).
+func TestSuggestionWritesFollowS1(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(adminCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ns = "sugg-ns"
+	grantWriters(t, admin, "suggestion-writer", "commandrulesuggestions", ns, systemNS)
+	applyChartPolicy(t, admin, "suggestions-policy.yaml")
+
+	alice := clientAs(t, userAlice)
+	bob := clientAs(t, userBob)
+	operator := clientAs(t, operatorUser, "system:serviceaccounts", "system:serviceaccounts:last-system")
+	gw := clientAs(t, gatewayNamespaceUser, "system:serviceaccounts", "system:serviceaccounts:last-gateway")
+	waitForPolicy(t, "suggestions", "gateway namespace may not write suggestions", func(i int) error {
+		return gw.Create(ctx, suggestionIn(ns, fmt.Sprintf("warmup-%d", i), nil))
+	})
+
+	const onlyPending = "may only create Pending suggestions"
+	expectErr(t, "operator creates Pending", operator.Create(ctx, suggestionIn(ns, "op-pending", nil)), "")
+	expectErr(t, "operator creates Denied",
+		operator.Create(ctx, suggestionIn(ns, "op-denied", decidedAs(operatorUser))), onlyPending)
+	expectErr(t, "operator creates Denied as someone",
+		operator.Create(ctx, suggestionIn(ns, "op-denied2", decidedAs(userAlice))), onlyPending)
+	expectErr(t, "operator sets decidedBy", operator.Create(ctx, suggestionIn(ns, "op-by",
+		func(s *lastv1alpha1.CommandRuleSuggestionSpec) { s.DecidedBy = userAlice })), onlyPending)
+	expectErr(t, "operator sets proposed.source", operator.Create(ctx, suggestionIn(ns, "op-src",
+		func(s *lastv1alpha1.CommandRuleSuggestionSpec) {
+			s.Proposed.Source = &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval, CreatedBy: userAlice}
+		})), onlyPending)
+
+	get := func(n string) *lastv1alpha1.CommandRuleSuggestion {
+		cur := &lastv1alpha1.CommandRuleSuggestion{}
+		if err := admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: n}, cur); err != nil {
+			t.Fatal(err)
+		}
+		return cur
+	}
+	cur := get("op-pending")
+	cur.Labels = map[string]string{labelKey: valTrue}
+	expectErr(t, "operator updates", operator.Update(ctx, cur), "operator may not update suggestions")
+	expectErr(t, "gateway creates", gw.Create(ctx, suggestionIn(ns, "gw", nil)),
+		"gateway namespace may not write suggestions")
+
+	toCluster := func(s *lastv1alpha1.CommandRuleSuggestionSpec) { s.TargetScope = lastv1alpha1.RuleScopeCluster }
+	expectErr(t, "Cluster target in a team namespace", operator.Create(ctx, suggestionIn(ns, "cluster-x", toCluster)),
+		"must be in last-system")
+	expectErr(t, "Cluster target in last-system",
+		operator.Create(ctx, suggestionIn(systemNS, "cluster-ok", toCluster)), "")
+
+	// A user decides: decidedBy must be the user.
+	decide := func(n, by string, c client.Client) error {
+		cur := get(n)
+		cur.Spec.Decision, cur.Spec.DecidedBy = lastv1alpha1.SuggestionDenied, by
+		return c.Update(ctx, cur)
+	}
+	expectErr(t, "user decides as someone else", decide("op-pending", userBob, alice), mustBeUser)
+	expectErr(t, "user decides as themselves", decide("op-pending", userAlice, alice), "")
+	expectErr(t, "user creates decided as themselves",
+		alice.Create(ctx, suggestionIn(ns, "by-alice", decidedAs(userAlice))), "")
+	expectErr(t, "user creates decided as someone else",
+		alice.Create(ctx, suggestionIn(ns, "by-fake", decidedAs(userBob))), mustBeUser)
+
+	// Another user changes a label on what alice decided.
+	cur = get("op-pending")
+	cur.Labels = map[string]string{labelKey: valTrue}
+	expectErr(t, "label change on a suggestion another user decided", bob.Update(ctx, cur), "")
+}
+
+// TestRuleSourceNamesItsAuthor checks the S4 additions to the last-rules policy.
+func TestRuleSourceNamesItsAuthor(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(adminCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ns = "source-ns"
+	grantWriters(t, admin, "rule-source-writer", "commandrules", ns)
+	applyChartPolicy(t, admin, "rules-policy.yaml")
+	alice := clientAs(t, userAlice)
+
+	newRule := func(n string, src *lastv1alpha1.RuleSource) *lastv1alpha1.CommandRule {
+		return &lastv1alpha1.CommandRule{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns},
+			Spec: lastv1alpha1.CommandRuleSpec{Stages: []lastv1alpha1.Stage{lastv1alpha1.StageDiscovery},
+				Providers: []string{provProd}, Match: lastv1alpha1.ArgvPattern{Argv: ec2Argv()},
+				Source: src}}
+	}
+	source := func(from lastv1alpha1.RuleOrigin, by string) *lastv1alpha1.RuleSource {
+		return &lastv1alpha1.RuleSource{CreatedFrom: from, CreatedBy: by}
+	}
+	approval := func(by string) *lastv1alpha1.RuleSource { return source(lastv1alpha1.RuleOriginApproval, by) }
+	waitForPolicy(t, "rules", "spec.source.createdBy "+mustBeUser, func(i int) error {
+		return alice.Create(ctx, newRule(fmt.Sprintf("warmup-%d", i), approval(userBob)))
+	})
+
+	const wrongAuthor = "createdBy " + mustBeUser
+	expectErr(t, "create as someone else", alice.Create(ctx, newRule("other", approval(userBob))), wrongAuthor)
+	expectErr(t, "create with no createdBy", alice.Create(ctx, newRule("anon", approval(""))), wrongAuthor)
+	expectErr(t, "create as yourself", alice.Create(ctx, newRule("mine", approval(userAlice))), "")
+	expectErr(t, "create without source", alice.Create(ctx, newRule("plain", nil)), "")
+	expectErr(t, "suggestion without a ref",
+		alice.Create(ctx, newRule("no-ref", source(lastv1alpha1.RuleOriginSuggestion, userAlice))),
+		"suggestionRef is required")
+	withRef := source(lastv1alpha1.RuleOriginSuggestion, userAlice)
+	withRef.SuggestionRef = &lastv1alpha1.LocalRef{Name: "sugg-1"}
+	expectErr(t, "suggestion with a ref", alice.Create(ctx, newRule("with-ref", withRef)), "")
+
+	get := func(n string) *lastv1alpha1.CommandRule {
+		r := &lastv1alpha1.CommandRule{}
+		if err := admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: n}, r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	cur := get("mine")
+	cur.Spec.Source.CreatedBy = userBob
+	expectErr(t, "update changes source", alice.Update(ctx, cur), "spec.source cannot be changed")
+	cur = get("mine")
+	cur.Spec.Source = nil
+	expectErr(t, "update removes source", alice.Update(ctx, cur), "spec.source cannot be changed")
+	cur = get("plain")
+	cur.Spec.Source = approval(userAlice)
+	expectErr(t, "update adds source", alice.Update(ctx, cur), "spec.source cannot be changed")
+	cur = get("mine")
+	cur.Labels = map[string]string{labelKey: valTrue}
+	expectErr(t, "update keeps source", alice.Update(ctx, cur), "")
 }

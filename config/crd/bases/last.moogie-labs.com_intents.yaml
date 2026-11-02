@@ -283,21 +283,6 @@ spec:
                     required:
                     - run
                     type: object
-                  generalization:
-                    description: Generalization is an LLM-proposed wildcard pattern
-                      for an allow rule (advice only).
-                    properties:
-                      argv:
-                        items:
-                          type: string
-                        type: array
-                      lint:
-                        items:
-                          type: string
-                        type: array
-                    required:
-                    - argv
-                    type: object
                   hash:
                     type: string
                   nonce:
@@ -330,23 +315,6 @@ spec:
               plan:
                 description: Plan is the agent's reviewable plan (spec §8.2).
                 properties:
-                  generalizations:
-                    additionalProperties:
-                      description: Generalization is an LLM-proposed wildcard pattern
-                        for an allow rule (advice only).
-                      properties:
-                        argv:
-                          items:
-                            type: string
-                          type: array
-                        lint:
-                          items:
-                            type: string
-                          type: array
-                      required:
-                      - argv
-                      type: object
-                    type: object
                   hash:
                     type: string
                   nonce:
@@ -633,6 +601,10 @@ spec:
                       - run
                       type: object
                     type: array
+                  suggested:
+                    description: Suggested is set once the operator has made rule
+                      suggestions for this plan (M7 design §4.1).
+                    type: boolean
                   summary:
                     type: string
                   uncoveredSteps:

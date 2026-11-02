@@ -22,6 +22,14 @@ spec:
       message: "the operator may not write allow rules"
     - expression: "!request.userInfo.username.startsWith('system:serviceaccount:last-gateway:')"
       message: "ServiceAccounts in the gateway namespace may not write allow rules"
+    # Provenance (M7 S4): the CLI records who created a rule, and the record is the requester.
+    # A hand-written rule may leave source out.
+    - expression: "request.operation != 'CREATE' || !has(object.spec.source) || (has(object.spec.source.createdBy) && object.spec.source.createdBy == request.userInfo.username)"
+      message: "spec.source.createdBy must be the requesting user"
+    - expression: "request.operation != 'UPDATE' || (has(object.spec.source) ? (has(oldObject.spec.source) && object.spec.source == oldObject.spec.source) : !has(oldObject.spec.source))"
+      message: "spec.source cannot be changed"
+    - expression: "!has(object.spec.source) || object.spec.source.createdFrom != 'suggestion' || has(object.spec.source.suggestionRef)"
+      message: "spec.source.suggestionRef is required when createdFrom is suggestion"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

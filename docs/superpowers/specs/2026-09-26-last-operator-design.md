@@ -180,9 +180,19 @@ leader election):
   rules. `make helm-lint` checks that the policy renders and that neither
   role has a write verb on the rule kinds.
 - create/patch on `events.k8s.io` Events.
-- Later milestones add:
-  - create on `CommandRuleSuggestion` (M7). The `spec.decision` field is
-    excluded by admission (§9.5).
+- get/list/watch/create on `CommandRuleSuggestion` (M7), and no update,
+  patch or delete, so a denial is kept for good. The
+  `last-suggestions` ValidatingAdmissionPolicy
+  (`charts/last-operator/files/suggestions-policy.yaml`) lets the operator
+  create only a Pending suggestion with no `decidedBy`, `decisionReason`
+  or `proposed.source`, refuses its updates and any write from a
+  gateway-namespace ServiceAccount, requires a `Cluster` suggestion to be
+  in `last-system`, and requires that a request that sets the decision
+  sets `decidedBy` to the requester. The gateway has get/list/watch on
+  suggestions. The ClusterRole `last-suggestion-decider` (get, list,
+  watch, update, patch) is for admins to bind to reviewers. `last-rules`
+  also requires `spec.source.createdBy` to be the requester and refuses
+  an update that changes `spec.source`. See the M7 design, S1 to S4.
 - **No** create on `IntentApproval`, `CommandRule`, or
   `ClusterCommandRule`. **No** writes to `IntentPolicy`, `OperatorConfig`,
   `Provider`, `LLMProvider`, RBAC, or admission policies.
@@ -333,8 +343,7 @@ status:
     steps: [ … §8.1 … ]
     resources: [ … ManagedResource specs incl. probes … ]
     uncoveredSteps: [s2, "probe:p1"]  # entries no allow rule covers: steps, probes, teardown (§9.3)
-    generalizations:             # LLM-proposed wildcard pattern per uncovered command (§9.4)
-      s2: { argv: ["kubectl", "apply", "-n", "team-x", "-f", "..."], lint: ["file argument"] }
+    suggested: true              # the operator has made rule suggestions for this plan (M7 design §4.1)
   suggestedRules: [ … names of CommandRuleSuggestions created for this plan … ]
   remediations: 1                # consecutive remediations drift started (§7)
   remediationTimes: ["2026-10-31T09:12:00Z"]  # starts of the remediations in the last 24h (§7)
@@ -452,7 +461,8 @@ spec:
   egress: ["*.amazonaws.com:443"] # the command's declared egress must be a subset of this list
   source:                        # provenance, set by the CLI
     createdFrom: approval | suggestion | manual
-    suggestionRef: { name: … }
+    suggestionRef: { name: … }   # required when createdFrom is suggestion
+    createdBy: alice@example.com # the requester; admission refuses any other value (M7)
 ```
 
 The pattern syntax is in §9.2.
@@ -473,6 +483,11 @@ spec:
   decidedBy: ""
   decisionReason: ""
 ```
+
+A suggestion is immutable apart from its decision: on update every spec
+field other than `decision`, `decidedBy` and `decisionReason` must stay
+the same, and once decided those three are frozen too (CRD CEL, M7 design
+S2). Admission makes `decidedBy` the requester (§4.1).
 
 ### 5.6 Configuration CRs
 
@@ -501,7 +516,7 @@ spec:
     minInterval: 1m             # floor; no layer may go below it
   suggestions:
     repeatThreshold: 3          # manual approvals of the same pattern before suggesting
-    reviewInterval: 24h         # periodic review cadence
+    reviewInterval: 24h         # periodic review cadence; 1h to 720h
   defaults: { …IntentPolicy spec… }
 ---
 kind: IntentPolicy              # namespaced; can only tighten OperatorConfig.defaults
@@ -1347,10 +1362,10 @@ plan's stage. For each entry the approver picks one of:
 - **Exact (`e`):** a rule matching this command's argv literally. Glob
   characters in the arguments are escaped, so they match only themselves.
 - **Generalized (`g`):** the CLI's heuristic, always applied to the
-  entry's own command. In M6 the CLI ignores
-  `status.plan.generalizations` and `status.pendingCommand.generalization`:
-  the untrusted operator writes them outside the plan hash (M7 revisits
-  this with a design for trusted suggestions). `argv[0]` and the first
+  entry's own command. The operator's
+  proposals never feed this choice: they are `CommandRuleSuggestion`
+  objects a person reads and decides one by one (M7 design §2).
+  `argv[0]` and the first
   non-flag arguments, up to 3 in all, stay literal; flag names stay
   literal; a flag's separate value and every later positional become
   `[!-]*`, so they can't swallow a flag; the value of `--flag=value`
@@ -1426,14 +1441,11 @@ created at three points:
 | `RepeatedApproval` | A command group has been approved manually `repeatThreshold` times (counted via `QueryAudit`). Commands are grouped by binary, leading subcommands (the first non-flag arguments, up to 3), provider set, and stage. | A rule covering those approvals |
 | `PeriodicReview` | Every `reviewInterval` | Consolidated rules from recent audit history (e.g. merging several narrow rules) |
 
-The operator also writes a generalized pattern for each uncovered
-command to `status.plan.generalizations` (and to
-`status.pendingCommand` for discovery), so the "Generalized" option in
-§9.4 is available during approval. Generalizations are not part of
-`planHash`: they are advice to humans and never authorize anything by
-themselves. *(M6: the CLI does not offer them at all, since the untrusted
-operator writes them outside the plan hash; M7 decides how a suggestion
-reaches the approver in a form they can trust.)*
+The operator does not write generalized patterns into the Intent's
+status; the `Generalization` type and its fields are removed. A proposal
+exists only as a `CommandRuleSuggestion`, and no operator text authorizes
+anything or feeds an automated step. The trust model is in the M7 design,
+§2.
 
 **Deciding.** `kubectl last rules suggestions` lists pending suggestions.
 Accepting creates the rule as the human and sets `decision: Accepted`.

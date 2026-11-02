@@ -32,6 +32,9 @@ type RuleSource struct {
 	CreatedFrom RuleOrigin `json:"createdFrom"`
 	// +optional
 	SuggestionRef *LocalRef `json:"suggestionRef,omitempty"`
+	// CreatedBy is the user who created the rule. Admission requires it to be the requester.
+	// +optional
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // CommandRuleSpec lets matching commands skip approval (spec §9).

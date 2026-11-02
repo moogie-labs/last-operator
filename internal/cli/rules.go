@@ -340,7 +340,7 @@ func showPattern(w io.Writer, mode string, all []entry, spec lastv1alpha1.Comman
 // with ':' and '.' (and anything else a name cannot hold) as '-', and hash8 is
 // the first 8 hex characters of the SHA-256 of the spec's canonical JSON.
 func ruleName(intent, entryID string, spec lastv1alpha1.CommandRuleSpec) (string, error) {
-	c, err := audit.Canonical(spec)
+	c, err := ruleSpecKey(spec)
 	if err != nil {
 		return "", err
 	}
@@ -350,6 +350,13 @@ func ruleName(intent, entryID string, spec lastv1alpha1.CommandRuleSpec) (string
 		prefix = strings.TrimRight(prefix[:253-9], "-")
 	}
 	return prefix + "-" + hex.EncodeToString(sum[:])[:8], nil
+}
+
+// ruleSpecKey is the canonical JSON of spec without its source, so two approvers
+// who create the same rule get the same name and the same-spec check (M7 S4).
+func ruleSpecKey(spec lastv1alpha1.CommandRuleSpec) ([]byte, error) {
+	spec.Source = nil
+	return audit.Canonical(spec)
 }
 
 func dnsLabel(s string) string {
@@ -375,10 +382,22 @@ func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Int
 		}
 		return made, fmt.Errorf("%s; created before that: %s; the Intent was not approved", msg, strings.Join(made, ", "))
 	}
+	if len(chosen) == 0 {
+		return nil, nil
+	}
+	user, err := k.WhoAmI(ctx)
+	if err != nil {
+		return fail("find out who you are: %v", err)
+	}
 	for _, c := range chosen {
 		name, err := ruleName(in.Name, c.id, c.spec)
 		if err != nil {
 			return fail("name the rule for %s: %v", clean(c.id), err)
+		}
+		if c.spec.Source != nil {
+			src := *c.spec.Source
+			src.CreatedBy = user
+			c.spec.Source = &src
 		}
 		meta := metav1.ObjectMeta{Name: name, Labels: map[string]string{labelIntent: in.Name}}
 		var obj client.Object
@@ -428,11 +447,11 @@ func sameSpec(ctx context.Context, k *Kube, obj client.Object, spec lastv1alpha1
 		}
 		have = cur.Spec
 	}
-	a, err := audit.Canonical(have)
+	a, err := ruleSpecKey(have)
 	if err != nil {
 		return false, err
 	}
-	b, err := audit.Canonical(spec)
+	b, err := ruleSpecKey(spec)
 	return err == nil && string(a) == string(b), err
 }
 

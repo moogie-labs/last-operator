@@ -58,6 +58,7 @@ type IntentReconciler struct {
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=intentapprovals,verbs=get;list;watch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=providers;intentpolicies;operatorconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=commandrules;clustercommandrules,verbs=get;list;watch
+// +kubebuilder:rbac:groups=last.moogie-labs.com,resources=commandrulesuggestions,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=last.moogie-labs.com,resources=managedresources/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch

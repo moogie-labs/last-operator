@@ -244,6 +244,10 @@ spec:
                     type: integer
                   reviewInterval:
                     type: string
+                    x-kubernetes-validations:
+                    - message: reviewInterval must be between 1h and 720h
+                      rule: duration(self) >= duration('1h') && duration(self) <=
+                        duration('720h')
                 type: object
             type: object
         type: object

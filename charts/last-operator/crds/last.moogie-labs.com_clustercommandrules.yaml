@@ -119,6 +119,10 @@ spec:
               source:
                 description: RuleSource is provenance set by the CLI.
                 properties:
+                  createdBy:
+                    description: CreatedBy is the user who created the rule. Admission
+                      requires it to be the requester.
+                    type: string
                   createdFrom:
                     description: RuleOrigin records how a rule was created.
                     enum:

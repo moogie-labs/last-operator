@@ -2,12 +2,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"reflect"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -114,7 +114,7 @@ func TestAlwaysAllowExactCreatesALiteralRule(t *testing.T) {
 		Match:       lastv1alpha1.ArgvPattern{Argv: []string{"kubectl", wordApply, "-n", "team-x", "-f", "app.yaml"}},
 		Install:     []lastv1alpha1.ArgvPattern{{Argv: []string{"pip", wordInstall, `kubernetes\*`}}},
 		Egress:      []string{"10.0.0.0/8:443"},
-		Source:      &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval},
+		Source:      &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval, CreatedBy: testUser},
 	}
 	if !reflect.DeepEqual(r.Spec, want) {
 		t.Errorf("spec = %+v\nwant   %+v", r.Spec, want)
@@ -128,6 +128,54 @@ func TestAlwaysAllowExactCreatesALiteralRule(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Created CommandRule "+r.Name) {
 		t.Errorf("output does not say what was created:\n%s", out)
+	}
+}
+
+// TestAlwaysAllowStampsCreatedBy: last-rules refuses a source whose createdBy is not
+// the requester (M7 S4), so the CLI records the SelfSubjectReview user.
+func TestAlwaysAllowStampsCreatedBy(t *testing.T) {
+	c := fakeClient(ruleIntent())
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=exact"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	for _, r := range nsRules(t, c) {
+		if r.Spec.Source == nil || r.Spec.Source.CreatedBy != testUser {
+			t.Errorf("%s source = %+v, want createdBy %q", r.Name, r.Spec.Source, testUser)
+		}
+	}
+}
+
+// TestIdenticalRuleBySomeoneElseCountsAsDone: the name and the same-spec check leave
+// source out, so a rule another approver made from the same spec is not a clash.
+func TestIdenticalRuleBySomeoneElseCountsAsDone(t *testing.T) {
+	c := fakeClient(ruleIntent())
+	d, out := depsFor(c, "")
+	if err := execute(d, verbApprove, webName, "--always-allow=exact"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	items := nsRules(t, c)
+	for i := range items {
+		items[i].Spec.Source.CreatedBy = "bob"
+		if err := c.Update(context.Background(), &items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Create the same spec again, as alice: it is already there, made by bob.
+	orig := ruleFor(t, items, "web-s1-")
+	spec := *orig.Spec.DeepCopy()
+	spec.Source.CreatedBy = ""
+	var buf bytes.Buffer
+	k := &Kube{Client: c, Namespace: testNS, WhoAmI: func(context.Context) (string, error) { return testUser, nil }}
+	if _, err := createRules(context.Background(), k, &buf, ruleIntent(), []choice{{id: "s1", spec: spec}}, false); err != nil {
+		t.Fatalf("createRules = %v\n%s", err, &buf)
+	}
+	got := nsRules(t, c)
+	if len(got) != len(items) {
+		t.Fatalf("rules = %d, want %d", len(got), len(items))
+	}
+	if r := ruleFor(t, got, "web-s1-"); r.Spec.Source.CreatedBy != "bob" {
+		t.Errorf("createdBy = %q, want bob's rule untouched", r.Spec.Source.CreatedBy)
 	}
 }
 
@@ -242,48 +290,6 @@ func TestAlwaysAllowGeneralizedWithNoStdin(t *testing.T) {
 	}
 	if a := approvalsIn(t, c); len(a) != 1 {
 		t.Errorf("approvals = %+v", a)
-	}
-}
-
-// TestAlwaysAllowIgnoresTheStoredGeneralization: the operator writes
-// status.plan.generalizations and pendingCommand.generalization outside the plan
-// hash, and the operator is untrusted, so the CLI never offers them (M6 design §10, I2).
-func TestAlwaysAllowIgnoresTheStoredGeneralization(t *testing.T) {
-	in := ruleIntent()
-	broad := []string{"kubectl", "..."}
-	in.Status.Plan.Generalizations = map[string]lastv1alpha1.Generalization{
-		"s1": {Argv: broad}, "s2": {Argv: broad}, "probe:up": {Argv: broad}, "teardown:0.0": {Argv: broad}}
-	c := fakeClient(in)
-	d, out := depsFor(c, "")
-	if err := execute(d, verbApprove, webName, "--always-allow=generalized"); err != nil {
-		t.Fatalf("approve = %v\n%s", err, out)
-	}
-	items := nsRules(t, c)
-	for _, prefix := range []string{"web-s1-", "web-s2-", "web-probe-up-", "web-teardown-0-0-"} {
-		if r := ruleFor(t, items, prefix); slices.Contains(r.Spec.Match.Argv, "...") {
-			t.Errorf("%s match = %q, want rules.Generalize, not the stored generalization", prefix, r.Spec.Match.Argv)
-		}
-	}
-	s2 := ruleFor(t, items, "web-s2-")
-	if want := []string{"kubectl", "rollout", "status", "[!-]*", "[!-]*"}; !reflect.DeepEqual(s2.Spec.Match.Argv, want) {
-		t.Errorf("s2 match = %q, want %q", s2.Spec.Match.Argv, want)
-	}
-	if strings.Contains(out.String(), "kubectl ...") {
-		t.Errorf("the stored generalization was offered:\n%s", out)
-	}
-
-	look := pendingIntent()
-	look.Status.PendingCommand.Command.Providers = []string{k8sProv}
-	look.Status.PendingCommand.Generalization = &lastv1alpha1.Generalization{Argv: broad}
-	look.Status.PendingCommand.Hash = discoveryHash(look.Status.PendingCommand)
-	c = fakeClient(look)
-	d, out = depsFor(c, "")
-	if err := execute(d, verbApprove, "look", "--always-allow=generalized"); err != nil {
-		t.Fatalf("approve = %v\n%s", err, out)
-	}
-	items = nsRules(t, c)
-	if len(items) != 1 || !reflect.DeepEqual(items[0].Spec.Match.Argv, []string{"kubectl", "get", "ns"}) {
-		t.Errorf("discovery rules = %+v, want one matching kubectl get ns", items)
 	}
 }
 

@@ -82,6 +82,10 @@ func TestOperatorRBAC(t *testing.T) {
 		attr(last, "", "providers", "", "watch"),
 		attr(last, "team-x", "commandrules", "", "list"),
 		attr(last, "", "clustercommandrules", "", "watch"),
+		attr(last, "team-x", "commandrulesuggestions", "", "list"),
+		attr(last, "team-x", "commandrulesuggestions", "", "watch"),
+		attr(last, "team-x", "commandrulesuggestions", "", verbGet),
+		attr(last, "team-x", "commandrulesuggestions", "", verbCreate),
 		attr("events.k8s.io", "team-x", "events", "", "create"),
 	}
 	// The binding reaches the authorizer through an informer; wait until it applies.
@@ -127,6 +131,9 @@ func TestOperatorRBAC(t *testing.T) {
 		denied = append(denied, attr(last, "team-x", "intentapprovals", "", verb))
 		for _, r := range []string{"intentpolicies", "commandrules"} {
 			denied = append(denied, attr(last, "team-x", r, "", verb))
+		}
+		if verb != verbCreate {
+			denied = append(denied, attr(last, "team-x", "commandrulesuggestions", "", verb))
 		}
 		for _, r := range []string{"operatorconfigs", "providers", "llmproviders", "clustercommandrules"} {
 			denied = append(denied, attr(last, "", r, "", verb))

@@ -155,6 +155,9 @@ rules:
     resources: [intents, intentapprovals, managedresources, intentpolicies, operatorconfigs, providers, llmproviders, commandrules, clustercommandrules]
     verbs: [get, list, watch]
   - apiGroups: [last.moogie-labs.com]
+    resources: [commandrulesuggestions]
+    verbs: [get, list, watch]            # read-only: the denial decisions it keeps (M7 S3)
+  - apiGroups: [last.moogie-labs.com]
     resources: [managedresources]
     verbs: [delete]                      # the ManagedResources a succeeded Update dropped, each audited (spec §15)
   - apiGroups: [""]

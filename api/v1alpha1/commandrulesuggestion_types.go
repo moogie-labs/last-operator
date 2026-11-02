@@ -36,17 +36,25 @@ const (
 
 // CommandRuleSuggestionSpec is an operator-proposed allow rule awaiting a human decision.
 // +kubebuilder:validation:XValidation:rule="self.decision == 'Pending' || has(self.decidedBy)",message="decidedBy is required once decided"
+// +kubebuilder:validation:XValidation:rule="oldSelf.decision == 'Pending' || (self.decision == oldSelf.decision && has(self.decidedBy) == has(oldSelf.decidedBy) && (!has(self.decidedBy) || self.decidedBy == oldSelf.decidedBy) && has(self.decisionReason) == has(oldSelf.decisionReason) && (!has(self.decisionReason) || self.decisionReason == oldSelf.decisionReason))",message="decision cannot change once decided; decidedBy and decisionReason are frozen too"
+// +kubebuilder:validation:XValidation:rule="has(self.rationale) == has(oldSelf.rationale) && has(self.examples) == has(oldSelf.examples) && has(self.breadthWarnings) == has(oldSelf.breadthWarnings)",message="a suggestion is immutable apart from its decision"
 type CommandRuleSuggestionSpec struct {
-	TargetScope RuleScope         `json:"targetScope"`
-	Trigger     SuggestionTrigger `json:"trigger"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
+	TargetScope RuleScope `json:"targetScope"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
+	Trigger SuggestionTrigger `json:"trigger"`
 	// +optional
-	Rationale string          `json:"rationale,omitempty"`
-	Proposed  CommandRuleSpec `json:"proposed"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
+	Rationale string `json:"rationale,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
+	Proposed CommandRuleSpec `json:"proposed"`
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
 	Examples []Command `json:"examples,omitempty"`
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a suggestion is immutable apart from its decision"
 	BreadthWarnings []string `json:"breadthWarnings,omitempty"`
 	// +kubebuilder:default=Pending
 	// +optional
@@ -68,7 +76,6 @@ type CommandRuleSuggestion struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// +kubebuilder:validation:XValidation:rule="oldSelf.decision == 'Pending' || self.decision == oldSelf.decision",message="decision cannot change once decided"
 	Spec CommandRuleSuggestionSpec `json:"spec"`
 }
 

@@ -1,0 +1,47 @@
+# Suggestions are proposals the operator makes and only humans decide (M7 design §2, S1).
+# The operator may create a Pending suggestion and nothing else; nobody in the gateway
+# namespace may touch one; and whoever sets the decision names themselves as the decider,
+# the way intentapproval-policy.yaml makes approvedBy the requester. The CRD's own CEL
+# rules (S2) keep everything but the decision immutable. DELETE is not matched: RBAC keeps
+# the operator from deleting, and people may delete suggestions they don't want.
+# This file is static, so it names the default namespaces, last-system and last-gateway,
+# as intentapproval-policy.yaml and rules-policy.yaml do.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: last-suggestions
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["last.moogie-labs.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["commandrulesuggestions"]
+  variables:
+    - name: isOperator
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':last-operator')"
+    # Setting the decision: a create that is not Pending, or an update that leaves Pending.
+    # The CRD defaults decision to Pending before this runs. Later updates, such as a label
+    # change on a decided suggestion, are not re-checked.
+    - name: settingDecision
+      expression: "request.operation == 'CREATE' ? object.spec.decision != 'Pending' : (oldObject.spec.decision == 'Pending' && object.spec.decision != 'Pending')"
+  validations:
+    - expression: "!request.userInfo.username.startsWith('system:serviceaccount:last-gateway:')"
+      message: "ServiceAccounts in the gateway namespace may not write suggestions"
+    - expression: "!(variables.isOperator && request.operation == 'UPDATE')"
+      message: "the operator may not update suggestions"
+    - expression: "!variables.isOperator || (object.spec.decision == 'Pending' && !has(object.spec.decidedBy) && !has(object.spec.decisionReason) && !has(object.spec.proposed.source))"
+      message: "the operator may only create Pending suggestions with no decidedBy, decisionReason or proposed.source"
+    - expression: "object.spec.targetScope != 'Cluster' || object.metadata.namespace == 'last-system'"
+      message: "a Cluster suggestion must be in last-system"
+    - expression: "!variables.settingDecision || (has(object.spec.decidedBy) && object.spec.decidedBy == request.userInfo.username)"
+      message: "spec.decidedBy must be the requesting user"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: last-suggestions
+spec:
+  policyName: last-suggestions
+  validationActions: [Deny]

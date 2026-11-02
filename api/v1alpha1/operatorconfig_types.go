@@ -84,6 +84,7 @@ type SuggestionsConfig struct {
 	// +optional
 	RepeatThreshold int32 `json:"repeatThreshold,omitempty"`
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h') && duration(self) <= duration('720h')",message="reviewInterval must be between 1h and 720h"
 	ReviewInterval *metav1.Duration `json:"reviewInterval,omitempty"`
 }
 

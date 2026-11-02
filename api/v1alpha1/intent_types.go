@@ -59,13 +59,6 @@ type Question struct {
 	Options []string `json:"options,omitempty"`
 }
 
-// Generalization is an LLM-proposed wildcard pattern for an allow rule (advice only).
-type Generalization struct {
-	Argv []string `json:"argv"`
-	// +optional
-	Lint []string `json:"lint,omitempty"`
-}
-
 // PendingCommand is a discovery command awaiting approval.
 type PendingCommand struct {
 	Hash    string  `json:"hash"`
@@ -76,8 +69,6 @@ type PendingCommand struct {
 	Nonce string `json:"nonce,omitempty"`
 	// +optional
 	Reason string `json:"reason,omitempty"`
-	// +optional
-	Generalization *Generalization `json:"generalization,omitempty"`
 }
 
 // Plan is the agent's reviewable plan (spec §8.2).
@@ -90,8 +81,9 @@ type Plan struct {
 	Resources []ManagedResourceSpec `json:"resources,omitempty"`
 	// +optional
 	UncoveredSteps []string `json:"uncoveredSteps,omitempty"`
+	// Suggested is set once the operator has made rule suggestions for this plan (M7 design §4.1).
 	// +optional
-	Generalizations map[string]Generalization `json:"generalizations,omitempty"`
+	Suggested bool `json:"suggested,omitempty"`
 	// Nonce makes a Remediate plan its own approval subject: it is part of the
 	// hashed body, so the same repair for a recurring drift needs a new
 	// approval. Only Remediate plans carry one (32 lowercase hex characters).

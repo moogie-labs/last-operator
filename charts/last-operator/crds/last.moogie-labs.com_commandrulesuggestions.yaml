@@ -56,6 +56,9 @@ spec:
                   type: string
                 maxItems: 20
                 type: array
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
               decidedBy:
                 minLength: 1
                 type: string
@@ -140,6 +143,9 @@ spec:
                   type: object
                 maxItems: 20
                 type: array
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
               proposed:
                 description: CommandRuleSpec lets matching commands skip approval
                   (spec §9).
@@ -216,6 +222,10 @@ spec:
                   source:
                     description: RuleSource is provenance set by the CLI.
                     properties:
+                      createdBy:
+                        description: CreatedBy is the user who created the rule. Admission
+                          requires it to be the requester.
+                        type: string
                       createdFrom:
                         description: RuleOrigin records how a rule was created.
                         enum:
@@ -254,14 +264,23 @@ spec:
                 - providers
                 - stages
                 type: object
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
               rationale:
                 type: string
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
               targetScope:
                 description: RuleScope is which kind of rule a suggestion would create.
                 enum:
                 - Namespace
                 - Cluster
                 type: string
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
               trigger:
                 description: SuggestionTrigger is why the operator made a suggestion
                   (spec §9.5).
@@ -270,16 +289,27 @@ spec:
                 - RepeatedApproval
                 - PeriodicReview
                 type: string
+                x-kubernetes-validations:
+                - message: a suggestion is immutable apart from its decision
+                  rule: self == oldSelf
             required:
             - proposed
             - targetScope
             - trigger
             type: object
             x-kubernetes-validations:
-            - message: decision cannot change once decided
-              rule: oldSelf.decision == 'Pending' || self.decision == oldSelf.decision
             - message: decidedBy is required once decided
               rule: self.decision == 'Pending' || has(self.decidedBy)
+            - message: decision cannot change once decided; decidedBy and decisionReason
+                are frozen too
+              rule: oldSelf.decision == 'Pending' || (self.decision == oldSelf.decision
+                && has(self.decidedBy) == has(oldSelf.decidedBy) && (!has(self.decidedBy)
+                || self.decidedBy == oldSelf.decidedBy) && has(self.decisionReason)
+                == has(oldSelf.decisionReason) && (!has(self.decisionReason) || self.decisionReason
+                == oldSelf.decisionReason))
+            - message: a suggestion is immutable apart from its decision
+              rule: has(self.rationale) == has(oldSelf.rationale) && has(self.examples)
+                == has(oldSelf.examples) && has(self.breadthWarnings) == has(oldSelf.breadthWarnings)
         required:
         - spec
         type: object
