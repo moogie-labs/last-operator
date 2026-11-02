@@ -210,6 +210,51 @@ nothing. `kubectl last plan` shows which rule covers each entry.
 Related limits: at most 6 remediations in 24 hours (`status.remediationTimes`)
 before a drifting Intent fails `RemediationFailed`; a spec edit clears the count.
 
+## Rule suggestions
+
+The operator notices commands that keep needing approval and proposes rules for
+them as `CommandRuleSuggestion` objects: when a plan waits for approval
+(`PlanTime`), when a command group has been approved `repeatThreshold` times
+(`RepeatedApproval`, default 3), and every `reviewInterval` (`PeriodicReview`,
+default 24h), which also merges narrow rules and proposes a `ClusterCommandRule`
+for rules identical in several namespaces. Those `Cluster` suggestions live in
+`last-system`. Only a person decides a suggestion, and a denial is permanent: the
+operator never suggests the same rule, or a broader one, again.
+
+The operator is untrusted, so the CLI treats a suggestion as a proposal to read,
+never as fact. It works out lint itself (it ignores the operator's
+`breadthWarnings`), checks the match against each example, compares the rule
+with what its own `g` choice would create, and strips terminal escapes from
+everything the operator wrote, which it prints under "operator-proposed".
+
+```bash
+kubectl last rules suggestions -n team-x            # Pending suggestions (--all: decided ones too; -A: every namespace)
+kubectl last rules suggestions show sugg-1a2b3c4d5e -n team-x
+kubectl last rules suggestions accept sugg-1a2b3c4d5e -n team-x            # shows it in full, then asks
+kubectl last rules suggestions accept sugg-1a2b3c4d5e -n team-x --edit     # type a narrower match first
+kubectl last rules suggestions deny sugg-1a2b3c4d5e -n team-x --reason "too broad"
+kubectl last rules suggestions accept sugg-9f8e7d6c5b -n last-system --yes # a ClusterCommandRule
+```
+
+- **Accept** creates the rule as you, named after the suggestion: a
+  `CommandRule` in the suggestion's namespace, or a `ClusterCommandRule` for a
+  `Cluster` suggestion, with `source {createdFrom: suggestion, suggestionRef,
+  createdBy: <you>}`. Then it marks the suggestion `Accepted` with you as
+  `decidedBy`. You need create on the rule kind as well as the
+  `last-suggestion-decider` role; without it the accept fails and the suggestion
+  stays Pending. If recording the decision fails, run `accept` again: the
+  identical rule counts as created. `--yes` skips the question, not the display.
+- **The CLI refuses** a suggestion whose match matches nothing or lets code vary.
+  If you really want such a rule, write it by hand. `--edit` lets you type a new
+  match, which is linted again and recorded in `decisionReason`.
+- **In `kubectl last approve --always-allow`** (and the interactive `a`), an
+  uncovered command that a Pending suggestion covers gets a fourth choice,
+  `s: suggested`, which shows that suggestion against what `g` would create and
+  accepts it. `--always-allow=exact|generalized` never use suggestions, and there
+  is no "accept all".
+- `kubectl last plan` names the Pending suggestions that would cover each
+  uncovered command.
+
 ## Editing an Intent and drift
 
 An Intent that has executed is not frozen.
@@ -353,6 +398,20 @@ An Intent that has executed is not frozen.
   covered command (say `kubectl apply -f …`) write its own rules or approvals.
   Check each Provider's RBAC, for example
   `kubectl auth can-i create commandrules.last.moogie-labs.com --as=system:serviceaccount:<ns>:<sa>`.
+
+## Upgrading to M7
+
+- **Apply the CRDs by hand** (`kubectl apply -f charts/last-operator/crds/`)
+  before `helm upgrade`: the unused `generalizations` and `generalization` status
+  fields are removed, and `source.createdBy` on rules and `status.plan.suggested`
+  are new. Without them the API server prunes `createdBy`, and the `last-rules`
+  policy then refuses rules the CLI creates.
+- **Bind `last-suggestion-decider`** to the people who review suggestions, for
+  example `kubectl create clusterrolebinding suggestion-deciders
+  --clusterrole=last-suggestion-decider --group=platform-team`. Accepting also
+  needs create on CommandRule (or ClusterCommandRule for `Cluster` suggestions).
+- **Rules created before M7 have no `createdBy`.** Their `source`, if any, says
+  only how they were made.
 
 ## Demo against Claude (opt-in)
 

@@ -66,15 +66,19 @@ func fakeClient(objs ...client.Object) client.WithWatch {
 		WithStatusSubresource(&lastv1alpha1.Intent{}).WithObjects(objs...).Build()
 }
 
-// depsFor runs the CLI against c as testUser in testNS, with input as what the
-// user types.
+// depsFor runs the CLI against c as testUser in testNS (or the namespace -n
+// names), with input as what the user types.
 func depsFor(c client.Client, input string) (Deps, *bytes.Buffer) {
 	var out bytes.Buffer
 	return Deps{
 		Out: &out, Err: &out, In: strings.NewReader(input),
 		Getenv: func(string) string { return "" },
-		Kube: func(KubeFlags) (*Kube, error) {
-			return &Kube{Client: c, Namespace: testNS,
+		Kube: func(f KubeFlags) (*Kube, error) {
+			ns := testNS
+			if f.Namespace != "" {
+				ns = f.Namespace
+			}
+			return &Kube{Client: c, Namespace: ns,
 				WhoAmI: func(context.Context) (string, error) { return testUser, nil }}, nil
 		},
 		Wait:   func(context.Context) error { return errors.New("the test did not expect to wait") },

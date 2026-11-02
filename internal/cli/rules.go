@@ -149,10 +149,12 @@ func bodyOf(all []entry) plan.Body {
 	return plan.Body{Steps: cmds}
 }
 
-// choice is a rule the approver chose for an entry.
+// choice is a rule the approver chose for an entry: a rule of the CLI's making,
+// or, with sugg set, the operator's suggestion sugg, whose rule is spec.
 type choice struct {
 	id   string
 	spec lastv1alpha1.CommandRuleSpec
+	sugg *lastv1alpha1.CommandRuleSuggestion
 }
 
 // alwaysAllow walks the subject's uncovered commands and creates the rules the
@@ -176,7 +178,7 @@ func alwaysAllow(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *las
 		if i < 0 {
 			continue
 		}
-		c, err := chooseRule(ctx, p, w, in, all, all[i], opts)
+		c, err := chooseRule(ctx, k, p, w, in, all, all[i], opts)
 		if err != nil {
 			return nil, err
 		}
@@ -191,8 +193,9 @@ func alwaysAllow(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *las
 }
 
 // chooseRule puts one uncovered entry to the approver, or applies opts.mode to
-// it. It returns nil for Just this once.
-func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.Intent, all []entry, e entry,
+// it. It returns nil for Just this once. Only the prompt offers s, a covering
+// suggestion: the batch modes never read suggestions (M7 design §2).
+func chooseRule(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *lastv1alpha1.Intent, all []entry, e entry,
 	opts allowOpts) (*choice, error) {
 	writef(w, "\nNot covered by an allow rule: %s\n", clean(e.id))
 	renderCommand(w, "  ", e.cmd, false)
@@ -216,8 +219,14 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 	}
 	mode := opts.mode
 	if mode == allowPrompt {
+		offers := offeredSuggestions(ctx, k, w, in.Namespace, e)
+		question, answers := fmt.Sprintf("Rule for %s? [e]xact, [g]eneralized, [o] just this once [e/g/O]: ", clean(e.id)), "e, g or o"
+		if len(offers) > 0 {
+			question = fmt.Sprintf("Rule for %s? [e]xact, [g]eneralized, [s]uggested, [o] just this once [e/g/s/O]: ", clean(e.id))
+			answers = "e, g, s or o"
+		}
 		for mode == allowPrompt {
-			line, err := p.ask(ctx, fmt.Sprintf("Rule for %s? [e]xact, [g]eneralized, [o] just this once [e/g/O]: ", clean(e.id)))
+			line, err := p.ask(ctx, question)
 			if err != nil {
 				return nil, err
 			}
@@ -226,10 +235,23 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 				mode = allowExact
 			case "g", "generalized":
 				mode = allowGeneralized
+			case "s", "suggested":
+				if len(offers) == 0 {
+					writef(w, "Answer %s.\n", answers)
+					continue
+				}
+				// The comparison is with what g would create for this entry.
+				g := base
+				g.Match = rules.Generalize(e.cmd)
+				c, err := chooseSuggestion(ctx, p, w, in.Namespace, e, offers,
+					&baseline{spec: g, what: clean(e.id) + " at stage " + string(stages[0])})
+				if err != nil || c != nil {
+					return c, err
+				}
 			case "", "o", "once", "just this once":
 				return nil, nil //nolint:nilnil // nil means no rule
 			default:
-				writeln(w, "Answer e, g or o.")
+				writef(w, "Answer %s.\n", answers)
 			}
 		}
 	}
@@ -237,9 +259,9 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 	if mode == allowExact {
 		pattern = rules.Exact(e.cmd.Run.Argv)
 	} else {
-		// Always the CLI's own generalization of the entry's command: the operator's
-		// status.plan.generalizations and pendingCommand.generalization are outside
-		// the plan hash and the operator is untrusted (M6 design §10, I2).
+		// Always the CLI's own generalization of the entry's command: the operator
+		// is untrusted, and its proposals reach a person only as suggestions, read
+		// and accepted one by one (M7 design §2).
 		pattern = rules.Generalize(e.cmd)
 	}
 	for {
@@ -277,7 +299,7 @@ func showPattern(w io.Writer, mode string, all []entry, spec lastv1alpha1.Comman
 	writef(w, "%s: %s\n", label, clean(strings.Join(spec.Match.Argv, " ")))
 	fs := rules.LintFindings(spec)
 	for _, f := range fs {
-		kind := "warning"
+		kind := lintWarning
 		if f.Kind == rules.KindNothing {
 			kind = "matches nothing"
 		}
@@ -353,7 +375,23 @@ func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Int
 	if err != nil {
 		return fail("find out who you are: %v", err)
 	}
+	accepted := map[string]bool{}
 	for _, c := range chosen {
+		if c.sugg != nil {
+			key := c.sugg.Namespace + "/" + c.sugg.Name
+			if accepted[key] {
+				continue
+			}
+			rule, err := acceptSuggestion(ctx, k, w, c.sugg, c.spec, user, "")
+			if rule != "" {
+				made = append(made, rule)
+			}
+			if err != nil {
+				return fail("accept the suggestion chosen for %s: %v", clean(c.id), err)
+			}
+			accepted[key] = true
+			continue
+		}
 		name, err := ruleName(in.Name, c.id, c.spec)
 		if err != nil {
 			return fail("name the rule for %s: %v", clean(c.id), err)
@@ -365,9 +403,9 @@ func createRules(ctx context.Context, k *Kube, w io.Writer, in *lastv1alpha1.Int
 		}
 		meta := metav1.ObjectMeta{Name: name, Labels: map[string]string{labelIntent: in.Name}}
 		var obj client.Object
-		kind := "CommandRule"
+		kind := kindCommandRule
 		if cluster {
-			kind = "ClusterCommandRule"
+			kind = kindClusterCommandRule
 			obj = &lastv1alpha1.ClusterCommandRule{ObjectMeta: meta, Spec: c.spec}
 		} else {
 			meta.Namespace = in.Namespace
@@ -421,7 +459,8 @@ func sameSpec(ctx context.Context, k *Kube, obj client.Object, spec lastv1alpha1
 
 // printCoverage writes what the allow rules do for the plan shown: the entries
 // no rule covers, from status.plan.uncoveredSteps, and, when the user can read
-// the rules, the rule that covers each of the others.
+// the rules, the rule that covers each of the others and the Pending
+// suggestions that would cover each uncovered one (M7 design S7).
 func printCoverage(ctx context.Context, w io.Writer, k *Kube, in *lastv1alpha1.Intent, stage lastv1alpha1.Stage) {
 	if stage == lastv1alpha1.StageDiscovery || in.Status.Plan == nil {
 		return
@@ -433,7 +472,8 @@ func printCoverage(ctx context.Context, w io.Writer, k *Kube, in *lastv1alpha1.I
 	if err != nil {
 		return
 	}
-	covered, _ := coverageOf(in, stage, rs)
+	covered, uncovered := coverageOf(in, stage, rs)
+	defer printCoveringSuggestions(ctx, w, k, in, stage, uncovered)
 	first := true
 	for _, e := range entriesOf(in, stage) {
 		ref, ok := covered[e.id]
@@ -448,7 +488,7 @@ func printCoverage(ctx context.Context, w io.Writer, k *Kube, in *lastv1alpha1.I
 	}
 }
 
-func newRulesCommand(d Deps) *cobra.Command {
+func newRulesCommand(d Deps, kf *KubeFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "rules", Short: "Work with allow rules"}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "lint FILE|-",
@@ -458,6 +498,7 @@ func newRulesCommand(d Deps) *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error { return lintRules(d, args[0]) },
 	})
+	cmd.AddCommand(newSuggestionsCommand(d, kf))
 	return cmd
 }
 
@@ -493,13 +534,13 @@ func lintRules(d Deps, path string) error {
 		}
 		var spec lastv1alpha1.CommandRuleSpec
 		switch tm.Kind {
-		case "CommandRule":
+		case kindCommandRule:
 			var o lastv1alpha1.CommandRule
 			if err := json.Unmarshal(raw, &o); err != nil {
 				return fmt.Errorf("document %d: %w", n, err)
 			}
 			spec = o.Spec
-		case "ClusterCommandRule":
+		case kindClusterCommandRule:
 			var o lastv1alpha1.ClusterCommandRule
 			if err := json.Unmarshal(raw, &o); err != nil {
 				return fmt.Errorf("document %d: %w", n, err)
@@ -521,7 +562,7 @@ func lintRules(d Deps, path string) error {
 		}
 		writef(d.Out, "%s:\n", label)
 		for _, f := range fs {
-			kind := "warning"
+			kind := lintWarning
 			if f.Kind == rules.KindNothing {
 				kind = "error"
 			}

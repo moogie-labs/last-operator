@@ -1381,6 +1381,9 @@ plan's stage. For each entry the approver picks one of:
   in this plan the pattern matches. The approver can type an edited
   pattern as space-separated argv, which is linted again, or press Enter
   to accept. A pattern that matches nothing is not accepted.
+- **Suggested (`s`):** offered only at the prompt, when a Pending
+  `CommandRuleSuggestion` covers the entry; it accepts that suggestion
+  after showing it in full (§9.5, "Deciding").
 - **Just this once (`o`):** no rule.
 
 `--always-allow=exact` and `--always-allow=generalized` apply one choice
@@ -1545,12 +1548,64 @@ exists only as a `CommandRuleSuggestion`, and no operator text authorizes
 anything or feeds an automated step. The trust model is in the M7 design,
 §2.
 
-**Deciding.** `kubectl last rules suggestions` lists pending suggestions.
-Accepting creates the rule as the human and sets `decision: Accepted`.
-Denying sets `decision: Denied` and an optional reason. A
-ValidatingAdmissionPolicy lets only non-operator users set
-`decision`, `decidedBy`, and `decisionReason`, and stamps `decidedBy`
-from `request.userInfo`.
+**Deciding.** Only a person decides, one suggestion at a time, through
+the CLI; there is no "accept all", and nothing the operator wrote is
+shown as fact (M7 design §2, §5).
+
+- `kubectl last rules suggestions [-n ns | -A] [--all]` lists the
+  Pending suggestions (every one with `--all`): name, scope, trigger,
+  match, stages, providers, age and the CLI's own lint count. The
+  operator's `breadthWarnings` are never shown.
+- `kubectl last rules suggestions show <name>` prints the rule accepting
+  it would create; the CLI's own lint; each example, marked as matched
+  or not by the match; and every place the proposal is broader than the
+  rule the CLI's `g` choice would create (`suggest.Broader`: pattern
+  positions, extra stages, providers and egress, and install entries
+  that are not exact). Outside an approval, `g` is worked out for the
+  first example at the proposal's first stage; a suggestion with no
+  examples gets no comparison, and `show` says so. The rationale, the
+  description and the examples are labelled "operator-proposed", every
+  operator string is passed through `suggest.Sanitize`, and multi-line
+  operator text is printed behind `  | ` so it can't pass for CLI output.
+- `kubectl last rules suggestions accept <name> [--edit] [--yes]` shows
+  the same, then asks for confirmation (`--yes` skips the question, not
+  the display). `--edit` takes a new match as space-separated argv, which
+  is linted and shown again. The CLI refuses any match its lint finds
+  matches nothing or lets code vary, pointing at writing the rule by
+  hand. It then creates the rule **as the user**, named after the
+  suggestion: a `CommandRule` in the suggestion's namespace, or a
+  `ClusterCommandRule` for target `Cluster`, with the proposed spec and
+  `source {createdFrom: suggestion, suggestionRef: {name}, createdBy:
+  <user>}`. Only then does it update the suggestion to `decision:
+  Accepted` with `decidedBy` from SelfSubjectReview, using the
+  resourceVersion it read; an edited accept records `decisionReason:
+  "accepted with an edited match: <argv>"`. Without RBAC to create the
+  rule, the accept fails and the suggestion stays Pending. An existing
+  rule with an identical spec (ignoring `source`) counts as created, so
+  running `accept` again after a failed decision update finishes it. On
+  a conflict the CLI reads the suggestion again: accepted by someone
+  else counts as done and names them; denied by someone else is an
+  error, and the rule just created stays for the user to delete.
+- `kubectl last rules suggestions deny <name> [--reason text]` sets
+  `decision: Denied`, `decidedBy` and `decisionReason`.
+- `kubectl last approve`, interactive and `--always-allow` without a
+  value, offers a fourth choice per uncovered entry, `s: suggested`, when
+  a Pending suggestion covers the entry at its stage (`rules.Covers` over
+  the namespace's suggestions and the `Cluster` ones in the system
+  namespace, never by label). A covering suggestion the CLI would refuse
+  is named but not offered. Choosing `s` shows the same display, compared
+  with what `g` would create for that entry, asks which suggestion when
+  several cover it, asks for confirmation, and accepts it as `accept`
+  does once every entry is decided; the `IntentApproval` follows. The
+  batch forms, `--always-allow=exact|generalized`, never read
+  suggestions.
+- `kubectl last plan` lists, for each uncovered entry, the Pending
+  suggestions that would cover it.
+
+The `last-suggestions` ValidatingAdmissionPolicy refuses a decision from
+the operator or the gateway, and requires `decidedBy ==
+request.userInfo.username` whenever a request sets the decision (M7
+design S1).
 
 **No re-suggesting denied patterns.** Before creating a suggestion,
 the operator compares it with every `Denied` suggestion in the same
