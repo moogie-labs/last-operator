@@ -287,6 +287,8 @@ func (g *Gateway) lead(parent context.Context) error {
 	g.sweepRecords(ctx)
 	sweep := time.NewTicker(recordSweepInterval)
 	defer sweep.Stop()
+	decisions := time.NewTicker(suggestionDecisionInterval)
+	defer decisions.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -300,6 +302,10 @@ func (g *Gateway) lead(parent context.Context) error {
 			g.startImageGC(gcCtx, w)
 		case <-sweep.C:
 			g.sweepRecords(ctx)
+		case <-decisions.C:
+			if err := g.recordDecisions(ctx, w); err != nil {
+				slog.Error("Could not audit suggestion decisions", "err", err)
+			}
 		case <-ticker.C:
 			if err := w.CheckpointIfDue(ctx); err != nil {
 				return fmt.Errorf("gateway: checkpoint: %w", err)
