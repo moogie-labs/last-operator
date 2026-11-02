@@ -33,6 +33,8 @@ const (
 	formatJSON     = "json"
 	deployWeb      = "deploy/web"
 	replicasAssert = "result.json.replicas == 2"
+	providerK8s    = "kubernetes"
+	approverAlice  = "alice"
 )
 
 func newNamespace() string {
@@ -101,7 +103,7 @@ func createApproval(key types.NamespacedName, stage lastv1alpha1.Stage, subject 
 func createApprovalForUID(key types.NamespacedName, uid string, stage lastv1alpha1.Stage, subject string, decision lastv1alpha1.Decision) {
 	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
 		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: uid, Stage: stage,
-			SubjectHash: subject, Decision: decision, ApprovedBy: "alice"}}
+			SubjectHash: subject, Decision: decision, ApprovedBy: approverAlice}}
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }
 
@@ -250,6 +252,6 @@ func setOutOfSync(ns, name string) {
 func approveCommand(key types.NamespacedName, subject string, decision lastv1alpha1.Decision, reason string) {
 	a := &lastv1alpha1.IntentApproval{ObjectMeta: metav1.ObjectMeta{GenerateName: "approval-", Namespace: key.Namespace},
 		Spec: lastv1alpha1.IntentApprovalSpec{IntentRef: lastv1alpha1.LocalRef{Name: key.Name}, IntentUID: intentUID(key), Stage: lastv1alpha1.StageDiscovery,
-			SubjectHash: subject, Decision: decision, ApprovedBy: "alice", Reason: reason}}
+			SubjectHash: subject, Decision: decision, ApprovedBy: approverAlice, Reason: reason}}
 	Expect(k8sClient.Create(ctx, a)).To(Succeed())
 }

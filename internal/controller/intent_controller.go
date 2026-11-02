@@ -47,6 +47,9 @@ type IntentReconciler struct {
 	// Now is the clock approvals age by and Auto retries wait by; nil means
 	// time.Now. Tests inject one.
 	Now func() time.Time
+	// Suggestions creates rule suggestions for plans that wait for an approval
+	// (M7 design §4.1); nil makes none.
+	Suggestions *SuggestionCreator
 
 	// sessions holds planning conversations in memory (M3 spec §4.3).
 	sessions sessionStore

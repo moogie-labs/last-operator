@@ -146,6 +146,11 @@ type fakeGateway struct {
 	suggestScript map[string][]string
 	// purposes logs the purpose of every CallLLM per Intent: "turn" or "suggest".
 	purposes map[types.NamespacedName][]string
+	// suggestReqs holds every purpose-suggest CallLLM request per Intent.
+	suggestReqs map[types.NamespacedName][]*gatewayv1.CallLLMRequest
+	// onSuggest, when set, runs during each purpose-suggest CallLLM, without f.mu
+	// held, before the call answers.
+	onSuggest func(key types.NamespacedName)
 }
 
 func newFakeGateway(c client.Client) *fakeGateway {
@@ -157,7 +162,8 @@ func newFakeGateway(c client.Client) *fakeGateway {
 		tornDown: map[types.NamespacedName]types.UID{}, used: map[string]bool{},
 		executed: map[types.NamespacedName]string{}, audit: map[types.NamespacedName][]*gatewayv1.AuditEntry{},
 		suggestScript: map[string][]string{}, purposes: map[types.NamespacedName][]string{},
-		openBody: map[types.NamespacedName]plan.Body{}, execBody: map[types.NamespacedName]plan.Body{},
+		suggestReqs: map[types.NamespacedName][]*gatewayv1.CallLLMRequest{},
+		openBody:    map[types.NamespacedName]plan.Body{}, execBody: map[types.NamespacedName]plan.Body{},
 		openAuto: map[types.NamespacedName]bool{}, openRule: map[types.NamespacedName]bool{}, auths: map[types.NamespacedName][]string{}}
 }
 
@@ -204,13 +210,18 @@ func (f *fakeGateway) CallLLM(_ context.Context, in *gatewayv1.CallLLMRequest, _
 	}
 	f.mu.Lock()
 	if in.GetPurpose() == gatewayv1.PurposeSuggest {
-		defer f.mu.Unlock()
 		f.purposes[key] = append(f.purposes[key], gatewayv1.PurposeSuggest)
+		f.suggestReqs[key] = append(f.suggestReqs[key], in)
 		answers, n := f.suggestScript[key.String()], 0
 		for _, c := range f.purposes[key] {
 			if c == gatewayv1.PurposeSuggest {
 				n++
 			}
+		}
+		hook := f.onSuggest
+		f.mu.Unlock()
+		if hook != nil {
+			hook(key)
 		}
 		if n > len(answers) {
 			return nil, status.Error(codes.FailedPrecondition, "llm: no script for this intent")
@@ -990,6 +1001,27 @@ func (f *fakeGateway) lastRequest(key types.NamespacedName) *gatewayv1.CallLLMRe
 }
 
 // updateScript changes an Intent's script in place.
+// setSuggestScript sets the answers of the Intent's purpose-suggest calls.
+func (f *fakeGateway) setSuggestScript(key types.NamespacedName, answers ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suggestScript[key.String()] = answers
+}
+
+// setOnSuggest sets the hook purpose-suggest calls run; nil removes it.
+func (f *fakeGateway) setOnSuggest(hook func(key types.NamespacedName)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onSuggest = hook
+}
+
+// suggestRequests returns the Intent's purpose-suggest CallLLM requests.
+func (f *fakeGateway) suggestRequests(key types.NamespacedName) []*gatewayv1.CallLLMRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.suggestReqs[key])
+}
+
 func (f *fakeGateway) updateScript(key types.NamespacedName, change func(*script)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

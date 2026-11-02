@@ -20,7 +20,7 @@ const authRule = "rule"
 // ruleSpec is an allow rule for stages that matches argv, for any command
 // whose providers are a subset of {kubernetes}.
 func ruleSpec(stages []lastv1alpha1.Stage, argv ...string) lastv1alpha1.CommandRuleSpec {
-	return lastv1alpha1.CommandRuleSpec{Stages: stages, Providers: []string{"kubernetes"},
+	return lastv1alpha1.CommandRuleSpec{Stages: stages, Providers: []string{providerK8s},
 		Match: lastv1alpha1.ArgvPattern{Argv: argv}}
 }
 

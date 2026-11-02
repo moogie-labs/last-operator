@@ -1441,6 +1441,45 @@ created at three points:
 | `RepeatedApproval` | A command group has been approved manually `repeatThreshold` times (counted via `QueryAudit`). Commands are grouped by binary, leading subcommands (the first non-flag arguments, up to 3), provider set, and stage. | A rule covering those approvals |
 | `PeriodicReview` | Every `reviewInterval` | Consolidated rules from recent audit history (e.g. merging several narrow rules) |
 
+**PlanTime.** While a plan waits in `AwaitingApproval`, the operator
+runs one PlanTime step for it, after reading the approvals, so a plan
+that is already approved never waits on it. `status.plan.suggested:
+true` marks the step done, even when it made nothing, and a new plan
+starts unmarked. Plans that run without an approval (Auto, or fully
+covered by rules) get no step. The step makes one `CallLLM` with
+`purpose: suggest` for the plan's uncovered entries that a rule could
+hold, and the model proposes a match pattern for each it can usefully
+generalize. The operator fills in the rest of the rule as for "always
+allow" (§9.4): providers (the command's own, else the plan's union),
+egress and exact install patterns. Stages: the steps and probes of a
+Create or Update plan get `[the plan's stage, Remediate]`, the steps of
+any other plan get `[the plan's stage]`, and teardown entries get
+`[Delete]`. The example is the entry's own command, and the target is
+`Namespace`. `status.suggestedRules` lists the suggestions the step
+created or found. A suggest call that fails, times out or returns
+something unparseable makes no suggestion, raises a `SuggestionFailed`
+event, is not retried, and still marks the plan suggested; a scripted
+provider with no `_suggest.` key for the Intent means no proposal and
+no event. The step never fails the Intent or holds up its approval, and
+an Intent deleted during it just ends it. Discovery commands get no
+PlanTime suggestions.
+
+**Vetting, names and the cap.** Before creating a proposal the operator
+vets it (M7 design S5): it drops one whose pattern matches nothing, lets
+code vary, or puts a wildcard after a destructive verb, one that does
+not match its examples, and one that sets `source`, with a
+`SuggestionDropped` event; it skips one that existing rules already
+cover. A suggestion is named `sugg-<hash10>`, the first 10 hex
+characters of the SHA-256 of the canonical JSON of `{targetScope,
+namespace, proposed}`, so the same proposal from any trigger is one
+object, and creating a name that already exists counts as done. The
+label `last.moogie-labs.com/intent` names the Intent that prompted it.
+A namespace holds at most 100 Pending suggestions; beyond that the
+operator creates none and emits `SuggestionLimit`. A created suggestion
+emits `SuggestionCreated`. `Cluster`-target suggestions live in the
+operator's system namespace (`--system-namespace`, default
+`last-system`).
+
 The operator does not write generalized patterns into the Intent's
 status; the `Generalization` type and its fields are removed. A proposal
 exists only as a `CommandRuleSuggestion`, and no operator text authorizes
@@ -1463,7 +1502,21 @@ a denied `aws ec2 ...` does not block a later `aws ec2 describe-* ...`.
 Denied suggestions are kept indefinitely to preserve this memory, and
 the operator never deletes them (it has no delete permission).
 
-Matching is compared per position (literal ⊂ glob ⊂ `...`). When the
+Precisely (M7 design S8): a new proposal N is dropped, with a
+`SuggestionSuppressed` event naming the Denied suggestion D, when D
+would let through nothing that N doesn't: D's match is contained in
+N's, D's stages are a subset of N's (Create and Update count as one),
+D's providers are a subset of N's, N's egress covers D's, and each of
+D's install patterns is contained in one of N's. A `Namespace` N is
+compared with the Denied `Namespace` suggestions in its own namespace; a
+`Cluster` N with every Denied suggestion, of either scope. The check
+runs before the create, so a proposal identical to a Denied one, which
+has its name, is reported as suppressed and never treated as already
+existing. A narrower N, including one narrower only in stages or
+providers, is still offered.
+
+Matching is compared per position (literal ⊂ glob ⊂ `...`). A position
+that matches one string never contains a glob with `*` or `?`. When the
 operator can't decide whether one pattern contains another (e.g.
 between two regexes), it treats the new pattern as broader and does
 not suggest it.

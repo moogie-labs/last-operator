@@ -382,6 +382,8 @@ func (r *IntentReconciler) record(ctx context.Context, in *lastv1alpha1.Intent, 
 			in.Status.Stage = stage
 			in.Status.Plan = turn.Plan.DeepCopy()
 			in.Status.Plan.UncoveredSteps = cov.uncovered // never the model's own claim
+			in.Status.Plan.Suggested = false              // a new plan gets its own PlanTime step
+			in.Status.SuggestedRules = nil
 			setCondition(&in.Status.Conditions, in.Generation, CondPlanned, metav1.ConditionTrue, ReasonPlanWritten, "Plan "+subject)
 			switch {
 			case modes.For(stage) == lastv1alpha1.ModeAuto:
@@ -497,7 +499,9 @@ func replannable(stage lastv1alpha1.Stage) bool {
 // awaitApproval waits for an IntentApproval of the current plan for its stage.
 // A spec edit plans a Create or Update again, abandoning a Remediate. A deletion raises the generation,
 // and spec edits no longer matter, so a Delete plan never goes back to
-// planning for one.
+// planning for one. While the plan waits, the PlanTime step runs once for it
+// (planTime); it reads the decision first, so a plan already approved is never
+// held up by a suggest call, and a failed step never fails the Intent.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	stage := planStage(in)
 	switch {
@@ -517,6 +521,12 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 		}
 		return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied, msg)
 	case !approved:
+		if !in.Status.Plan.Suggested {
+			if err := r.planTime(ctx, in); err != nil {
+				// Not retried: suggestions are advice, and the plan still waits.
+				logf.FromContext(ctx).Info("Could not finish the PlanTime suggestion step", "reason", err.Error())
+			}
+		}
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}
 	gen, subject := in.Generation, in.Status.Plan.Hash

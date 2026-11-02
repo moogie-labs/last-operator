@@ -23,14 +23,11 @@ import (
 	"github.com/moogie-labs/last-operator/internal/audit"
 	"github.com/moogie-labs/last-operator/internal/plan"
 	"github.com/moogie-labs/last-operator/internal/rules"
+	"github.com/moogie-labs/last-operator/internal/suggest"
 )
 
 // labelIntent names the Intent whose approval created a rule.
 const labelIntent = "last.moogie-labs.com/intent"
-
-// stepRefSyntax is the reference to another step's output; a command that uses
-// it has an argv no human has seen, so no rule can hold it (M6 design R3).
-const stepRefSyntax = "${steps."
 
 // Modes of --always-allow: a bare flag prompts, the others apply one choice to
 // every uncovered command.
@@ -130,41 +127,26 @@ func coverageOf(in *lastv1alpha1.Intent, stage lastv1alpha1.Stage, rs []rules.Ru
 	return rules.PlanCoverage(rs, stage, plan.FromStatus(in.Status.Plan))
 }
 
-// unrulable says why no rule can hold cmd, or "" if one can.
-func unrulable(cmd lastv1alpha1.Command) string {
-	switch {
-	case len(cmd.Run.Argv) == 0:
-		return "it runs a script, and rules match argv only"
-	case slices.ContainsFunc(cmd.Run.Argv, hasStepRefArg) || cmd.Image != nil &&
-		slices.ContainsFunc(cmd.Image.Install, func(c lastv1alpha1.ArgvCommand) bool { return slices.ContainsFunc(c.Argv, hasStepRefArg) }):
-		return "it uses " + stepRefSyntax + "...} references, which no rule covers"
-	}
-	return ""
+// ruleSpec is the rule for e matching pattern: base, from suggest.RuleSpecFor
+// (M6 design R13), with the pattern, a description naming the approval, and the
+// approval as its source.
+func ruleSpec(in *lastv1alpha1.Intent, e entry, base lastv1alpha1.CommandRuleSpec,
+	pattern lastv1alpha1.ArgvPattern) lastv1alpha1.CommandRuleSpec {
+	spec := base
+	spec.Description = fmt.Sprintf("From the approval of Intent %s/%s (%s)", in.Namespace, in.Name, e.id)
+	spec.Match = pattern
+	spec.Source = &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval}
+	return spec
 }
 
-func hasStepRefArg(a string) bool { return strings.Contains(a, stepRefSyntax) }
-
-// ruleSpec is the rule for e matching pattern (M6 design R13): the stages given
-// or e's own, e's providers and egress, and one exact pattern per image.install argv.
-func ruleSpec(in *lastv1alpha1.Intent, e entry, pattern lastv1alpha1.ArgvPattern, stages []lastv1alpha1.Stage,
-	providers []string) lastv1alpha1.CommandRuleSpec {
-	if len(stages) == 0 {
-		stages = []lastv1alpha1.Stage{e.stage}
+// bodyOf holds every command of all as plan steps, so suggest.RuleSpecFor's
+// provider union runs over the entries the subject asks to run.
+func bodyOf(all []entry) plan.Body {
+	cmds := make([]lastv1alpha1.Command, 0, len(all))
+	for _, e := range all {
+		cmds = append(cmds, e.cmd)
 	}
-	spec := lastv1alpha1.CommandRuleSpec{
-		Description: fmt.Sprintf("From the approval of Intent %s/%s (%s)", in.Namespace, in.Name, e.id),
-		Stages:      slices.Clone(stages),
-		Providers:   providers,
-		Match:       pattern,
-		Egress:      slices.Clone(e.cmd.Egress),
-		Source:      &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginApproval},
-	}
-	if e.cmd.Image != nil {
-		for _, ic := range e.cmd.Image.Install {
-			spec.Install = append(spec.Install, rules.Exact(ic.Argv))
-		}
-	}
-	return spec
+	return plan.Body{Steps: cmds}
 }
 
 // choice is a rule the approver chose for an entry.
@@ -214,12 +196,16 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 	opts allowOpts) (*choice, error) {
 	writef(w, "\nNot covered by an allow rule: %s\n", clean(e.id))
 	renderCommand(w, "  ", e.cmd, false)
-	if why := unrulable(e.cmd); why != "" {
+	if why := suggest.Unrulable(e.cmd); why != "" {
 		writef(w, "No rule for %s: %s; it is approved just this once.\n", clean(e.id), why)
 		return nil, nil //nolint:nilnil // nil means no rule
 	}
-	providers := providersFor(e, all, opts)
-	if len(providers) == 0 {
+	stages := opts.stages
+	if len(stages) == 0 {
+		stages = []lastv1alpha1.Stage{e.stage}
+	}
+	base, ok := suggest.RuleSpecFor(bodyOf(all), e.cmd, stages, opts.providers)
+	if !ok {
 		writef(w, "No rule for %s: no command in this plan names a provider, and a rule needs at least one; "+
 			"pass --providers p1,p2 to give it some. It is approved just this once.\n", clean(e.id))
 		return nil, nil //nolint:nilnil // nil means no rule
@@ -257,7 +243,7 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 		pattern = rules.Generalize(e.cmd)
 	}
 	for {
-		spec := ruleSpec(in, e, pattern, opts.stages, providers)
+		spec := ruleSpec(in, e, base, pattern)
 		fs := showPattern(w, mode, all, spec)
 		nothing := rules.MatchesNothing(fs)
 		if p == nil || mode == allowExact {
@@ -279,28 +265,6 @@ func chooseRule(ctx context.Context, p *prompter, w io.Writer, in *lastv1alpha1.
 			pattern = lastv1alpha1.ArgvPattern{Argv: strings.Fields(line)}
 		}
 	}
-}
-
-// providersFor is the providers of e's rule: e's own; else, for a command that
-// names none, the sorted union of the providers of every command in the plan
-// (a rule needs at least one); else opts.providers.
-func providersFor(e entry, all []entry, opts allowOpts) []string {
-	if len(e.cmd.Providers) > 0 {
-		return slices.Clone(e.cmd.Providers)
-	}
-	var union []string
-	for _, o := range all {
-		for _, p := range o.cmd.Providers {
-			if !slices.Contains(union, p) {
-				union = append(union, p)
-			}
-		}
-	}
-	slices.Sort(union)
-	if len(union) == 0 {
-		return slices.Clone(opts.providers)
-	}
-	return union
 }
 
 // showPattern prints a candidate rule's pattern, its lint warnings, and the

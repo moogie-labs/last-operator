@@ -49,7 +49,8 @@ func all(vs ...Verdict) Verdict {
 // contained only by a "...". Per position: a narrow position that matches exactly
 // one string (literalOf) is decided by Match; identical positions are equal;
 // anything is inside "*"; "[!-]*" contains a glob whose first character can't be
-// "-". Everything else (glob in glob, a non-literal "re:") is Unknown, as is a
+// "-"; a broad position that matches one string never contains a glob with a
+// "*" or "?". Everything else (glob in glob, a non-literal "re:") is Unknown, as is a
 // pattern that matches nothing (a KindNothing lint finding). No wins over Unknown.
 func Contains(broad, narrow []string) Verdict {
 	if matchesNothing(broad) || matchesNothing(narrow) {
@@ -95,7 +96,34 @@ func containsArg(b, n string) Verdict {
 	case b == positionalValue && !strings.HasPrefix(n, regexPrefix) && !mayStartWithDash(n):
 		return Yes
 	}
+	if _, ok := literalOf(b); ok && !strings.HasPrefix(n, regexPrefix) && hasWildcard(n) {
+		// b matches one string. n matches something, and a "*" or "?" in it can
+		// match another character too, so n matches at least two strings.
+		return No
+	}
 	return Unknown
+}
+
+// hasWildcard reports whether glob holds a "*" or "?" outside an escape and a
+// class. glob is well formed.
+func hasWildcard(glob string) bool {
+	rs := []rune(glob)
+	for i := 0; i < len(rs); i++ {
+		switch rs[i] {
+		case '*', '?':
+			return true
+		case '\\':
+			i++
+		case '[':
+			var scratch strings.Builder
+			end, ok := writeClass(&scratch, rs, i+1)
+			if !ok {
+				return false
+			}
+			i = end
+		}
+	}
+	return false
 }
 
 // mayStartWithDash reports whether glob's first element (a character, an escaped

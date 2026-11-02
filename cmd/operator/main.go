@@ -48,7 +48,7 @@ func main() {
 	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
-	var gatewayAddr, gatewayTokenFile string
+	var gatewayAddr, gatewayTokenFile, systemNamespace string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -57,6 +57,8 @@ func main() {
 	flag.StringVar(&gatewayAddr, "gateway-address", "last-gateway.last-gateway.svc:9090", "The gateway's gRPC address.")
 	flag.StringVar(&gatewayTokenFile, "gateway-token-file", "/var/run/secrets/last-operator/gateway/token",
 		"The projected ServiceAccount token (audience last-gateway) sent with every gateway call.")
+	flag.StringVar(&systemNamespace, "system-namespace", "last-system",
+		"The namespace that holds cluster-wide objects, such as Cluster-target rule suggestions.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -180,14 +182,23 @@ func main() {
 		os.Exit(1)
 	}
 	gw := gatewayv1.NewGatewayServiceClient(conn)
+	recorder := mgr.GetEventRecorder("last-operator")
+	suggestions := &controller.SuggestionCreator{
+		Client:          mgr.GetClient(),
+		Reader:          mgr.GetAPIReader(),
+		Recorder:        recorder,
+		SystemNamespace: systemNamespace,
+		MaxPending:      controller.DefaultMaxPending,
+	}
 	if err := (&controller.IntentReconciler{
-		Client:     mgr.GetClient(),
-		Reader:     mgr.GetAPIReader(),
-		Scheme:     mgr.GetScheme(),
-		Gateway:    gw,
-		Planner:    &agent.Planner{LLM: gw},
-		Recorder:   mgr.GetEventRecorder("last-operator"),
-		RetryDelay: 5 * time.Second,
+		Client:      mgr.GetClient(),
+		Reader:      mgr.GetAPIReader(),
+		Scheme:      mgr.GetScheme(),
+		Gateway:     gw,
+		Planner:     &agent.Planner{LLM: gw},
+		Recorder:    recorder,
+		RetryDelay:  5 * time.Second,
+		Suggestions: suggestions,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "intent")
 		os.Exit(1)

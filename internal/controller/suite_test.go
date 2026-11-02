@@ -87,7 +87,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	intentReconciler = &IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw, Reader: mgr.GetAPIReader(),
 		Planner: &agent.Planner{LLM: gw}, Recorder: mgr.GetEventRecorder("last-operator"),
-		RetryDelay: 10 * time.Millisecond, Now: clockNow}
+		RetryDelay: 10 * time.Millisecond, Now: clockNow,
+		Suggestions: &SuggestionCreator{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
+			Recorder: mgr.GetEventRecorder("last-operator"), SystemNamespace: "last-system", MaxPending: DefaultMaxPending}}
 	Expect(intentReconciler.SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()
