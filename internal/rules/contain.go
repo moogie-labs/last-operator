@@ -50,8 +50,10 @@ func all(vs ...Verdict) Verdict {
 // one string (literalOf) is decided by Match; identical positions are equal;
 // anything is inside "*"; "[!-]*" contains a glob whose first character can't be
 // "-"; a broad position that matches one string never contains a glob with a
-// "*" or "?". Everything else (glob in glob, a non-literal "re:") is Unknown, as is a
-// pattern that matches nothing (a KindNothing lint finding). No wins over Unknown.
+// "*" or "?"; and a glob is not contained when a string it matches (its witness)
+// is one broad does not match. Everything else (glob in glob, a non-literal "re:")
+// is Unknown, as is a pattern that matches nothing (a KindNothing lint finding).
+// No wins over Unknown.
 func Contains(broad, narrow []string) Verdict {
 	if matchesNothing(broad) || matchesNothing(narrow) {
 		return Unknown
@@ -96,12 +98,68 @@ func containsArg(b, n string) Verdict {
 	case b == positionalValue && !strings.HasPrefix(n, regexPrefix) && !mayStartWithDash(n):
 		return Yes
 	}
-	if _, ok := literalOf(b); ok && !strings.HasPrefix(n, regexPrefix) && hasWildcard(n) {
+	if strings.HasPrefix(n, regexPrefix) {
+		return Unknown
+	}
+	if _, ok := literalOf(b); ok && hasWildcard(n) {
 		// b matches one string. n matches something, and a "*" or "?" in it can
 		// match another character too, so n matches at least two strings.
 		return No
 	}
+	if w, ok := witness(n); ok && matchArg(n, w) && !matchArg(b, w) {
+		return No // n matches w and b does not
+	}
 	return Unknown
+}
+
+// witnessCandidates are the characters, after a class's own, tried as the
+// member of a class in witness.
+const witnessCandidates = "xa0A_."
+
+// witness returns a string glob may match: each "*" and "?" becomes "x", an
+// escaped character itself, and a class the first of its own characters or of
+// witnessCandidates that it matches. ok is false for a malformed glob or a class
+// none of those match. The result is a guess: callers check it with matchArg.
+func witness(glob string) (string, bool) {
+	rs := []rune(glob)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		switch rs[i] {
+		case '*', '?':
+			b.WriteByte('x')
+		case '\\':
+			i++
+			if i >= len(rs) {
+				return "", false
+			}
+			b.WriteRune(rs[i])
+		case '[':
+			var class strings.Builder
+			end, ok := writeClass(&class, rs, i+1)
+			if !ok {
+				return "", false
+			}
+			re := compile("w:"+class.String(), func() (string, bool) { return "^" + class.String() + "$", true })
+			if re == nil {
+				return "", false
+			}
+			found := false
+			for _, c := range string(rs[i+1:end]) + witnessCandidates {
+				if re.MatchString(string(c)) {
+					b.WriteRune(c)
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", false
+			}
+			i = end
+		default:
+			b.WriteRune(rs[i])
+		}
+	}
+	return b.String(), true
 }
 
 // hasWildcard reports whether glob holds a "*" or "?" outside an escape and a
