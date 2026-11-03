@@ -29,6 +29,29 @@ func (d *day2) scriptFor(name string, plans ...*lastv1alpha1.Plan) {
 	d.script(plans...)
 }
 
+// suggestFor scripts the answer to the suggest call (M7 design S10) for the
+// Intent ns/name: one pattern per argv in patterns, each for entry. A suggest
+// conversation always takes the first answer.
+func (d *day2) suggestFor(name, entry string, patterns ...[]string) {
+	d.t.Helper()
+	type suggestion struct {
+		Entry     string   `json:"entry"`
+		Argv      []string `json:"argv"`
+		Rationale string   `json:"rationale"`
+	}
+	var reply struct {
+		Suggestions []suggestion `json:"suggestions"`
+	}
+	for _, p := range patterns {
+		reply.Suggestions = append(reply.Suggestions, suggestion{Entry: entry, Argv: p, Rationale: "Scripted for " + name})
+	}
+	answer, err := json.Marshal(reply)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	d.setScript(llm.SuggestScriptPrefix+llm.ScriptKey(d.ns+"/"+name), []string{string(answer)})
+}
+
 // nginxPlan is the plan for an nginx Deployment called name. Its argv put every
 // value that differs between two such plans after the three literals that
 // rules.Generalize keeps, or in a flag value, so one generalized rule covers both.

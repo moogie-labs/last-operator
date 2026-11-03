@@ -136,6 +136,12 @@ func (d *day2) script(plans ...*lastv1alpha1.Plan) {
 		}
 		answers = append(answers, a)
 	}
+	d.setScript(d.key, answers)
+}
+
+// setScript sets the scripted model's answers for ConfigMap key key, leaving other keys alone.
+func (d *day2) setScript(key string, answers []string) {
+	d.t.Helper()
 	script, err := json.Marshal(answers)
 	if err != nil {
 		d.t.Fatal(err)
@@ -148,7 +154,7 @@ func (d *day2) script(plans ...*lastv1alpha1.Plan) {
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
-	cm.Data[d.key] = string(script)
+	cm.Data[key] = string(script)
 	if err := d.crc.Update(ctx, &cm); err != nil {
 		d.t.Fatal(err)
 	}

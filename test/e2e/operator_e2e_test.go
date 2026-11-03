@@ -126,14 +126,21 @@ func verifyAuditChain(t *testing.T) {
 	if err := os.WriteFile(pub, []byte(pubPEM+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := runLast(env{
+	out, err := runLast(auditStoreEnv(t, chain), "audit", "verify", "--pubkey-file", pub)
+	if err != nil {
+		t.Fatalf("audit verify: %v\n%s", err, out)
+	}
+}
+
+// auditStoreEnv is the environment that points kubectl last audit at chain in
+// the bundled store, as its reader.
+func auditStoreEnv(t *testing.T, chain string) env {
+	t.Helper()
+	return env{
 		"LAST_AUDIT_ENDPOINT": "http://" + portForward(t, "last-audit", "svc/last-rustfs", "9000"),
 		"LAST_AUDIT_BUCKET":   "last-audit", "LAST_AUDIT_CHAIN_ID": chain,
 		"AWS_ACCESS_KEY_ID":     secretValue(t, "last-audit", "last-audit-reader", "accessKey"),
 		"AWS_SECRET_ACCESS_KEY": secretValue(t, "last-audit", "last-audit-reader", "secretKey"),
-	}, "audit", "verify", "--pubkey-file", pub)
-	if err != nil {
-		t.Fatalf("audit verify: %v\n%s", err, out)
 	}
 }
 
