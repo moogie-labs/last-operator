@@ -1444,9 +1444,14 @@ created at three points:
 | `RepeatedApproval` | A command group has been approved manually `repeatThreshold` times (counted via `QueryAudit`). Commands are grouped by binary, leading subcommands (the first non-flag arguments, up to 3), provider set, and stage. | A rule covering those approvals |
 | `PeriodicReview` | Every `reviewInterval` | Consolidated rules from recent audit history (e.g. merging several narrow rules), and Cluster rules for CommandRules identical in several namespaces |
 
-**PlanTime.** While a plan waits in `AwaitingApproval`, the operator
-runs one PlanTime step for it, after reading the approvals, so a plan
-that is already approved never waits on it. `status.plan.suggested:
+**PlanTime.** While a plan waits in `AwaitingApproval` and is not yet
+approved, its reconcile queues one PlanTime step for it on the
+leader-only suggestion runner and returns; the step runs there, off the
+reconcile, so an approval that arrives during its suggest call is acted
+on at once. Steps queued twice for the same Intent and plan hash run
+once, and a step whose plan no longer waits, or is already marked, is
+dropped. When it is done it marks the plan, only if that same plan still
+waits for an approval: `status.plan.suggested:
 true` marks the step done, even when it made nothing, and a new plan
 starts unmarked. Plans that run without an approval (Auto, or fully
 covered by rules) get no step. The step makes one `CallLLM` with
@@ -1463,8 +1468,8 @@ created or found. A suggest call that fails, times out or returns
 something unparseable makes no suggestion, raises a `SuggestionFailed`
 event, is not retried, and still marks the plan suggested; a scripted
 provider with no `_suggest.` key for the Intent means no proposal and
-no event. The step never fails the Intent or holds up its approval, and
-an Intent deleted during it just ends it. Discovery commands get no
+no event. The step never fails the Intent, never holds up its approval
+or a reconcile, and an Intent deleted during it just ends it. Discovery commands get no
 PlanTime suggestions.
 
 **RepeatedApproval.** A leader-only runner in the operator scans a
@@ -1497,8 +1502,15 @@ suggestion, only a `SuggestionFailed` event; a failed call also raises
 one, and the merge is still tried. The rule gets the group's stage
 class and providers, the union of the examples' egress and an exact
 install pattern per install command; a group whose commands name no
-provider gets no suggestion. Target: `Namespace`. Approvals of a deleted
-Intent stop counting, because its audit index is gone.
+provider gets no suggestion. Target: `Namespace`. A create the API
+server refuses for good (invalid, too large, or forbidden) raises
+`SuggestionFailed`, and the group is not proposed again until it gains
+an approval or the next review; any other failure is retried with the
+next scan. Either way the scan goes on with the namespace's other
+groups. The runner keeps, per Intent, only the newest 200 commands it
+read (the size of the gateway's index), without their files, and each
+review drops what it holds of Intents that are gone. Approvals of a
+deleted Intent stop counting, because its audit index is gone.
 
 **PeriodicReview.** The same runner reviews every `reviewInterval`
 (default 24h, 1h to 720h), with ±10% jitter, from a timer in memory that
@@ -1535,7 +1547,10 @@ cover. A suggestion is named `sugg-<hash10>`, the first 10 hex
 characters of the SHA-256 of the canonical JSON of `{targetScope,
 namespace, proposed}`, so the same proposal from any trigger is one
 object, and creating a name that already exists counts as done. The
-label `last.moogie-labs.com/intent` names the Intent that prompted it.
+label `last.moogie-labs.com/intent` names the Intent that prompted it,
+when the Intent's name is a valid label value (63 characters at most);
+otherwise the suggestion has no such label. Examples keep no `files` and
+no `reason`.
 A namespace holds at most 100 Pending suggestions; beyond that the
 operator creates none and emits `SuggestionLimit`. A created suggestion
 emits `SuggestionCreated`. `Cluster`-target suggestions live in the
@@ -1561,8 +1576,10 @@ shown as fact (M7 design §2, §5).
   or not by the match; and every place the proposal is broader than the
   rule the CLI's `g` choice would create (`suggest.Broader`: pattern
   positions, extra stages, providers and egress, and install entries
-  that are not exact). Outside an approval, `g` is worked out for the
-  first example at the proposal's first stage; a suggestion with no
+  that are not exact), plus a scope line when a `Cluster` suggestion is
+  compared with `g`'s namespaced rule. Outside an approval, `g` is worked
+  out for the first example at the proposal's first stage, and labelled
+  as built from that operator-proposed example; a suggestion with no
   examples gets no comparison, and `show` says so. The rationale, the
   description and the examples are labelled "operator-proposed", every
   operator string is passed through `suggest.Sanitize`, and multi-line
@@ -1574,7 +1591,8 @@ shown as fact (M7 design §2, §5).
   matches nothing or lets code vary, pointing at writing the rule by
   hand. It then creates the rule **as the user**, named after the
   suggestion: a `CommandRule` in the suggestion's namespace, or a
-  `ClusterCommandRule` for target `Cluster`, with the proposed spec and
+  `ClusterCommandRule` for target `Cluster`, with the proposed spec, its
+  description (if any) behind "Suggested by the operator: ", and
   `source {createdFrom: suggestion, suggestionRef: {name}, createdBy:
   <user>}`. Only then does it update the suggestion to `decision:
   Accepted` with `decidedBy` from SelfSubjectReview, using the
@@ -2224,6 +2242,9 @@ proposal's canonical JSON and `proposedHash` is `sha256:<hex>` of it. The
 gateway keeps the UID and seq of each one it wrote in the ConfigMap
 `last-suggestion-decisions` in its namespace; a crash between the write
 and the save writes the entry again, a harmless duplicate (M7 design §6).
+It lists suggestions a page at a time and drops from the ConfigMap the
+UIDs of suggestions that no longer exist. A suggestion decided and
+deleted between two polls is never audited.
 
 **Entry types:** `gateway.start`, `checkpoint`, `phase.begin`,
 `phase.end`, `llm.request`, `llm.response`, `command.start`,

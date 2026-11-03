@@ -412,6 +412,12 @@ An Intent that has executed is not frozen.
   needs create on CommandRule (or ClusterCommandRule for `Cluster` suggestions).
 - **Rules created before M7 have no `createdBy`.** Their `source`, if any, says
   only how they were made.
+- **Rules with a `source` can only be re-created by the user named in its
+  `createdBy`.** The `last-rules` policy refuses a create whose
+  `source.createdBy` is not the requester, so a Velero restore, a GitOps
+  re-apply or a migration of such rules is refused. When you restore or copy
+  rules, strip `spec.source` or rewrite `source.createdBy` to the user that
+  applies them (for example `yq 'del(.spec.source)'`).
 
 ## Demo against Claude (opt-in)
 
