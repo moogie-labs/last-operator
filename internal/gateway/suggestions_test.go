@@ -3,10 +3,18 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/audit"
@@ -105,5 +113,99 @@ func TestAWriteFailureLeavesTheUIDUnrecorded(t *testing.T) {
 	}
 	if n := len(decidedEntries(e)); n != 1 {
 		t.Fatalf("entries = %d, want 1", n)
+	}
+}
+
+// decisionUIDs returns the UIDs last-suggestion-decisions holds.
+func decisionUIDs(t *testing.T, e *testEnv) []string {
+	t.Helper()
+	cm, err := e.kube.CoreV1().ConfigMaps(ns).Get(context.Background(), suggestionDecisionsName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.Sorted(maps.Keys(cm.Data))
+}
+
+func TestADeletedSuggestionIsPrunedFromTheRecord(t *testing.T) {
+	const uid2 = "sug-uid-s2"
+	s1 := decidedSuggestion(lastv1alpha1.SuggestionAccepted)
+	s2 := decidedSuggestion(lastv1alpha1.SuggestionDenied)
+	s2.Name, s2.UID = "s2", uid2
+	e := newTestEnv(t, s1, s2)
+	if err := record(t, e); err != nil {
+		t.Fatal(err)
+	}
+	if got := decisionUIDs(t, e); !slices.Equal(got, []string{"sug-uid-s1", uid2}) {
+		t.Fatalf("recorded = %v", got)
+	}
+	if err := e.crd.Delete(context.Background(), s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := record(t, e); err != nil {
+		t.Fatal(err)
+	}
+	if got := decisionUIDs(t, e); !slices.Equal(got, []string{uid2}) {
+		t.Fatalf("recorded after s1 went = %v, want only s2's", got)
+	}
+	if n := len(decidedEntries(e)); n != 2 {
+		t.Fatalf("entries = %d, want 2", n)
+	}
+}
+
+// pagedSuggestions serves suggestion lists two at a time, by name, whatever
+// limit is asked for, as an API server may, and counts the calls.
+func pagedSuggestions(base client.WithWatch, calls *int) client.WithWatch {
+	return interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			sl, ok := list.(*lastv1alpha1.CommandRuleSuggestionList)
+			if !ok {
+				return c.List(ctx, list, opts...)
+			}
+			*calls++
+			o := (&client.ListOptions{}).ApplyOptions(opts)
+			if o.Limit <= 0 {
+				return errors.New("listed suggestions without a limit")
+			}
+			if err := c.List(ctx, sl); err != nil {
+				return err
+			}
+			slices.SortFunc(sl.Items, func(a, b lastv1alpha1.CommandRuleSuggestion) int { return strings.Compare(a.Name, b.Name) })
+			from := 0
+			if o.Continue != "" {
+				from, _ = strconv.Atoi(o.Continue)
+			}
+			total := len(sl.Items)
+			to := min(from+2, total)
+			sl.Items, sl.Continue = sl.Items[from:to], ""
+			if to < total {
+				sl.Continue = strconv.Itoa(to)
+			}
+			return nil
+		},
+	})
+}
+
+func TestRecordDecisionsReadsEveryPage(t *testing.T) {
+	objs := make([]client.Object, 0, 5)
+	for i := range 5 {
+		s := decidedSuggestion(lastv1alpha1.SuggestionAccepted)
+		s.Name, s.UID = fmt.Sprintf("s%d", i), types.UID(fmt.Sprintf("sug-uid-%d", i))
+		objs = append(objs, s)
+	}
+	e := newTestEnv(t, objs...)
+	calls := 0
+	e.crd = pagedSuggestions(e.crd.(client.WithWatch), &calls)
+	e.g = e.newGateway()
+	if err := record(t, e); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Errorf("list calls = %d, want 3 pages", calls)
+	}
+	if n := len(decidedEntries(e)); n != 5 {
+		t.Fatalf("entries = %d, want 5", n)
+	}
+	if got := decisionUIDs(t, e); len(got) != 5 {
+		t.Fatalf("recorded = %v, want all 5", got)
 	}
 }
