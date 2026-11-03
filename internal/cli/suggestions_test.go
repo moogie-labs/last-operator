@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
+	"github.com/moogie-labs/last-operator/internal/rules"
 )
 
 const (
@@ -278,7 +279,8 @@ func TestAcceptEditRelintsAndRecordsTheEdit(t *testing.T) {
 }
 
 func TestAcceptRerunAfterAFailedDecisionFinishes(t *testing.T) {
-	base := fakeClient(testSuggestion(nil))
+	// With a description, so the rule the rerun finds holds the marked one.
+	base := fakeClient(testSuggestion(func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.Proposed.Description = "Reads web." }))
 	failing := interceptor.NewClient(base, interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			if _, ok := obj.(*lastv1alpha1.CommandRuleSuggestion); ok {
@@ -594,5 +596,93 @@ func TestPlanListsCoveringSuggestions(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "sugg-") {
 		t.Errorf("plan:\n%s", out)
+	}
+}
+
+// clusterAsG is a Pending Cluster suggestion in last-system whose rule is the one
+// g would create for rulePlan's probe "up" at Create: equal in every field
+// suggest.Broader compares, broader only in where it applies.
+func clusterAsG() *lastv1alpha1.CommandRuleSuggestion {
+	return testSuggestion(func(s *lastv1alpha1.CommandRuleSuggestion) {
+		s.Name, s.Namespace = "sugg-clusterasg", sysNS
+		s.Spec.TargetScope, s.Spec.Trigger = lastv1alpha1.RuleScopeCluster, lastv1alpha1.TriggerPeriodicReview
+		s.Spec.Proposed.Stages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate}
+		s.Spec.Proposed.Match = rules.Generalize(s.Spec.Examples[0])
+	})
+}
+
+func TestShowSaysAClusterSuggestionIsBroaderInScope(t *testing.T) {
+	d, out := depsFor(fakeClient(clusterAsG()), "")
+	if err := execute(d, verbRules, verbSugg, "show", "sugg-clusterasg", "-n", sysNS); err != nil {
+		t.Fatalf("show = %v\n%s", err, out)
+	}
+	got := out.String()
+	want := "scope: a ClusterCommandRule applies in every namespace; the rule g would create applies in one namespace only"
+	if !strings.Contains(got, want) || strings.Contains(got, "Nowhere broader") {
+		t.Errorf("show of a Cluster suggestion equal to g lacks the scope line, or says it is nowhere broader:\n%s", got)
+	}
+	if !strings.Contains(got, "for its first (operator-proposed) example at stage Create") {
+		t.Errorf("show does not label the baseline as built from operator text:\n%s", got)
+	}
+
+	// A Namespace suggestion equal to g is nowhere broader.
+	same := testSuggestion(func(s *lastv1alpha1.CommandRuleSuggestion) {
+		s.Spec.Proposed.Stages = []lastv1alpha1.Stage{lastv1alpha1.StageCreate}
+		s.Spec.Proposed.Match = rules.Generalize(s.Spec.Examples[0])
+	})
+	d, out = depsFor(fakeClient(same), "")
+	if err := execute(d, verbRules, verbSugg, "show", suggName); err != nil {
+		t.Fatalf("show = %v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "Nowhere broader") || strings.Contains(out.String(), "scope:") {
+		t.Errorf("show of a Namespace suggestion equal to g:\n%s", out)
+	}
+}
+
+func TestApproveSuggestedChoiceSaysAClusterSuggestionIsBroaderInScope(t *testing.T) {
+	base := fakeClient(ruleIntent(), clusterAsG())
+	// s1 and s2 just this once; probe:up the suggestion; teardown:0.0 just this once.
+	d, out := depsFor(base, "o\no\ns\ny\no\n")
+	if err := execute(d, verbApprove, webName, "--always-allow"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	want := "scope: a ClusterCommandRule applies in every namespace; the rule g would create applies in " + testNS + " only"
+	if got := out.String(); !strings.Contains(got, want) || strings.Contains(got, "Nowhere broader") {
+		t.Errorf("approve's s display lacks the scope line:\n%s", got)
+	}
+	if cl := clusterRules(t, base); len(cl) != 1 {
+		t.Fatalf("cluster rules = %+v", cl)
+	}
+
+	// With --cluster, g creates a ClusterCommandRule too: no scope line.
+	d, out = depsFor(fakeClient(ruleIntent(), clusterAsG()), "o\no\ns\ny\no\n")
+	if err := execute(d, verbApprove, webName, "--always-allow", "--cluster"); err != nil {
+		t.Fatalf("approve --cluster = %v\n%s", err, out)
+	}
+	if got := out.String(); strings.Contains(got, "scope:") || !strings.Contains(got, "Nowhere broader") {
+		t.Errorf("approve --cluster's s display:\n%s", got)
+	}
+}
+
+func TestAcceptMarksTheOperatorsDescription(t *testing.T) {
+	described := func(s *lastv1alpha1.CommandRuleSuggestion) { s.Spec.Proposed.Description = "Reads the web Deployment." }
+	const want = "Suggested by the operator: Reads the web Deployment."
+
+	base := fakeClient(testSuggestion(described))
+	d, out := depsFor(base, "")
+	if err := execute(d, verbRules, verbSugg, "accept", suggName, "--yes"); err != nil {
+		t.Fatalf("accept = %v\n%s", err, out)
+	}
+	if items := nsRules(t, base); len(items) != 1 || items[0].Spec.Description != want {
+		t.Fatalf("rules = %+v, want description %q", items, want)
+	}
+
+	base = fakeClient(ruleIntent(), testSuggestion(described))
+	d, out = depsFor(base, "o\no\ns\ny\no\n")
+	if err := execute(d, verbApprove, webName, "--always-allow"); err != nil {
+		t.Fatalf("approve = %v\n%s", err, out)
+	}
+	if items := nsRules(t, base); len(items) != 1 || items[0].Spec.Description != want {
+		t.Fatalf("rules from approve's s = %+v, want description %q", items, want)
 	}
 }

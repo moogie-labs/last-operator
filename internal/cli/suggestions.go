@@ -158,6 +158,25 @@ type baseline struct {
 	spec lastv1alpha1.CommandRuleSpec
 	what string // the command it is for
 	note string // what the comparison leaves out, if anything
+	// cluster is set when g would create a ClusterCommandRule (approve
+	// --cluster); else g creates a CommandRule in namespace, or in one
+	// namespace when namespace is "".
+	cluster   bool
+	namespace string
+}
+
+// scopeBroader is the line saying a Cluster suggestion reaches further than g's
+// namespaced rule, or "" when it does not. suggest.Broader compares rules, not
+// where they apply.
+func scopeBroader(s *lastv1alpha1.CommandRuleSuggestion, g *baseline) string {
+	if s.Spec.TargetScope != lastv1alpha1.RuleScopeCluster || g.cluster {
+		return ""
+	}
+	where := "one namespace only"
+	if g.namespace != "" {
+		where = g.namespace + " only"
+	}
+	return "scope: a ClusterCommandRule applies in every namespace; the rule g would create applies in " + where
 }
 
 // exampleBaseline is the g rule for a suggestion's first example, at its first
@@ -175,7 +194,9 @@ func exampleBaseline(s *lastv1alpha1.CommandRuleSuggestion) (g *baseline, why st
 		return nil, "No rule can hold its first example, so it is not compared with the rule g would create."
 	}
 	base.Match = rules.Generalize(ex)
-	g = &baseline{spec: base, what: "its first example at stage " + op(string(stage))}
+	// The baseline comes from operator text: say so, so it is not read as a check
+	// against something trusted.
+	g = &baseline{spec: base, what: "its first (" + opLabel + ") example at stage " + op(string(stage))}
 	if len(ex.Providers) == 0 {
 		g.note = "The first example names no provider, so the providers are not compared."
 	}
@@ -243,6 +264,9 @@ func showChecks(w io.Writer, s *lastv1alpha1.CommandRuleSuggestion, spec lastv1a
 		writeln(w, noG)
 	} else {
 		lines := suggest.Broader(spec, g.spec)
+		if l := scopeBroader(s, g); l != "" {
+			lines = append(lines, l)
+		}
 		if len(lines) == 0 {
 			writef(w, "Nowhere broader than the rule g would create for %s (%s).\n", g.what, opPattern(g.spec.Match.Argv))
 		} else {
@@ -283,12 +307,14 @@ func ruleTarget(s *lastv1alpha1.CommandRuleSuggestion) (kind, where string) {
 }
 
 // acceptSuggestion creates s's rule with spec as the user, then records the
-// decision (M7 design §5). The rule comes first, so a user who may not create it
+// decision (M7 design §5). The rule's description, operator text, is marked as
+// the operator's (suggestedDescription). The rule comes first, so a user who may not create it
 // leaves the suggestion Pending; an existing rule with the same spec counts as
 // created, so a second run after a failed decision finishes the job. made names
 // the rule created, if one was.
 func acceptSuggestion(ctx context.Context, k *Kube, w io.Writer, s *lastv1alpha1.CommandRuleSuggestion,
 	spec lastv1alpha1.CommandRuleSpec, user, reason string) (made string, _ error) {
+	spec.Description = suggestedDescription(spec.Description)
 	spec.Source = &lastv1alpha1.RuleSource{CreatedFrom: lastv1alpha1.RuleOriginSuggestion,
 		SuggestionRef: &lastv1alpha1.LocalRef{Name: s.Name}, CreatedBy: user}
 	kind, where := ruleTarget(s)
@@ -327,6 +353,19 @@ func acceptSuggestion(ctx context.Context, k *Kube, w io.Writer, s *lastv1alpha1
 			err, rule, op(s.Name))
 	}
 	return made, nil
+}
+
+// suggestedDescriptionPrefix marks a rule description the operator wrote.
+const suggestedDescriptionPrefix = "Suggested by the operator: "
+
+// suggestedDescription is the description of a rule created from a suggestion
+// whose proposed description is d: d behind suggestedDescriptionPrefix, so no
+// reader of the rule takes it for its creator's words, or "" when d is empty.
+func suggestedDescription(d string) string {
+	if d == "" {
+		return ""
+	}
+	return suggestedDescriptionPrefix + d
 }
 
 // decidedOtherwise is a suggestion someone else decided the other way first.

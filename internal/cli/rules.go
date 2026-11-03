@@ -243,8 +243,8 @@ func chooseRule(ctx context.Context, k *Kube, p *prompter, w io.Writer, in *last
 				// The comparison is with what g would create for this entry.
 				g := base
 				g.Match = rules.Generalize(e.cmd)
-				c, err := chooseSuggestion(ctx, p, w, in.Namespace, e, offers,
-					&baseline{spec: g, what: clean(e.id) + " at stage " + string(stages[0])})
+				c, err := chooseSuggestion(ctx, p, w, in.Namespace, e, offers, &baseline{spec: g,
+					what: clean(e.id) + " at stage " + string(stages[0]), cluster: opts.cluster, namespace: in.Namespace})
 				if err != nil || c != nil {
 					return c, err
 				}
