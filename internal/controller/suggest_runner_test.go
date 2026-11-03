@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
 	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
@@ -40,7 +45,7 @@ func approvedBy(ns, approval string) string { return "approval:" + ns + "/" + ap
 // suggest calls of other specs' Intents never reach it.
 func newRunner() (*SuggestRunner, *fakeGateway) {
 	f := newFakeGateway(k8sClient)
-	return &SuggestRunner{Creator: intentReconciler.Suggestions, Gateway: f, Client: k8sClient, Debounce: time.Minute}, f
+	return &SuggestRunner{Creator: suiteRunner.Creator, Gateway: f, Client: k8sClient, Debounce: time.Minute}, f
 }
 
 // createIntents creates an Intent per name in ns; with no planning script they
@@ -58,6 +63,29 @@ func setSuggestionsConfig(cfg lastv1alpha1.SuggestionsConfig) {
 		Spec: lastv1alpha1.OperatorConfigSpec{Suggestions: &cfg}}
 	Expect(k8sClient.Create(ctx, op)).To(Succeed())
 	DeferCleanup(func() { Expect(k8sClient.Delete(ctx, op)).To(Succeed()) })
+}
+
+// refusingClient fails each suggestion create refuse returns an error for.
+type refusingClient struct {
+	client.Client
+	refuse func(*lastv1alpha1.CommandRuleSuggestion) error
+}
+
+func (c refusingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if s, ok := obj.(*lastv1alpha1.CommandRuleSuggestion); ok {
+		if err := c.refuse(s); err != nil {
+			return err
+		}
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// refusingCreator is the suite's SuggestionCreator with suggestion creates
+// that refuse fails.
+func refusingCreator(refuse func(*lastv1alpha1.CommandRuleSuggestion) error) *SuggestionCreator {
+	c := *suiteRunner.Creator
+	c.Client = refusingClient{Client: c.Client, refuse: refuse}
+	return &c
 }
 
 // testClock is a clock specs move by hand.
@@ -277,6 +305,132 @@ var _ = Describe("RepeatedApproval suggestions", func() {
 		By("any other QueryAudit failure fails the scan")
 		f.updateScript(key("gone"), func(s *script) { s.queryErr = status.Error(codes.Unavailable, "down") })
 		Expect(runner.ScanRepeated(ctx, ns)).To(MatchError(ContainSubstring("down")))
+	})
+
+	It("a create refused for good does not stop the namespace's other groups, and its group is not asked again", func() {
+		createIntents(ns, "a", "b", "c", "d", "e", "f")
+		for _, n := range []string{"a", "b", "c"} {
+			f.seedCommand(key(n), create, podsCmd("web-"+n), approvedBy(ns, "appr-"+n))
+		}
+		for _, n := range []string{"d", "e", "f"} {
+			f.seedCommand(key(n), create, k8sStep("s1", argKubectl, argGet, "svc", "web-"+n), approvedBy(ns, "appr-"+n))
+		}
+		runner.Creator = refusingCreator(func(s *lastv1alpha1.CommandRuleSuggestion) error {
+			if slices.Contains(s.Spec.Proposed.Match.Argv, argPods) {
+				return apierrors.NewRequestEntityTooLargeError("limit is 3145728")
+			}
+			return nil
+		})
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		svcAny := lastv1alpha1.CommandRuleSpec{Stages: stages(create), Providers: []string{providerK8s},
+			Match: lastv1alpha1.ArgvPattern{Argv: []string{argKubectl, argGet, "svc", anyValue}}}
+		Expect(suggestionsIn(ns)).To(ConsistOf(HaveField("ObjectMeta.Name", suggestionName(ns, svcAny))))
+		Eventually(func() []string { return eventNotes(key("c"), ReasonSuggestionFailed) }).Should(
+			ConsistOf(ContainSubstring("Could not create the suggestion")))
+
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		Expect(f.suggestRequests(key("c"))).To(HaveLen(1), "no second suggest call for the refused group")
+		Expect(f.suggestRequests(key("f"))).To(HaveLen(1))
+	})
+
+	It("a create that fails for now does not stop the namespace's other groups, and its group is proposed again", func() {
+		createIntents(ns, "a", "b", "c", "d", "e", "f")
+		for _, n := range []string{"a", "b", "c"} {
+			f.seedCommand(key(n), create, podsCmd("web-"+n), approvedBy(ns, "appr-"+n))
+		}
+		for _, n := range []string{"d", "e", "f"} {
+			f.seedCommand(key(n), create, k8sStep("s1", argKubectl, argGet, "svc", "web-"+n), approvedBy(ns, "appr-"+n))
+		}
+		runner.Creator = refusingCreator(func(s *lastv1alpha1.CommandRuleSuggestion) error {
+			if slices.Contains(s.Spec.Proposed.Match.Argv, argPods) {
+				return apierrors.NewServiceUnavailable("etcd is down")
+			}
+			return nil
+		})
+		Expect(runner.ScanRepeated(ctx, ns)).To(MatchError(ContainSubstring("etcd is down")))
+		Expect(suggestionsIn(ns)).To(HaveLen(1), "the svc group's suggestion")
+
+		runner.Creator = suiteRunner.Creator
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		Expect(suggestionsIn(ns)).To(HaveLen(2))
+		Expect(f.suggestRequests(key("c"))).To(HaveLen(2))
+		Expect(f.suggestRequests(key("f"))).To(HaveLen(1))
+	})
+
+	It("suggests for an Intent whose name is too long for a label value, without the label", func() {
+		long := strings.Repeat("x", 70)
+		createIntents(ns, "a", "b", long)
+		f.seedCommand(key("a"), create, podsCmd("web"), approvedBy(ns, "appr-a"))
+		f.seedCommand(key("b"), create, podsCmd("api"), approvedBy(ns, "appr-b"))
+		f.seedCommand(key(long), create, podsCmd("db"), approvedBy(ns, "appr-c"))
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		got := getSuggestion(ns, suggestionName(ns, podsAnySpec))
+		Expect(got.Labels).NotTo(HaveKey(labelIntent))
+		Expect(f.suggestRequests(key(long))).To(HaveLen(1))
+	})
+
+	It("keeps no files or reason, in its audit copy or in examples", func() {
+		createIntents(ns, "a", "b", "c")
+		var plain []lastv1alpha1.Command
+		for _, n := range []string{"a", "b", "c"} {
+			c := podsCmd(n)
+			plain = append([]lastv1alpha1.Command{c}, plain...)
+			c.Reason = "look at " + n
+			c.Files = map[string]string{"/work/big": strings.Repeat("x", 4096)}
+			f.seedCommand(key(n), create, c, approvedBy(ns, "appr-"+n))
+		}
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		Expect(getSuggestion(ns, suggestionName(ns, podsAnySpec)).Spec.Examples).To(Equal(plain))
+		for _, n := range []string{"a", "b", "c"} {
+			for _, c := range runner.audits[key(n)].cmds {
+				Expect(c.cmd.Files).To(BeNil())
+				Expect(c.cmd.Reason).To(BeEmpty())
+			}
+		}
+	})
+
+	It("keeps only the newest 200 commands of an Intent", func() {
+		createIntents(ns, "a")
+		var last uint64
+		for i := range 230 {
+			f.seedCommand(key("a"), create, podsCmd(fmt.Sprintf("n%03d", i)), approvedBy(ns, "appr-a"))
+		}
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		cmds := runner.audits[key("a")].cmds
+		Expect(cmds).To(HaveLen(maxCachedCommands))
+		Expect(cmds[len(cmds)-1].cmd.Run.Argv).To(Equal(podsCmd("n229").Run.Argv))
+		Expect(cmds[0].cmd.Run.Argv).To(Equal(podsCmd("n030").Run.Argv))
+		last = runner.audits[key("a")].seq
+
+		f.seedCommand(key("a"), create, podsCmd("n230"), approvedBy(ns, "appr-a"))
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		cmds = runner.audits[key("a")].cmds
+		Expect(cmds).To(HaveLen(maxCachedCommands))
+		Expect(cmds[0].cmd.Run.Argv).To(Equal(podsCmd("n031").Run.Argv))
+		Expect(runner.audits[key("a")].seq).To(BeNumerically(">", last))
+	})
+
+	It("Review drops the audit copy of Intents that are gone, and the scan times of namespaces that are", func() {
+		createIntents(ns, "a")
+		f.seedCommand(key("a"), create, podsCmd("web"), approvedBy(ns, "appr-a"))
+		Expect(runner.ScanRepeated(ctx, ns)).To(Succeed())
+		Expect(runner.audits).To(HaveKey(key("a")))
+		runner.Queue("gone-namespace")
+		Expect(runner.due(time.Now())).To(ContainElement("gone-namespace"))
+
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur := getIntent(key("a"))
+			controllerutil.RemoveFinalizer(cur, lastv1alpha1.FinalizerTeardown)
+			return k8sClient.Update(ctx, cur)
+		})).To(Succeed())
+		Expect(k8sClient.Delete(ctx, getIntent(key("a")))).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key("a"), &lastv1alpha1.Intent{}))
+		}).Should(BeTrue())
+
+		Expect(runner.Review(ctx)).To(Succeed())
+		Expect(runner.audits).NotTo(HaveKey(key("a")))
+		Expect(runner.lastScan).NotTo(HaveKey("gone-namespace"))
 	})
 
 	It("queues a scan of the namespace after a successful EndPhase", func() {

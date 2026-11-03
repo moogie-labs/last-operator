@@ -190,7 +190,7 @@ func main() {
 		SystemNamespace: systemNamespace,
 		MaxPending:      controller.DefaultMaxPending,
 	}
-	// The RepeatedApproval and PeriodicReview triggers run on the leader only.
+	// The suggestion triggers run on the leader only.
 	runner := &controller.SuggestRunner{
 		Creator:  suggestions,
 		Gateway:  gw,
@@ -202,15 +202,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.IntentReconciler{
-		Client:      mgr.GetClient(),
-		Reader:      mgr.GetAPIReader(),
-		Scheme:      mgr.GetScheme(),
-		Gateway:     gw,
-		Planner:     &agent.Planner{LLM: gw},
-		Recorder:    recorder,
-		RetryDelay:  5 * time.Second,
-		Suggestions: suggestions,
-		Runner:      runner,
+		Client:     mgr.GetClient(),
+		Reader:     mgr.GetAPIReader(),
+		Scheme:     mgr.GetScheme(),
+		Gateway:    gw,
+		Planner:    &agent.Planner{LLM: gw},
+		Recorder:   recorder,
+		RetryDelay: 5 * time.Second,
+		Runner:     runner,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "intent")
 		os.Exit(1)

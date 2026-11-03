@@ -88,12 +88,14 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	suggestions := &SuggestionCreator{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(),
 		Recorder: mgr.GetEventRecorder("last-operator"), SystemNamespace: "last-system", MaxPending: DefaultMaxPending}
-	// The suite's runner only records what the reconciler queues: it is never
-	// started, so no scan reaches the shared fake gateway's call logs.
+	// The suite's runner runs the PlanTime steps the reconciler queues, but
+	// only records the scans it queues: its scan loop is never started, so no
+	// scan reaches the shared fake gateway's call logs.
 	suiteRunner = &SuggestRunner{Creator: suggestions, Gateway: gw, Client: k8sClient}
+	suiteRunner.startPlanTime(ctx)
 	intentReconciler = &IntentReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Gateway: gw, Reader: mgr.GetAPIReader(),
 		Planner: &agent.Planner{LLM: gw}, Recorder: mgr.GetEventRecorder("last-operator"),
-		RetryDelay: 10 * time.Millisecond, Now: clockNow, Suggestions: suggestions, Runner: suiteRunner}
+		RetryDelay: 10 * time.Millisecond, Now: clockNow, Runner: suiteRunner}
 	Expect(intentReconciler.SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()

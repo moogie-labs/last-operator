@@ -7,6 +7,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	lastv1alpha1 "github.com/moogie-labs/last-operator/api/v1alpha1"
@@ -54,17 +56,41 @@ func planEntries(stage lastv1alpha1.Stage, body plan.Body) []planEntry {
 	return out
 }
 
-// planTime is the PlanTime trigger (M7 design §4.1), run once for a plan that
-// waits for an approval. It asks the model, in one suggest call, for a pattern
-// for each entry of the plan no allow rule covers, builds each answer into a
-// rule as M6 R13 does, creates whatever survives SuggestionCreator.Create, and
-// marks the plan suggested with the names it created or found in
-// status.suggestedRules. A failed call raises SuggestionFailed and is not
-// retried; the plan is marked suggested all the same. Nothing here fails the
-// Intent or holds up its approval. An Intent deleted meanwhile ends the step;
-// the suggestions already created stay.
-func (r *IntentReconciler) planTime(ctx context.Context, in *lastv1alpha1.Intent) error {
-	if r.Suggestions == nil || in.Status.Plan == nil {
+// planTime is the PlanTime trigger (M7 design §4.1), run by a PlanTime worker
+// for a plan that waited for an approval when its reconcile queued the step. It
+// reads the Intent uncached and runs suggestPlan when the plan with job.hash
+// still waits for an approval and is not marked suggested; otherwise the step
+// is dropped. A deleted Intent ends it quietly.
+func (s *SuggestRunner) planTime(ctx context.Context, job planJob) error {
+	in := &lastv1alpha1.Intent{}
+	switch err := s.Creator.Reader.Get(ctx, job.key, in); {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	}
+	if !waitsWith(in, job.hash) || in.Status.Plan.Suggested {
+		return nil // a new plan gets its own step, and a step runs once per plan
+	}
+	return s.suggestPlan(ctx, in)
+}
+
+// waitsWith reports whether the Intent's plan with hash waits for an approval.
+func waitsWith(in *lastv1alpha1.Intent, hash string) bool {
+	return in.Status.Phase == lastv1alpha1.PhaseAwaitingApproval && in.Status.Plan != nil && in.Status.Plan.Hash == hash
+}
+
+// suggestPlan asks the model, in one suggest call, for a pattern for each entry
+// of the Intent's plan no allow rule covers, builds each answer into a rule as
+// M6 R13 does, creates whatever survives SuggestionCreator.Create, and marks
+// the plan suggested with the names it created or found in
+// status.suggestedRules, if the same plan still waits for an approval. A failed
+// call raises SuggestionFailed and is not retried; the plan is marked suggested
+// all the same. Nothing here fails the Intent, and it runs off the Intent's
+// reconcile, so it never holds up its approval. An Intent deleted meanwhile
+// ends the step; the suggestions already created stay.
+func (s *SuggestRunner) suggestPlan(ctx context.Context, in *lastv1alpha1.Intent) error {
+	if s.Creator == nil || in.Status.Plan == nil {
 		return nil
 	}
 	log := logf.FromContext(ctx)
@@ -73,7 +99,7 @@ func (r *IntentReconciler) planTime(ctx context.Context, in *lastv1alpha1.Intent
 	if stage != lastv1alpha1.StageCreate && stage != lastv1alpha1.StageUpdate {
 		body.Resources = nil // only the steps of such a plan run (rules.PlanCoverage)
 	}
-	rs, err := r.readRules(ctx, in.Namespace)
+	rs, err := s.Creator.readRules(ctx, suggest.Proposal{TargetScope: lastv1alpha1.RuleScopeNamespace, Namespace: in.Namespace})
 	if err != nil {
 		return err
 	}
@@ -92,11 +118,12 @@ func (r *IntentReconciler) planTime(ctx context.Context, in *lastv1alpha1.Intent
 	}
 	var names []string
 	if len(asked) > 0 {
-		answers, err := r.Suggestions.Ask(ctx, r.Gateway, intentRef(in), asked)
+		answers, err := s.Creator.Ask(ctx, s.Gateway, intentRef(in), asked)
 		if err != nil {
-			log.Info("Could not get rule suggestions for the plan", "plan", subject, "reason", err.Error())
-			r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, ReasonSuggestionFailed, actionSuggest,
-				"The suggest call for plan %s failed: %s", subject, clip(describe(err)))
+			log.Info("Could not get rule suggestions for the plan", "intent", client.ObjectKeyFromObject(in), "plan", subject,
+				"reason", err.Error())
+			s.Creator.event(in, nil, corev1.EventTypeWarning, ReasonSuggestionFailed, "The suggest call for plan %s failed: %s",
+				subject, describe(err))
 		}
 		for _, a := range answers {
 			e, ok := byID[a.Entry]
@@ -107,21 +134,28 @@ func (r *IntentReconciler) planTime(ctx context.Context, in *lastv1alpha1.Intent
 			spec.Match = lastv1alpha1.ArgvPattern{Argv: a.Argv}
 			p := suggest.Proposal{TargetScope: lastv1alpha1.RuleScopeNamespace, Namespace: in.Namespace,
 				Trigger: lastv1alpha1.TriggerPlanTime, Rationale: a.Rationale, Spec: spec, Examples: []lastv1alpha1.Command{e.cmd}}
-			name, _, err := r.Suggestions.Create(ctx, p, in)
+			name, _, err := s.Creator.Create(ctx, p, in)
 			switch {
 			case err != nil:
-				log.Info("Could not create a rule suggestion", "entry", e.id, "reason", err.Error())
+				log.Info("Could not create a rule suggestion", "intent", client.ObjectKeyFromObject(in), "entry", e.id,
+					"reason", err.Error())
 			case name != "" && !slices.Contains(names, name):
 				names = append(names, name)
 			}
 		}
 	}
-	err = r.update(ctx, in, func(in *lastv1alpha1.Intent) {
-		if in.Status.Phase != lastv1alpha1.PhaseAwaitingApproval || in.Status.Plan == nil || in.Status.Plan.Hash != subject {
-			return // a new plan gets its own step
+	key := client.ObjectKeyFromObject(in)
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		cur := &lastv1alpha1.Intent{}
+		if err := s.Creator.Reader.Get(ctx, key, cur); err != nil {
+			return err
 		}
-		in.Status.Plan.Suggested = true
-		in.Status.SuggestedRules = names
+		if !waitsWith(cur, subject) {
+			return nil // a new plan gets its own step
+		}
+		cur.Status.Plan.Suggested = true
+		cur.Status.SuggestedRules = names
+		return s.Client.Status().Update(ctx, cur)
 	})
 	if apierrors.IsNotFound(err) {
 		return nil // deleted meanwhile

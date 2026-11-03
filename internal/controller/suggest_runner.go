@@ -44,9 +44,15 @@ const (
 	// auditPage is the page size of the runner's QueryAudit reads, the most
 	// the gateway serves.
 	auditPage = 200
+	// maxCachedCommands is the most command.start entries the runner keeps of
+	// one Intent, the newest. It is the size of the gateway's audit index of an
+	// Intent (maxIndexEntries), which never serves more.
+	maxCachedCommands = 200
 	// runnerTick is how often the runner checks its queue and review timer
 	// besides when Queue wakes it.
 	runnerTick = 5 * time.Second
+	// planTimeWorkers is how many PlanTime steps run at once.
+	planTimeWorkers = 4
 	// repeatEntry is the id every example of a RepeatedApproval group carries
 	// in its suggest call: entries that share an id are one group (suggest.SystemPrompt).
 	repeatEntry = "group"
@@ -72,6 +78,15 @@ type intentAudit struct {
 	cmds []auditedCommand
 }
 
+// add appends c, a command newer than every one a holds, dropping the oldest
+// beyond maxCachedCommands.
+func (a *intentAudit) add(c auditedCommand) {
+	a.cmds = append(a.cmds, c)
+	if n := len(a.cmds); n > maxCachedCommands {
+		a.cmds = slices.Clone(a.cmds[n-maxCachedCommands:]) // a fresh array, so the dropped commands go
+	}
+}
+
 // repeatGroup is the manually approved commands of one RepeatedApproval group.
 type repeatGroup struct {
 	key       string
@@ -81,8 +96,17 @@ type repeatGroup struct {
 	approvals map[string]bool
 }
 
-// SuggestRunner runs the RepeatedApproval and PeriodicReview triggers (M7
-// design §4.2, §4.3) on the leader. Queue asks for a RepeatedApproval scan of
+// planJob is a PlanTime step to run: the Intent, and the hash of the plan
+// that waited for an approval when the step was queued.
+type planJob struct {
+	key  types.NamespacedName
+	hash string
+}
+
+// SuggestRunner runs the three suggestion triggers (M7 design §4) on the
+// leader. QueuePlanTime asks for the PlanTime step of a plan that waits for an
+// approval, which runs on one of planTimeWorkers workers, away from the
+// Intent's reconcile, so the suggest call never holds up an approval. Queue asks for a RepeatedApproval scan of
 // a namespace, which runs at most once per Debounce; Review runs every
 // suggestions.reviewInterval of the OperatorConfig (default 24h), with ±10%
 // jitter, from a timer in memory that a restart starts again. Creates are
@@ -102,6 +126,12 @@ type SuggestRunner struct {
 	wake     chan struct{}
 	queued   map[string]bool      // namespaces waiting for a scan
 	lastScan map[string]time.Time // when each namespace was last scanned from the queue
+	// planWake wakes the PlanTime workers; planQueue holds the steps waiting
+	// to run, and planJobs every step queued or running, so one queued twice
+	// runs once.
+	planWake  chan struct{}
+	planQueue []planJob
+	planJobs  map[planJob]bool
 
 	// work serializes scans and reviews, and guards audits and fired.
 	work   sync.Mutex
@@ -126,8 +156,8 @@ func (s *SuggestRunner) init() {
 	s.once.Do(func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.wake = make(chan struct{}, 1)
-		s.queued, s.lastScan = map[string]bool{}, map[string]time.Time{}
+		s.wake, s.planWake = make(chan struct{}, 1), make(chan struct{}, 1)
+		s.queued, s.lastScan, s.planJobs = map[string]bool{}, map[string]time.Time{}, map[planJob]bool{}
 		s.audits, s.fired = map[types.NamespacedName]*intentAudit{}, map[string]int{}
 		if s.tick <= 0 {
 			s.tick = runnerTick
@@ -201,9 +231,82 @@ func (s *SuggestRunner) due(now time.Time) []string {
 	return out
 }
 
-// Start runs queued scans and the review timer until ctx ends.
+// QueuePlanTime asks for the PlanTime step of the Intent's plan with hash. It
+// never blocks. A step already queued or running for the same plan is not
+// queued again. A nil runner queues nothing.
+func (s *SuggestRunner) QueuePlanTime(key types.NamespacedName, hash string) {
+	if s == nil {
+		return
+	}
+	s.init()
+	job := planJob{key: key, hash: hash}
+	s.mu.Lock()
+	if s.planJobs[job] {
+		s.mu.Unlock()
+		return
+	}
+	s.planJobs[job] = true
+	s.planQueue = append(s.planQueue, job)
+	s.mu.Unlock()
+	s.wakePlanTime()
+}
+
+func (s *SuggestRunner) wakePlanTime() {
+	select {
+	case s.planWake <- struct{}{}:
+	default:
+	}
+}
+
+// nextPlanJob takes the oldest queued PlanTime step, waking another worker
+// when more wait.
+func (s *SuggestRunner) nextPlanJob() (planJob, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.planQueue) == 0 {
+		return planJob{}, false
+	}
+	job := s.planQueue[0]
+	s.planQueue = slices.Delete(s.planQueue, 0, 1)
+	if len(s.planQueue) > 0 {
+		s.wakePlanTime()
+	}
+	return job, true
+}
+
+// startPlanTime starts the PlanTime workers; they stop when ctx ends.
+func (s *SuggestRunner) startPlanTime(ctx context.Context) {
+	s.init()
+	log := logf.FromContext(ctx).WithName("suggestions")
+	for range planTimeWorkers {
+		go func() {
+			for {
+				job, ok := s.nextPlanJob()
+				if !ok {
+					select {
+					case <-ctx.Done():
+						return
+					case <-s.planWake:
+					}
+					continue
+				}
+				if err := s.planTime(ctx, job); err != nil && ctx.Err() == nil {
+					// Not retried: suggestions are advice, and the plan still waits.
+					log.Info("Could not finish the PlanTime suggestion step", "intent", job.key, "plan", job.hash, "reason", err.Error())
+				}
+				s.mu.Lock()
+				delete(s.planJobs, job)
+				s.mu.Unlock()
+			}
+		}()
+	}
+}
+
+// Start runs the PlanTime workers, queued scans and the review timer until
+// ctx ends.
 func (s *SuggestRunner) Start(ctx context.Context) error {
 	s.init()
+	s.startPlanTime(ctx)
 	log := logf.FromContext(ctx).WithName("suggestions")
 	next := s.now().Add(s.reviewInterval(ctx))
 	t := time.NewTicker(s.tick)
@@ -309,6 +412,7 @@ func (s *SuggestRunner) scanRepeated(ctx context.Context, namespace string) erro
 		g.cmds = append(g.cmds, c)
 		g.approvals[c.by] = true
 	}
+	var errs []error
 	for _, key := range slices.Sorted(maps.Keys(groups)) {
 		g := groups[key]
 		fired := namespace + "\x00" + key
@@ -318,10 +422,10 @@ func (s *SuggestRunner) scanRepeated(ctx context.Context, namespace string) erro
 		s.fired[fired] = len(g.approvals)
 		if err := s.proposeGroup(ctx, namespace, g); err != nil {
 			delete(s.fired, fired) // the retried scan proposes it again
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // proposeGroup proposes one rule for a group that reached the threshold. The
@@ -329,7 +433,11 @@ func (s *SuggestRunner) scanRepeated(ctx context.Context, namespace string) erro
 // the one the suggest call is made for and the suggestion is labelled with.
 // The model proposes one pattern for the whole group; the first answer that
 // passes suggest.Vet's own checks is used, else rules.Merge of the examples.
-// When neither gives a pattern there is no suggestion and SuggestionFailed.
+// When neither gives a pattern there is no suggestion and SuggestionFailed. A
+// create the API server refuses for good (finalCreateError) raises
+// SuggestionFailed and returns nil, so the group is not proposed, nor the model
+// asked, again until it gains an approval or a review; any other create error
+// is returned, and the retried scan proposes the group again.
 func (s *SuggestRunner) proposeGroup(ctx context.Context, namespace string, g *repeatGroup) error {
 	log := logf.FromContext(ctx)
 	examples, newest := newestExamples(g.cmds)
@@ -383,7 +491,14 @@ func (s *SuggestRunner) proposeGroup(ctx context.Context, namespace string, g *r
 		p.Rationale = fmt.Sprintf("Commands like these were approved by hand in %d IntentApprovals; this pattern merges the %d newest.",
 			len(g.approvals), len(examples))
 	}
-	if _, _, err := s.Creator.Create(ctx, p, newest); err != nil {
+	switch _, _, err := s.Creator.Create(ctx, p, newest); {
+	case err != nil && finalCreateError(err):
+		log.Info("Could not create a rule suggestion for repeated approvals", "namespace", namespace, "group", g.key,
+			"reason", err.Error())
+		s.Creator.event(newest, nil, corev1.EventTypeWarning, ReasonSuggestionFailed,
+			"Could not create the suggestion %q for commands approved in %d IntentApprovals: %s",
+			strings.Join(p.Spec.Match.Argv, " "), len(g.approvals), err.Error())
+	case err != nil:
 		return fmt.Errorf("creating a repeated-approval suggestion: %w", err)
 	}
 	return nil
@@ -475,7 +590,8 @@ func (s *SuggestRunner) readAudit(ctx context.Context, namespace string) ([]audi
 	return out, nil
 }
 
-// readIntentAudit appends the Intent's command.start entries after a.seq to a.
+// readIntentAudit appends the Intent's command.start entries after a.seq to a,
+// without their files (exampleOf), keeping its newest maxCachedCommands.
 func (s *SuggestRunner) readIntentAudit(ctx context.Context, in *lastv1alpha1.Intent, a *intentAudit) error {
 	for {
 		qctx, cancel := context.WithTimeout(ctx, phaseCallTimeout)
@@ -493,8 +609,8 @@ func (s *SuggestRunner) readIntentAudit(ctx context.Context, in *lastv1alpha1.In
 			if json.Unmarshal(e.GetPayload(), &payload) != nil || e.GetAuthorizedBy() == nil {
 				continue
 			}
-			a.cmds = append(a.cmds, auditedCommand{seq: e.GetSeq(), stage: lastv1alpha1.Stage(e.GetStage()),
-				kind: e.GetAuthorizedBy().GetKind(), by: e.GetAuthorizedBy().GetName(), cmd: payload.Command})
+			a.add(auditedCommand{seq: e.GetSeq(), stage: lastv1alpha1.Stage(e.GetStage()),
+				kind: e.GetAuthorizedBy().GetKind(), by: e.GetAuthorizedBy().GetName(), cmd: exampleOf(payload.Command)})
 		}
 		if !resp.GetMore() || len(resp.GetEntries()) == 0 {
 			return nil
@@ -522,7 +638,8 @@ func (s *SuggestRunner) readRules(ctx context.Context, namespace string) ([]rule
 // lets every group be proposed again, and consolidates the namespace's
 // CommandRules; then it proposes Cluster rules for CommandRules that are
 // identical in two or more namespaces. A failure in one namespace or group
-// does not stop the others; Review returns them all.
+// does not stop the others; Review returns them all. It first drops what the
+// runner holds of Intents and namespaces that are gone.
 func (s *SuggestRunner) Review(ctx context.Context) error {
 	s.init()
 	s.work.Lock()
@@ -536,14 +653,17 @@ func (s *SuggestRunner) Review(ctx context.Context) error {
 		return err
 	}
 	namespaces := map[string]bool{}
+	live := map[types.NamespacedName]types.UID{}
 	for _, in := range intents.Items {
 		namespaces[in.Namespace] = true
+		live[types.NamespacedName{Namespace: in.Namespace, Name: in.Name}] = in.UID
 	}
 	byNamespace := map[string][]lastv1alpha1.CommandRule{}
 	for _, r := range crs.Items {
 		namespaces[r.Namespace] = true
 		byNamespace[r.Namespace] = append(byNamespace[r.Namespace], r)
 	}
+	s.prune(live, namespaces)
 	clear(s.fired)
 	var errs []error
 	for _, ns := range slices.Sorted(maps.Keys(namespaces)) {
@@ -558,6 +678,24 @@ func (s *SuggestRunner) Review(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("promoting rules to cluster scope: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// prune drops the runner's copy of the audit of each Intent not in live (by
+// name and UID), and the last scan time of each namespace not in namespaces.
+// work must be held.
+func (s *SuggestRunner) prune(live map[types.NamespacedName]types.UID, namespaces map[string]bool) {
+	for key, a := range s.audits {
+		if uid, ok := live[key]; !ok || uid != a.uid {
+			delete(s.audits, key)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ns := range s.lastScan {
+		if !namespaces[ns] {
+			delete(s.lastScan, ns)
+		}
+	}
 }
 
 // consolidate proposes one rule for each set of two or more of the

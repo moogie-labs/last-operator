@@ -499,9 +499,10 @@ func replannable(stage lastv1alpha1.Stage) bool {
 // awaitApproval waits for an IntentApproval of the current plan for its stage.
 // A spec edit plans a Create or Update again, abandoning a Remediate. A deletion raises the generation,
 // and spec edits no longer matter, so a Delete plan never goes back to
-// planning for one. While the plan waits, the PlanTime step runs once for it
-// (planTime); it reads the decision first, so a plan already approved is never
-// held up by a suggest call, and a failed step never fails the Intent.
+// planning for one. While the plan waits and is not marked suggested, it
+// queues the plan's PlanTime step on the suggestion runner and returns: the
+// step runs off the reconcile (SuggestRunner.planTime), so a suggest call never
+// holds up the approval, and a failed step never fails the Intent.
 func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.Intent) (ctrl.Result, error) {
 	stage := planStage(in)
 	switch {
@@ -522,10 +523,7 @@ func (r *IntentReconciler) awaitApproval(ctx context.Context, in *lastv1alpha1.I
 		return ctrl.Result{}, r.fail(ctx, in, ReasonApprovalDenied, msg)
 	case !approved:
 		if !in.Status.Plan.Suggested {
-			if err := r.planTime(ctx, in); err != nil {
-				// Not retried: suggestions are advice, and the plan still waits.
-				logf.FromContext(ctx).Info("Could not finish the PlanTime suggestion step", "reason", err.Error())
-			}
+			r.Runner.QueuePlanTime(client.ObjectKeyFromObject(in), in.Status.Plan.Hash)
 		}
 		return ctrl.Result{}, nil // the IntentApproval watch wakes us
 	}

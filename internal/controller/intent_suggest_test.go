@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -283,9 +284,54 @@ var _ = Describe("PlanTime suggestions", func() {
 			})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, getIntent(k))).To(Succeed())
 		})
-		Expect(intentReconciler.planTime(ctx, in)).To(Succeed())
+		Expect(suiteRunner.suggestPlan(ctx, in)).To(Succeed())
 		Expect(suggestionsIn(key.Namespace)).To(ConsistOf(HaveField("ObjectMeta.Name", suggestionName(key.Namespace, applyAnySpec))),
 			"a suggestion already created stays")
+	})
+
+	It("acts on an approval while the plan's suggest call is still running", func() {
+		entered, release := make(chan struct{}, 1), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		DeferCleanup(unblock)
+		gw.setOnSuggest(func(k types.NamespacedName) {
+			if k != key {
+				return
+			}
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		})
+		gw.setScript(key, &script{llm: turns(answer(steps))})
+		gw.setSuggestScript(key, suggestReply(suggest.Answer{Entry: "s1", Argv: applyAny}))
+		createIntent(key, "run web")
+		Eventually(entered).Should(Receive(), "the suggest call has started")
+
+		approve(key, lastv1alpha1.DecisionApprove)
+		Eventually(phase(key)).Should(Equal(lastv1alpha1.PhaseReady), "the approval does not wait for the suggest call")
+		Expect(suggestCalls(key)()).To(Equal(1))
+
+		unblock()
+		name := suggestionName(key.Namespace, applyAnySpec)
+		Eventually(func() []string { return eventNotes(key, "SuggestionCreated") }).Should(ConsistOf(ContainSubstring(name)))
+		Consistently(func() bool { return getIntent(key).Status.Plan.Suggested }).Should(BeFalse(),
+			"the plan no longer waits, so the step leaves its status alone")
+		Expect(getIntent(key).Status.SuggestedRules).To(BeEmpty())
+	})
+
+	It("keeps no files or reason in a suggestion's examples", func() {
+		withFiles := s1
+		withFiles.Reason = "apply the manifest"
+		withFiles.Files = map[string]string{"/work/web.yaml": "kind: Deployment"}
+		gw.setScript(key, &script{llm: turns(answer([]lastv1alpha1.Command{withFiles}))})
+		gw.setSuggestScript(key, suggestReply(suggest.Answer{Entry: "s1", Argv: applyAny}))
+		createIntent(key, "run web")
+
+		Eventually(planSuggested(key)).Should(BeTrue())
+		got := getSuggestion(key.Namespace, suggestionName(key.Namespace, applyAnySpec))
+		Expect(got.Spec.Examples).To(Equal([]lastv1alpha1.Command{s1}))
 	})
 
 	It("makes no suggest call for a plan that runs without approval", func() {

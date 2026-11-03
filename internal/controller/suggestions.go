@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -68,7 +69,9 @@ type SuggestionCreator struct {
 }
 
 // Create vets p and creates it as a Pending CommandRuleSuggestion labelled with
-// the Intent that prompted it. It returns the suggestion's name when it created
+// the Intent that prompted it, when the Intent's name is a valid label value
+// (an Intent name may be longer than a label value can be). Its examples keep
+// no files and no reason (exampleOf). It returns the suggestion's name when it created
 // it or found it already there (created tells which), and "" when p was
 // dropped, skipped as already covered, suppressed by a Denied suggestion, or
 // over the namespace's Pending cap. Each outcome but "already covered" emits its
@@ -138,12 +141,16 @@ func (c *SuggestionCreator) Create(ctx context.Context, p suggest.Proposal, inte
 			"Did not suggest %q: namespace %s already holds %d Pending suggestions", what, ns, limit)
 		return "", false, nil
 	}
+	var examples []lastv1alpha1.Command
+	for _, e := range p.Examples {
+		examples = append(examples, exampleOf(e))
+	}
 	obj := &lastv1alpha1.CommandRuleSuggestion{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: lastv1alpha1.CommandRuleSuggestionSpec{TargetScope: p.TargetScope, Trigger: p.Trigger, Rationale: p.Rationale,
-			Proposed: p.Spec, Examples: p.Examples, Decision: lastv1alpha1.SuggestionPending},
+			Proposed: p.Spec, Examples: examples, Decision: lastv1alpha1.SuggestionPending},
 	}
-	if intent != nil {
+	if intent != nil && len(validation.IsValidLabelValue(intent.Name)) == 0 {
 		obj.Labels = map[string]string{labelIntent: intent.Name}
 	}
 	switch err := c.Client.Create(ctx, obj); {
@@ -154,6 +161,22 @@ func (c *SuggestionCreator) Create(ctx context.Context, p suggest.Proposal, inte
 	}
 	c.event(intent, obj, corev1.EventTypeNormal, ReasonSuggestionCreated, "Suggested the rule %s/%s for %q", ns, name, what)
 	return name, true, nil
+}
+
+// exampleOf is cmd as a suggestion's example holds it: without its files, which
+// a rule never matches and which have no size bound, and without its reason,
+// which is operator text the rule does not need.
+func exampleOf(cmd lastv1alpha1.Command) lastv1alpha1.Command {
+	out := *cmd.DeepCopy()
+	out.Files, out.Reason = nil, ""
+	return out
+}
+
+// finalCreateError reports whether err, from creating a suggestion, would recur
+// however often the create were retried: the API server found the object
+// invalid or too large, or refused the operator (RBAC or admission).
+func finalCreateError(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsRequestEntityTooLargeError(err) || apierrors.IsForbidden(err)
 }
 
 // readRules reads, uncached, the rules a proposal is checked against: every
