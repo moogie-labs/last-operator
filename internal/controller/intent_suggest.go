@@ -62,6 +62,9 @@ func planEntries(stage lastv1alpha1.Stage, body plan.Body) []planEntry {
 // still waits for an approval and is not marked suggested; otherwise the step
 // is dropped. A deleted Intent ends it quietly.
 func (s *SuggestRunner) planTime(ctx context.Context, job planJob) error {
+	if s.Creator == nil {
+		return nil
+	}
 	in := &lastv1alpha1.Intent{}
 	switch err := s.Creator.Reader.Get(ctx, job.key, in); {
 	case apierrors.IsNotFound(err):
