@@ -160,6 +160,13 @@ reading them. --json prints each entry whole, as one line of JSON.`,
 					}
 					var e audit.Entry
 					if err := json.Unmarshal(body, &e); err != nil {
+						if asJSON {
+							// Still one line of JSON, so a reader decoding each line keeps going.
+							if err := json.NewEncoder(cmd.OutOrStdout()).Encode(malformedEntry{Key: o.Key, Error: err.Error()}); err != nil {
+								return err
+							}
+							continue
+						}
 						_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  <malformed: %v>\n", o.Key, err)
 						continue
 					}
@@ -192,6 +199,13 @@ reading them. --json prints each entry whole, as one line of JSON.`,
 	cmd.Flags().BoolVar(&follow, "follow", false, "keep polling for new entries")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "poll interval with --follow")
 	return cmd
+}
+
+// malformedEntry is what audit log --json prints for an object that is not an
+// audit entry.
+type malformedEntry struct {
+	Key   string `json:"key"`
+	Error string `json:"error"`
 }
 
 func printEntry(w io.Writer, e audit.Entry) {

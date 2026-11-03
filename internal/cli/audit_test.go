@@ -157,6 +157,33 @@ func TestAuditLogFiltersByTypeAsJSONFromSeq(t *testing.T) {
 	}
 }
 
+// audit log --json prints an object that is not an entry as one line of JSON
+// naming its key and the error.
+func TestAuditLogJSONReportsAMalformedEntryAsJSON(t *testing.T) {
+	sink, _ := writeChain(t)
+	bad := audit.EntryKey("c1", 2)
+	sink.TamperReplace(bad, []byte("not json"))
+	var out bytes.Buffer
+	if err := execute(testDeps(sink, &out), "audit", "log", "--chain", "c1", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	var malformed []map[string]string
+	n := 0
+	for line := range strings.Lines(out.String()) {
+		n++
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("line %q is not JSON: %v", line, err)
+		}
+		if _, ok := m["error"]; ok {
+			malformed = append(malformed, map[string]string{"key": m["key"].(string), "error": m["error"].(string)})
+		}
+	}
+	if n != 4 || len(malformed) != 1 || malformed[0]["key"] != bad || malformed[0]["error"] == "" {
+		t.Fatalf("lines = %d, malformed = %v\n%s", n, malformed, out.String())
+	}
+}
+
 // F2: verify prints the fingerprint of the key it verified against, on its own line
 // after the (unchanged) OK/FAILED line, so it can be checked out of band.
 func TestAuditVerifyPrintsKeyFingerprint(t *testing.T) {

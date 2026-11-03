@@ -9,6 +9,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/moogie-labs/last-operator/internal/gatewayapi/gatewayv1"
 )
 
 var (
@@ -32,8 +34,9 @@ func NewScripted(kube kubernetes.Interface, namespace, configMap string) *Script
 }
 
 const (
-	// PurposeSuggest is Request.Purpose for a rule suggestion.
-	PurposeSuggest = "suggest"
+	// PurposeSuggest is Request.Purpose for a rule suggestion: the API's own
+	// value, so the two cannot drift.
+	PurposeSuggest = gatewayv1.PurposeSuggest
 	// SuggestScriptPrefix precedes the script key of a suggest call.
 	SuggestScriptPrefix = "_suggest."
 )
