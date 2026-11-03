@@ -277,3 +277,13 @@ The entry has no Intent. The gateway keeps the UIDs it has recorded in a ConfigM
 
 - An escape hatch for teardown written before M6 that fails on a missing object.
 - The breadth of generalized teardown rules from the CLI's `g` choice. M7 only stops the operator from suggesting such rules (S5).
+
+## 15. Deviations recorded during execution
+
+- **The gateway polls decisions instead of using an informer** (§6). Every 30 seconds the leader lists suggestions and writes `suggestion.decided` for each decided one whose UID `last-suggestion-decisions` doesn't hold yet. A decision is audited within about 30 seconds.
+- **`rules.GroupKey` returns `(string, bool)`** (§7). The bool is false for a command that has no group: a script, an empty argv, or an argv with a `${steps.` reference.
+- **`suggest.RuleSpecFor` has no entry ID parameter.** The plan gave it one; nothing needed it, so it takes the plan body, the command, the stages and the extra providers.
+- **Promotion ignores `description` as well as `source`** (§4.3). Two rules that differ only in their description are still identical for promotion to cluster scope.
+- **A wildcard may not stand in for a destructive verb** (S5, §4.2). Both the deterministic merge and `Vet` refuse a pattern whose non-literal position replaces a destructive verb in an example or a merged pattern, as merging `kubectl delete pods web` with `kubectl get pods api` would. Lint alone only sees a wildcard after a literal destructive verb.
+- **The CLI hardcodes `last-system` for Cluster suggestions** (S7, §5). It offers only Cluster suggestions from `last-system`, the namespace admission requires for them, and does not read the operator's configured system namespace.
+- **`kubectl last audit log` gained `--type`, `--from-seq` and `--json`** (§10). `suggestion.decided` has no Intent, so `QueryAudit` never serves it; the e2e test reads it with `audit log --type suggestion.decided --json`.

@@ -2216,6 +2216,15 @@ for instance a `command.start`. It is how a caller counts approvals by kind.
 The `llm.request` and `llm.response` entries of a `purpose: suggest` call are
 audited but not indexed, so `QueryAudit` never serves them (§12).
 
+`suggestion.decided` has no Intent. Within about 30 seconds of a human
+deciding a suggestion, the gateway leader writes one with the payload
+`{targetScope, namespace, name, uid, resourceVersion, trigger, decision,
+decidedBy, decisionReason, proposed, proposedHash}`: `proposed` is the
+proposal's canonical JSON and `proposedHash` is `sha256:<hex>` of it. The
+gateway keeps the UID and seq of each one it wrote in the ConfigMap
+`last-suggestion-decisions` in its namespace; a crash between the write
+and the save writes the entry again, a harmless duplicate (M7 design §6).
+
 **Entry types:** `gateway.start`, `checkpoint`, `phase.begin`,
 `phase.end`, `llm.request`, `llm.response`, `command.start`,
 `command.result`, `credential.issued`, `egress.granted`,
@@ -2338,8 +2347,11 @@ intended for CI, for evaluating a new backend, and for periodic audits.
   the chain, but `verify --expect-head N` also fails if the chain ends
   before seq N. N can come from any external record, for example the
   gateway's `last_audit_chain_seq` metric history.
-- `kubectl last audit log --intent ns/name [--follow]` prints a
-  readable timeline.
+- `kubectl last audit log [--intent ns/name] [--type T] [--from-seq N]
+  [--json] [--follow]` prints a readable timeline, or each entry whole as
+  one line of JSON. `--type` also reaches entries with no Intent, such as
+  `suggestion.decided`, which `QueryAudit` never serves; `--from-seq`
+  starts at a seq without reading the entries before it.
 - The `internal/audit` package is shared by the gateway and the CLI.
 
 ### 14.6 Independent cross-check (documented)
@@ -2598,7 +2610,7 @@ docs/
 | M4 | Image builds + registry | `image.install`; rootless BuildKit build pods; bundled Distribution + nginx front proxy + node-local pull proxy; external registry mode; audit-backed digest index; single flight; coordinated GC with sidecar. **Starts with a spike validating the pull proxy on kind, k3s, EKS, and GKE Standard.** | e2e: a command needing a tool outside the base image (e.g. `awscli`) builds once, and later runs and probes reuse the digest with no rebuild |
 | M5 | Day 2 | Update stage; drift → remediation; teardown with finalizers; Auto modes and layering; adaptive probe intervals + jitter + floor | e2e: edit, drift, and delete flows in Manual and Auto modes |
 | M6 | Allow rules | `CommandRule` / `ClusterCommandRule` + admission; gateway matching (incl. `image.install`); `uncoveredSteps`; `approve --always-allow` with exact/generalized patterns; breadth lint | e2e: a second similar Intent runs without approval because of rules from the first |
-| M7 | Suggestions | `CommandRuleSuggestion` + admission; PlanTime, RepeatedApproval, and PeriodicReview triggers; denied-pattern suppression; `kubectl last rules suggestions` | e2e: a denied suggestion is never re-suggested; a narrower one is |
+| M7 | Suggestions | **Done**; design: `docs/superpowers/specs/2026-11-01-m7-suggestions-design.md`. `CommandRuleSuggestion` + admission; PlanTime, RepeatedApproval, and PeriodicReview triggers; denied-pattern suppression; `kubectl last rules suggestions` | e2e: a denied suggestion is never re-suggested; a narrower one is |
 
 ## 21. Out of scope for v1
 
