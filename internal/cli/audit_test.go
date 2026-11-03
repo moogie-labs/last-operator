@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -103,6 +104,56 @@ func TestAuditLogFiltersByIntent(t *testing.T) {
 	s := out.String()
 	if strings.Count(s, "team-x/web") != 2 || strings.Contains(s, "team-y/db") || strings.Contains(s, "gateway.start") {
 		t.Fatalf("output = %s", s)
+	}
+}
+
+// audit log --type keeps entries of one type, including those with no Intent;
+// --json prints each whole; --from-seq starts at a seq.
+func TestAuditLogFiltersByTypeAsJSONFromSeq(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	sink := audittest.NewMemSink()
+	w, err := audit.Open(context.Background(), sink, audit.NewSigner(key), audit.WriterConfig{ChainID: "c1", Retention: time.Hour}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmdStart := func(intent string) audit.Draft {
+		return audit.Draft{Type: audit.TypeCommandStart, Actor: "operator", Intent: intent, Stage: "Update"}
+	}
+	decided := func(by string) audit.Draft {
+		return audit.Draft{Type: audit.TypeSuggestionDecided, Actor: "gateway", Payload: map[string]string{"decidedBy": by}}
+	}
+	for _, d := range []audit.Draft{cmdStart("ns-1/app"), cmdStart("ns-2/db"), decided("dana"), cmdStart("ns-1/app"), decided("erin")} {
+		if _, err := w.Append(context.Background(), d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The chain is 0 gateway.start, then the drafts as seq 1 to 5.
+	decoded := func(args ...string) []audit.Entry {
+		t.Helper()
+		var out bytes.Buffer
+		if err := execute(testDeps(sink, &out), append([]string{"audit", "log", "--chain", "c1", "--json"}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+		var es []audit.Entry
+		for line := range strings.Lines(out.String()) {
+			var e audit.Entry
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				t.Fatalf("line %q: %v", line, err)
+			}
+			es = append(es, e)
+		}
+		return es
+	}
+	es := decoded("--type", audit.TypeSuggestionDecided)
+	if len(es) != 2 || es[0].Seq != 3 || es[1].Seq != 5 || es[1].Intent != "" || !strings.Contains(string(es[1].Payload), `"decidedBy":"erin"`) {
+		t.Fatalf("--type suggestion.decided = %+v", es)
+	}
+	es = decoded("--from-seq", "3")
+	if len(es) != 3 || es[0].Seq != 3 || es[0].Type != audit.TypeSuggestionDecided || es[2].Seq != 5 {
+		t.Fatalf("--from-seq 3 = %+v", es)
+	}
+	if es := decoded("--type", audit.TypeCommandStart, "--intent", "ns-1/app"); len(es) != 2 {
+		t.Fatalf("--type command.start --intent ns-1/app = %+v", es)
 	}
 }
 

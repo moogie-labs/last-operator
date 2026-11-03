@@ -121,12 +121,17 @@ func newVerifyCommand(d Deps, f *auditFlags) *cobra.Command {
 }
 
 func newLogCommand(d Deps, f *auditFlags) *cobra.Command {
-	var intent string
-	var follow bool
+	var intent, typ string
+	var fromSeq uint64
+	var follow, asJSON bool
 	var interval time.Duration
 	cmd := &cobra.Command{
 		Use:   "log",
-		Short: "Print audit entries, optionally for one Intent",
+		Short: "Print audit entries, optionally for one Intent or of one type",
+		Long: `Print the chain's audit entries in order. --intent keeps one Intent's entries;
+--type keeps entries of one type, including those that belong to no Intent,
+such as suggestion.decided. --from-seq skips the entries before a seq without
+reading them. --json prints each entry whole, as one line of JSON.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := f.requireChain(); err != nil {
 				return err
@@ -136,6 +141,9 @@ func newLogCommand(d Deps, f *auditFlags) *cobra.Command {
 				return err
 			}
 			after := ""
+			if fromSeq > 0 {
+				after = audit.EntryKey(f.chain, fromSeq-1)
+			}
 			for {
 				objs, err := sink.List(cmd.Context(), audit.EntryPrefix(f.chain), after)
 				if err != nil {
@@ -155,9 +163,16 @@ func newLogCommand(d Deps, f *auditFlags) *cobra.Command {
 						_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  <malformed: %v>\n", o.Key, err)
 						continue
 					}
-					if intent == "" || e.Intent == intent {
-						printEntry(cmd.OutOrStdout(), e)
+					if (intent != "" && e.Intent != intent) || (typ != "" && e.Type != typ) {
+						continue
 					}
+					if asJSON {
+						if err := json.NewEncoder(cmd.OutOrStdout()).Encode(e); err != nil {
+							return err
+						}
+						continue
+					}
+					printEntry(cmd.OutOrStdout(), e)
 				}
 				if !follow {
 					return nil
@@ -171,6 +186,9 @@ func newLogCommand(d Deps, f *auditFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&intent, "intent", "", "only entries for this Intent (namespace/name)")
+	cmd.Flags().StringVar(&typ, "type", "", "only entries of this type, such as suggestion.decided")
+	cmd.Flags().Uint64Var(&fromSeq, "from-seq", 0, "start at this seq")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print each entry whole, as one line of JSON")
 	cmd.Flags().BoolVar(&follow, "follow", false, "keep polling for new entries")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "poll interval with --follow")
 	return cmd
